@@ -6,7 +6,8 @@ The inference graph is always the unchanged A2Net-LWGANet-L0 student:
 T1/T2 -> shared LWGANet-L0 -> SWA -> absolute-difference TFM -> A2Net decoder
 ```
 
-Deployment is fixed at **2,913,094 parameters / 2.7475G FLOPs**. Every teacher builder,
+Deployment is fixed at **2,913,094 parameters / approximately 2.75--2.77G THOP FLOPs**
+(2.767634G in the RSML-3 `lsrep` environment). Every teacher builder,
 probe, side head and auxiliary loss lives below `training_auxiliary` and is deleted by
 `switch_to_deploy()` without changing the main output.
 

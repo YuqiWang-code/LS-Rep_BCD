@@ -96,7 +96,9 @@ class Normalize:
     def __call__(self, image, label, state=None):
         image = image.astype(np.float32) / 255.0
         image = (image - self.mean) / self.std
-        label = np.ceil(label.astype(np.float32) / 255.0)
+        # CDD labels are JPEG and contain compression-induced intermediate
+        # grayscale values. A shared >=128 rule is valid for all four datasets.
+        label = (label >= 128).astype(np.float32)
         return image, label
 
 

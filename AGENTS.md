@@ -1,7 +1,20 @@
 # AGENTS.md — LS-Rep_BCD_RSML_3 / SAM-HSD
 
 > Last updated: 2026-09-06  
-> 本文件是当前项目中 AI/Coding Agent 的工作约束。实验上下文仅覆盖 `train_scripts/SAM-HSD/` 中的 Run1 与 Run2(EIR-HSD)，不记录或继承其他旧实验、旧服务器结果表或历史完成状态。
+> 本文件是当前项目中 AI/Coding Agent 的工作约束。实验上下文仅覆盖 `train_scripts/SAM-HSD/` 中的 baseline、Run1 与 Run2(EIR-HSD)，不记录或继承其他旧实验、旧服务器结果表或历史完成状态。
+
+## GitHub 提交流程
+
+完成 `models/` 或 `AGENTS.md` 的修改并通过必要检查后，按以下顺序提交到 GitHub：
+
+```bash
+git add models AGENTS.md
+git status
+git commit -m "Update code"
+git push
+```
+
+执行 `git commit` 前必须先检查 `git status`，确认暂存区只包含本次准备提交的文件；不要把权重、缓存、数据集、日志或无关改动加入提交。
 
 ## 1. 作用域与权威来源
 
@@ -9,6 +22,7 @@
 
 ```text
 train_scripts/SAM-HSD/
+├── baseline/
 ├── Run1/
 └── Run2(EIR-HSD)/
 ```
@@ -100,6 +114,8 @@ python -c "import torch, torchvision, cv2, numpy, scipy, sklearn, PIL, tqdm, ten
 | 数据集 | `/home/yqwang/datasets/CD` |
 | Teacher Cache | `/home/yqwang/datasets/CD_teacher_cache` |
 | 预训练权重 | `/home/yqwang/projects/LS-Rep_BCD_RSML_3/pre-trained_weights` |
+| Baseline checkpoint | `/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/saved_models/SAM-HSD/baseline` |
+| Baseline 训练日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/saved_models/SAM-HSD/baseline` |
 | Run1 checkpoint | `/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/SAM-HSD/Run1` |
 | Run2 checkpoint | `/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/SAM-HSD/Run2` |
 | Run1 launcher 日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/logs/SAM-HSD/Run1` |
@@ -109,12 +125,39 @@ python -c "import torch, torchvision, cv2, numpy, scipy, sklearn, PIL, tqdm, ten
 
 ## 4. 当前 SAM-HSD 实验批次
 
-实验数据集仅为：
+baseline 覆盖四个 canonical 数据集：
+
+- `CDD-CD-256`；
+- `LEVIR-CD-256`；
+- `SYSU-CD-256`；
+- `WHU-CD-256`。
+
+Run1/Run2 实验数据集为：
 
 - `SYSU-CD-256`；
 - `WHU-CD-256`。
 
-### 4.1 Run1：SAM-HSD
+### 4.1 Baseline：A2Net-LWGANet-L0
+
+baseline 使用 `B0/Baseline_A2Net_LWGANet_L0` 配方：只保留 A2Net 主网络与 LWGANet-L0 backbone，不加载 Teacher Cache，不创建 SAM-HSD/EIR-HSD 训练辅助。四个入口脚本为：
+
+```text
+train_scripts/SAM-HSD/baseline/train_cdd.sh
+train_scripts/SAM-HSD/baseline/train_levir.sh
+train_scripts/SAM-HSD/baseline/train_sysu.sh
+train_scripts/SAM-HSD/baseline/train_whu.sh
+train_scripts/SAM-HSD/baseline/smoke_test.sh
+train_scripts/SAM-HSD/baseline/run_gpu0_cdd_sysu.sh
+train_scripts/SAM-HSD/baseline/run_gpu1_levir_whu.sh
+```
+
+默认 GPU 按 CDD/SYSU→0、LEVIR/WHU→1 分配，脚本第一个位置参数可覆盖物理 GPU ID。checkpoint 与训练日志必须使用第 3 节列出的两个独立根目录；不得重新合并到同一目录。
+
+正式训练前先运行 `smoke_test.sh <physical_gpu_id> <batch_size>`。双卡队列固定为 GPU 0 串行执行 CDD→SYSU、GPU 1 串行执行 LEVIR→WHU；队列脚本依赖单数据集脚本自身的完成跳过和精确恢复检查。
+
+baseline 的预训练权重默认使用 `/home/yqwang/projects/LS-Rep_BCD_RSML_3/pre-trained_weights/lwganet_l0_e299.pth`。这是 backbone 初始化权重，不是 Teacher Cache 或训练期外挂。
+
+### 4.2 Run1：SAM-HSD
 
 | ID | 当前脚本语义 |
 |---|---|
@@ -139,7 +182,7 @@ train_scripts/SAM-HSD/Run1/smoke_test.sh
 train_scripts/SAM-HSD/Run1/dry_run_sysu.sh
 ```
 
-### 4.2 Run2：EIR-HSD
+### 4.3 Run2：EIR-HSD
 
 | ID | 当前脚本语义 |
 |---|---|
@@ -171,7 +214,7 @@ train_scripts/SAM-HSD/Run2(EIR-HSD)/dry_run_sysu.sh
 ## 5. 模型与部署约束
 
 - 主学生模型是 A2Net-LWGANet-L0；SAM2 Teacher Cache 和 HSD 辅助结构只允许参与训练。
-- 推理参数量保持 `2,913,094`，256×256 输入 FLOPs 保持约 `2.7475G`。
+- 推理参数量保持 `2,913,094`。256×256 输入以 `2.7475G` 为历史参考值；当前 RSML-3 `lsrep`/THOP 环境稳定实测为 `2.767634G`，代码使用 `±0.03G` 统计容差，不能仅因这一级别的统计差异阻断最终测试。
 - 打开或关闭训练辅助不得改变主预测。
 - `switch_to_deploy()` 必须移除训练辅助参数，部署前后最大误差要求 `< 1e-6`。
 - 不得把 Teacher map 注入部署期主特征路径。

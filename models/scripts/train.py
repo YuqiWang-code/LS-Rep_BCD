@@ -1,4 +1,4 @@
-"""Unified trainer for SAM-HSD Run1 and EIR-HSD Run2 ablations."""
+"""Unified trainer for the clean baseline and SAM-HSD/EIR-HSD ablations."""
 
 from __future__ import annotations
 
@@ -32,7 +32,15 @@ from models.utils.metrics import ConfuseMatrixMeter
 from models.utils.scheduler import adjust_learning_rate
 
 
+EXPECTED_DEPLOY_PARAMS = 2_913_094
+EXPECTED_DEPLOY_FLOPS = 2.7475e9
+# THOP's operator accounting varies slightly across the supported PyTorch
+# environment. RSML-3 consistently reports 2.767634G for this unchanged graph.
+DEPLOY_FLOPS_ATOL = 0.03e9
+
+
 EXPERIMENTS = {
+    "B0": {"name": "Baseline_A2Net_LWGANet_L0", "auxiliary_mode": "none"},
     "H0": {"name": "H0_Clean_Anchor", "auxiliary_mode": "none"},
     "H1": {"name": "H1_Legacy_SAMStruct", "auxiliary_mode": "legacy_sam"},
     "H2": {"name": "H2_Encoder_Directional", "auxiliary_mode": "sam_hsd",
@@ -92,9 +100,13 @@ EXPERIMENTS = {
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="SAM-HSD / EIR-HSD training")
+    parser = argparse.ArgumentParser(description="A2Net baseline / SAM-HSD / EIR-HSD training")
     parser.add_argument("--experiment", required=True, choices=sorted(EXPERIMENTS))
-    parser.add_argument("--dataset_name", required=True, choices=["SYSU", "WHU"])
+    parser.add_argument(
+        "--dataset_name",
+        required=True,
+        choices=["CDD", "LEVIR", "SYSU", "WHU"],
+    )
     parser.add_argument("--data_root", required=True)
     parser.add_argument("--teacher_cache_root", default=None)
     parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=True)
@@ -569,8 +581,11 @@ def main():
         best_val_f1 = checkpoint["best_val_f1"]
         restore_rng_state(checkpoint.get("rng"))
 
+    log_path = Path(args.log_file)
+    if not log_path.is_absolute():
+        log_path = save_dir / log_path
     logger = TrainingLogger(
-        str(save_dir / args.log_file),
+        str(log_path),
         {
             **vars(args),
             "train_params": f"{train_params / 1e6:.4f}M",
@@ -627,9 +642,9 @@ def main():
     auxiliary_error = auxiliary_toggle_consistency(model, train_loader.dataset, device)
     deploy_error = deploy_consistency(model, test_loader, device)
     scores, infer_params, flops = test_deployed(args, test_loader, model, device)
-    if infer_params != 2_913_094:
+    if infer_params != EXPECTED_DEPLOY_PARAMS:
         raise RuntimeError(f"Unexpected deploy parameter count: {infer_params:,}")
-    if flops is not None and abs(flops - 2.7475e9) > 0.01e9:
+    if flops is not None and abs(flops - EXPECTED_DEPLOY_FLOPS) > DEPLOY_FLOPS_ATOL:
         raise RuntimeError(f"Unexpected deploy FLOPs: {flops / 1e9:.6f}G")
     append_test_results(
         logger, args, scores, train_params, infer_params, flops,
