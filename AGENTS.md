@@ -1,7 +1,7 @@
 # AGENTS.md — LS-Rep_BCD_RSML_3 / SAM-HSD
 
 > Last updated: 2026-09-07  
-> 本文件是当前项目中 AI/Coding Agent 的工作约束。实验上下文仅覆盖 `train_scripts/SAM-HSD/` 中的 baseline、Run1 与 Run2(EIR-HSD)，不记录或继承其他旧实验、旧服务器结果表或历史完成状态。
+> 本文件是当前项目中 AI/Coding Agent 的工作约束。实验上下文仅覆盖 `train_scripts/SAM-HSD/` 中的 baseline、Run1、Run2(EIR-HSD) 与 Run3(Z2-SRD)，不记录或继承其他旧实验、旧服务器结果表或历史完成状态。
 
 ## GitHub 提交流程
 
@@ -35,7 +35,8 @@ git push
 train_scripts/SAM-HSD/
 ├── baseline/
 ├── Run1/
-└── Run2(EIR-HSD)/
+├── Run2(EIR-HSD)/
+└── Run3/
 ```
 
 按以下优先级判断事实：
@@ -43,8 +44,9 @@ train_scripts/SAM-HSD/
 1. 当前代码与 shell 参数；
 2. `train_scripts/SAM-HSD/Run1/README.md`；
 3. `train_scripts/SAM-HSD/Run2(EIR-HSD)/README.md`；
-4. `docs/RSML-3_服务器环境与变化检测数据统一说明.md`；
-5. 本文件中的摘要。
+4. `train_scripts/SAM-HSD/Run3/README.md`；
+5. `docs/RSML-3_服务器环境与变化检测数据统一说明.md`；
+6. 本文件中的摘要。
 
 不得从旧项目复制实验结果、GPU/存储配置、完成状态或结论。需要报告指标时，必须重新读取当前服务器上对应运行的正式 test block。
 
@@ -71,6 +73,7 @@ runtime:
 
 gpu:
   count: 2
+  currently_available_ids: [1]
   model: NVIDIA GeForce RTX 5090
   architecture: Blackwell
   compute_capability: "12.0"
@@ -131,6 +134,8 @@ python -c "import torch, torchvision, cv2, numpy, scipy, sklearn, PIL, tqdm, ten
 | Run2 checkpoint | `/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/SAM-HSD/Run2` |
 | Run1 launcher 日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/logs/SAM-HSD/Run1` |
 | Run2 launcher 日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/logs/SAM-HSD/Run2` |
+| Run3 checkpoint | `/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/saved_models/SAM-HSD/Run3` |
+| Run3 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/saved_models/SAM-HSD/Run3` |
 
 `.vscode/sftp.json` 用于手动上传代码，自动上传保持关闭。该配置忽略 `pre-trained_weights/` 和常见权重文件，权重需要单独传输并在训练前验证。
 
@@ -143,7 +148,7 @@ baseline 覆盖四个 canonical 数据集：
 - `SYSU-CD-256`；
 - `WHU-CD-256`。
 
-Run1/Run2 实验数据集为：
+Run1/Run2/Run3 实验数据集为：
 
 - `SYSU-CD-256`；
 - `WHU-CD-256`。
@@ -222,6 +227,33 @@ train_scripts/SAM-HSD/Run2(EIR-HSD)/dry_run_sysu.sh
 
 `Run2_all_shell_scripts.txt` 是由 `collect_shell_scripts.py` 生成的汇总文件；修改任何 Run2 shell 后必须重新生成，不要直接编辑汇总文件。
 
+### 4.4 Run3：Z2-SRD
+
+Run3 首选方法为 Z2-SRD（Swap-Group Even/Odd Structural Residual Distillation）。它以 Run2 R2 为最小祖先，在训练期把 SAM2 二时相结构 teacher 严格分解为交换不变的 even 表示与交换反变的 odd 表示；两个分支分别监督，不使用 Run2 decoder correction，部署时完整删除。
+
+| ID | 当前脚本语义 | 训练参数 | 部署参数 |
+|---|---|---:|---:|
+| N0 | Z2-SRD Full（even+odd separated） | 2,921,930 | 2,913,094 |
+| N1 | Z2 Even Only | 2,921,882 | 2,913,094 |
+| N2 | Mixed Signed Control | 2,921,370 | 2,913,094 |
+| N3 | No Group Projection（R2-style invariant control） | 2,921,370 | 2,913,094 |
+| N4 | Z2 Odd Only | 2,921,862 | 2,913,094 |
+
+入口与说明：
+
+```text
+train_scripts/SAM-HSD/Run3/README.md
+train_scripts/SAM-HSD/Run3/run_experiment.sh
+train_scripts/SAM-HSD/Run3/run_stage1_gpu0_sysu.sh
+train_scripts/SAM-HSD/Run3/run_stage1_gpu1_whu.sh
+train_scripts/SAM-HSD/Run3/run_gpu0_sysu.sh
+train_scripts/SAM-HSD/Run3/run_gpu1_whu.sh
+train_scripts/SAM-HSD/Run3/smoke_test.sh
+train_scripts/SAM-HSD/Run3/dry_run_sysu.sh
+```
+
+Run3 的 checkpoint 与 `train_log.txt` 必须使用第 3 节所列的两个独立根目录；相对目录包含 `steps_<max_steps>/seed_<seed>`，不得让 12k 筛选恢复到 40k 正式运行。当前 Run3 只使用物理 GPU 1：SYSU 与 WHU 队列内部各自串行，两条队列可以并发驻留同一张 32 GiB 卡，但启动后必须检查合计显存。N2 是故意不满足严格群约束的混合式负对照，不得表述为主方法。`Run3_all_shell_scripts.txt` 由 Run3 的 `collect_shell_scripts.py` 生成，修改 Run3 shell 后必须重新生成。
+
 ## 5. 模型与部署约束
 
 - 主学生模型是 A2Net-LWGANet-L0；SAM2 Teacher Cache 和 HSD 辅助结构只允许参与训练。
@@ -246,6 +278,8 @@ models/scripts/train.py
 models/tools/sam/validate_teacher_cache.py
 models/tools/smoke_sam_hsd.py
 models/tools/smoke_eir_hsd.py
+models/tools/smoke_z2_srd.py
+models/tools/dry_run_z2_srd.py
 ```
 
 ## 6. Teacher Cache 规则
@@ -298,7 +332,7 @@ models/tools/smoke_eir_hsd.py
 1. 修改前读取当前代码、对应 Run README 与实际日志，不依赖旧项目记忆。
 2. 方法创新优先，但每项主张必须对应明确机制、可证伪假设和最小消融。
 3. 保持推理图、Teacher Cache replay 顺序和部署约束不变。
-4. 修改 shell 后执行语法检查并重新生成 Run2 汇总文件。
+4. 修改 shell 后执行语法检查，并重新生成对应 Run2/Run3 汇总文件。
 5. 修改模型后至少执行相关 smoke test；涉及数据或缓存时再执行 real-cache dry run。
 6. 不恢复与当前 `train_scripts/SAM-HSD` 无关的旧实验模块、路径、指标或环境配置。
 7. 不在 `cd_base` 中安装项目专属依赖，不擅自更换 PyTorch/CUDA 栈。

@@ -5,7 +5,11 @@ from __future__ import annotations
 import torch.nn as nn
 
 from .decoder_hsd import DecoderHSD, ResidualDecoderHSD
-from .encoder_hsd import EncoderHSD, ExchangeInvariantEncoderHSD
+from .encoder_hsd import (
+    EncoderHSD,
+    ExchangeInvariantEncoderHSD,
+    Z2StructuralEncoderHSD,
+)
 from .relational_structure import RelationalStructureBuilder
 from .temporal_evidence import (
     DirectionalTemporalEvidence,
@@ -161,4 +165,59 @@ class EIRHSDAdapter(nn.Module):
             "coverage_change_mean": evidence["coverage_change"].mean(),
             "coverage_stable_mean": evidence["coverage_stable"].mean(),
             "structural_uncertainty_mean": evidence["uncertainty"].mean(),
+        }
+
+
+class Z2SRDAdapter(nn.Module):
+    """Swap-group even/odd structural residual distillation, training only."""
+
+    def __init__(self, pair_mode="group", use_even=True, use_odd=True,
+                 spatial_adapter=False, odd_weight=1.0,
+                 boundary_tolerance=2, trust_gamma=1.0):
+        super().__init__()
+        self.pair_mode = pair_mode
+        self.structure_builder = RelationalStructureBuilder()
+        self.evidence_builder = ExchangeInvariantStructuralEvidence(
+            boundary_tolerance=boundary_tolerance,
+            trust_gamma=trust_gamma,
+            directional_restore=pair_mode == "mixed",
+        )
+        self.encoder = Z2StructuralEncoderHSD(
+            spatial_adapter=spatial_adapter,
+            pair_mode=pair_mode,
+            use_even=use_even,
+            use_odd=use_odd,
+            odd_weight=odd_weight,
+        )
+
+    def forward(self, features1, features2, target, teacher_pack):
+        del target  # Z2-SRD transfers teacher structure without GT routing.
+        structure = self.structure_builder(teacher_pack)
+        evidence = self.evidence_builder(structure)
+        encoder = self.encoder(features1, features2, evidence)
+        even_code = evidence["structural_code"].float()
+        odd_code = evidence["signed_structural_code"].float()
+        return {
+            "total": encoder["total"],
+            "encoder": encoder["total"],
+            "z2_even": encoder["even"],
+            "z2_odd": encoder["odd"],
+            "z2_even_feature": encoder["even_feature"],
+            "z2_odd_feature": encoder["odd_feature"],
+            "z2_even_odd_cosine": encoder["even_odd_cosine"],
+            "code_boundary_mean": even_code[:, 0:1].mean(),
+            "code_local_mean": even_code[:, 1:2].mean(),
+            "code_geometry_mean": even_code[:, 2:3].mean(),
+            "code_stable_mean": even_code[:, 3:4].mean(),
+            "teacher_odd_abs_mean": odd_code.abs().mean(),
+            "teacher_odd_signed_mean": odd_code.mean(),
+            "trust_change_mean": evidence["trust_change"].mean(),
+            "trust_stable_mean": evidence["trust_stable"].mean(),
+            "coverage_change_mean": evidence["coverage_change"].mean(),
+            "coverage_stable_mean": evidence["coverage_stable"].mean(),
+            "structural_uncertainty_mean": evidence["uncertainty"].mean(),
+            **{
+                key: value for key, value in encoder.items()
+                if key.startswith("stage")
+            },
         }

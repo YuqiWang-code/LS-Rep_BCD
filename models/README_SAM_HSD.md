@@ -1,4 +1,4 @@
-# SAM-HSD / EIR-HSD model package
+# SAM-HSD / EIR-HSD / Z2-SRD model package
 
 The inference graph is always the unchanged A2Net-LWGANet-L0 student:
 
@@ -55,3 +55,26 @@ R5–R8 2,924,206 -> 2,913,094
 Dataset geometry and temporal exchange are replayed on cached maps before relational fields
 are derived. This order is mandatory. Formal test metrics are appended to `train_log.txt`;
 no inference image directory is generated.
+
+## Run3 Z2-SRD
+
+`Z2StructuralEncoderHSD` treats temporal exchange as the two-element group Z2. A shared
+ordered-pair encoder is evaluated as `(T1,T2)` and `(T2,T1)`, then projected into an even
+latent `(u12+u21)/2` and an odd latent `(u12-u21)/2`. The even head regresses the existing
+four-channel R2 code; the bias-free odd head regresses signed boundary/local/geometry
+residuals. Both are encoder-only training auxiliaries and are removed for deployment.
+
+The Run3 registry keeps each ablation explicit:
+
+```text
+N0 group projection with separated even + odd heads
+N1 group projection with even head only
+N2 signed residual mixed into one four-channel head (negative control)
+N3 abs-residual/product head without group projection (R2-style control)
+N4 group projection with odd head only
+```
+
+`models/tools/smoke_z2_srd.py` checks the exact even/odd group laws, teacher exchange
+behavior, N0--N4 routing and gradients, paired training-state invariance, auxiliary removal,
+and the fixed 2,913,094-parameter deployment graph. The real-cache CUDA gate is
+`models/tools/dry_run_z2_srd.py`.

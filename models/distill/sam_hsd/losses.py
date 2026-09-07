@@ -385,6 +385,43 @@ def structural_code_loss(prediction, teacher_code, trust_change, trust_stable,
     return total, components
 
 
+def signed_structural_code_loss(prediction, teacher_code, trust_change,
+                                channel_weights=(1.0, 1.0, 1.0)):
+    """Regress the anti-equivariant Boundary/Local/Geometry teacher code.
+
+    The odd teacher and prediction both live in ``[-1, 1]``.  A symmetric
+    trust map weights magnitude reliability without changing temporal sign.
+    Each semantic channel is normalized by its own support mass, matching the
+    even branch's loss scale without introducing a tunable routing heuristic.
+    """
+    if prediction.ndim != 4 or prediction.shape[1] != 3:
+        raise ValueError(
+            f"Signed structural prediction must be [B,3,H,W], got {prediction.shape}"
+        )
+    if len(channel_weights) != 3:
+        raise ValueError("Signed structural channel_weights must contain three values")
+    size = prediction.shape[-2:]
+    teacher = _resize(teacher_code, size).detach()
+    trust = _resize(trust_change, size).detach()
+    route_total = sum(float(value) for value in channel_weights)
+    if route_total <= 0:
+        raise ValueError("Signed structural channel weights must have positive sum")
+    route = prediction.new_tensor(
+        [float(value) / route_total for value in channel_weights],
+        dtype=torch.float32,
+    )
+    loss_map = F.smooth_l1_loss(
+        prediction.float(), teacher.float(), reduction="none",
+    )
+    components = {}
+    total = prediction.new_zeros(())
+    for index, name in enumerate(("boundary", "local", "geometry")):
+        component = weighted_mean(loss_map[:, index:index + 1], trust)
+        components[name] = component
+        total = total + route[index] * component
+    return total, components
+
+
 def _gt_conditioned_relation_at_scale(feature, target, evidence,
                                        same_weight=0.65, contrast_weight=0.35,
                                        contrast_margin=0.2):

@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 from .backbone.lwganet import LWGANet_L0_1242_e32_k11_GELU
 from .decoder.a2net_decoder import Decoder, NeighborFeatureAggregation, TemporalFusionModule
-from .distill import EIRHSDAdapter, SAMHSDAdapter, SAMStructureAdapter
+from .distill import EIRHSDAdapter, SAMHSDAdapter, SAMStructureAdapter, Z2SRDAdapter
 
 
 class A2Net_LWGANet_L0(nn.Module):
@@ -16,9 +16,11 @@ class A2Net_LWGANet_L0(nn.Module):
 
     def __init__(self, pretrained=True, pretrained_path=None,
                  auxiliary_mode="none", sam_hsd_cfg=None, eir_hsd_cfg=None,
-                 legacy_sam_cfg=None):
+                 z2_srd_cfg=None, legacy_sam_cfg=None):
         super().__init__()
-        if auxiliary_mode not in {"none", "legacy_sam", "sam_hsd", "eir_hsd"}:
+        if auxiliary_mode not in {
+            "none", "legacy_sam", "sam_hsd", "eir_hsd", "z2_srd",
+        }:
             raise ValueError(f"Unsupported auxiliary_mode: {auxiliary_mode}")
         self.backbone = LWGANet_L0_1242_e32_k11_GELU(
             pretrained=pretrained, pretrained_path=pretrained_path,
@@ -34,18 +36,43 @@ class A2Net_LWGANet_L0(nn.Module):
             self.training_auxiliary = SAMHSDAdapter(**(sam_hsd_cfg or {}))
         elif auxiliary_mode == "eir_hsd":
             self.training_auxiliary = EIRHSDAdapter(**(eir_hsd_cfg or {}))
+        elif auxiliary_mode == "z2_srd":
+            self.training_auxiliary = Z2SRDAdapter(**(z2_srd_cfg or {}))
 
     @property
     def use_training_auxiliary(self):
         return self.auxiliary_mode != "none" and hasattr(self, "training_auxiliary")
 
     def extract_pair_features(self, x1, x2):
+        if self.training and self.auxiliary_mode == "z2_srd":
+            # One joint Siamese pass makes BN batch statistics independent of
+            # temporal ordering.  This is training-only; the deploy graph and
+            # its parameter/FLOP counts remain unchanged.
+            batch = x1.shape[0]
+            merged = tuple(self.backbone(torch.cat((x1, x2), dim=0)))
+            return (
+                tuple(feature[:batch] for feature in merged),
+                tuple(feature[batch:] for feature in merged),
+            )
         return tuple(self.backbone(x1)), tuple(self.backbone(x2))
 
     def _forward_main_path(self, features1, features2, output_size,
                            return_decoder_features=False):
-        aggregated1 = self.swa(*features1)
-        aggregated2 = self.swa(*features2)
+        if self.training and self.auxiliary_mode == "z2_srd":
+            # Keep every shared BN layer in the Siamese encoder path blind to
+            # the arbitrary T1/T2 ordering. A single 2B pass gives identical
+            # batch statistics after exchanging the two temporal inputs.
+            batch = features1[0].shape[0]
+            merged_features = tuple(
+                torch.cat((feature1, feature2), dim=0)
+                for feature1, feature2 in zip(features1, features2)
+            )
+            merged_aggregated = tuple(self.swa(*merged_features))
+            aggregated1 = tuple(feature[:batch] for feature in merged_aggregated)
+            aggregated2 = tuple(feature[batch:] for feature in merged_aggregated)
+        else:
+            aggregated1 = self.swa(*features1)
+            aggregated2 = self.swa(*features2)
         change = self.tfm(*aggregated1, *aggregated2)
         decoder_features_and_logits = self.decoder(*change)
         decoder_features = tuple(decoder_features_and_logits[:4])
@@ -90,10 +117,14 @@ class A2Net_LWGANet_L0(nn.Module):
                     features1, features2, decoder_features,
                     predictions, target, teacher_pack,
                 )
-            else:
+            elif self.auxiliary_mode == "eir_hsd":
                 auxiliary["eir_hsd"] = self.training_auxiliary(
                     features1, features2, decoder_features,
                     predictions, target, teacher_pack,
+                )
+            elif self.auxiliary_mode == "z2_srd":
+                auxiliary["z2_srd"] = self.training_auxiliary(
+                    features1, features2, target, teacher_pack,
                 )
         return predictions, auxiliary
 

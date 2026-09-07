@@ -340,21 +340,24 @@ class ExchangeInvariantStructuralEvidence(nn.Module):
             * coverage_both * (1.0 - uncertainty)
         ).clamp(0, 1)
 
+        signed_local = (
+            0.55 * signed["affinity_r1"]
+            + 0.45 * signed["affinity_r2"]
+        ).clamp(-1, 1)
+        signed_geometry = (
+            0.25 * signed["affinity_r4"]
+            + 0.25 * signed["interior_depth"]
+            + 0.30 * signed["object_scale"]
+            + 0.20 * signed["compactness"]
+        ).clamp(-1, 1)
+        # Expose the raw odd teacher for Run3 without changing the R2-R8
+        # four-channel code.  Every channel is anti-equivariant under T1/T2
+        # exchange and remains centered in [-1, 1].
+        signed_structural_code = torch.cat(
+            (signed_boundary, signed_local, signed_geometry), dim=1,
+        )
         if self.directional_restore:
-            signed_local = (
-                0.55 * signed["affinity_r1"]
-                + 0.45 * signed["affinity_r2"]
-            ).clamp(-1, 1)
-            signed_geometry = (
-                0.25 * signed["affinity_r4"]
-                + 0.25 * signed["interior_depth"]
-                + 0.30 * signed["object_scale"]
-                + 0.20 * signed["compactness"]
-            ).clamp(-1, 1)
-            directional = torch.cat(
-                (signed_boundary, signed_local, signed_geometry), dim=1,
-            )
-            change_code = (0.5 + 0.5 * directional).clamp(0, 1)
+            change_code = (0.5 + 0.5 * signed_structural_code).clamp(0, 1)
         else:
             change_code = symmetric_change
         structural_code = torch.cat((change_code, stable), dim=1)
@@ -364,6 +367,7 @@ class ExchangeInvariantStructuralEvidence(nn.Module):
         ).item()) + 1
         return {
             "structural_code": structural_code.to(torch.float16),
+            "signed_structural_code": signed_structural_code.to(torch.float16),
             "boundary_residual": boundary,
             "local_residual": local,
             "geometry_residual": geometry,

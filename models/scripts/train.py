@@ -1,4 +1,4 @@
-"""Unified trainer for the clean baseline and SAM-HSD/EIR-HSD ablations."""
+"""Unified trainer for baseline, SAM-HSD, EIR-HSD and Z2-SRD ablations."""
 
 from __future__ import annotations
 
@@ -96,11 +96,23 @@ EXPERIMENTS = {
            "hsd_mode": "full", "spatial_adapter": True,
            "use_correction": True, "fixed_fusion": False,
            "directional_restore": True},
+    "N0": {"name": "N0_Z2_SRD_Full", "auxiliary_mode": "z2_srd",
+           "pair_mode": "group", "use_even": True, "use_odd": True},
+    "N1": {"name": "N1_Z2_Even_Only", "auxiliary_mode": "z2_srd",
+           "pair_mode": "group", "use_even": True, "use_odd": False},
+    "N2": {"name": "N2_Mixed_Signed_Control", "auxiliary_mode": "z2_srd",
+           "pair_mode": "mixed", "use_even": True, "use_odd": False},
+    "N3": {"name": "N3_No_Group_Projection", "auxiliary_mode": "z2_srd",
+           "pair_mode": "invariant", "use_even": True, "use_odd": False},
+    "N4": {"name": "N4_Z2_Odd_Only", "auxiliary_mode": "z2_srd",
+           "pair_mode": "group", "use_even": False, "use_odd": True},
 }
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="A2Net baseline / SAM-HSD / EIR-HSD training")
+    parser = argparse.ArgumentParser(
+        description="A2Net baseline / SAM-HSD / EIR-HSD / Z2-SRD training"
+    )
     parser.add_argument("--experiment", required=True, choices=sorted(EXPERIMENTS))
     parser.add_argument(
         "--dataset_name",
@@ -237,6 +249,7 @@ def build_model(args):
     recipe = EXPERIMENTS[args.experiment]
     hsd_cfg = None
     eir_cfg = None
+    z2_cfg = None
     legacy_cfg = None
     if args.auxiliary_mode == "sam_hsd":
         hsd_cfg = {
@@ -256,6 +269,16 @@ def build_model(args):
             "boundary_tolerance": 2,
             "trust_gamma": 1.0,
         }
+    elif args.auxiliary_mode == "z2_srd":
+        z2_cfg = {
+            "pair_mode": recipe["pair_mode"],
+            "use_even": recipe["use_even"],
+            "use_odd": recipe["use_odd"],
+            "spatial_adapter": False,
+            "odd_weight": 1.0,
+            "boundary_tolerance": 2,
+            "trust_gamma": 1.0,
+        }
     elif args.auxiliary_mode == "legacy_sam":
         legacy_cfg = {"boundary_weight": 0.7, "affinity_weight": 0.3, "boundary_band": 7}
     return A2Net_LWGANet_L0(
@@ -264,6 +287,7 @@ def build_model(args):
         auxiliary_mode=args.auxiliary_mode,
         sam_hsd_cfg=hsd_cfg,
         eir_hsd_cfg=eir_cfg,
+        z2_srd_cfg=z2_cfg,
         legacy_sam_cfg=legacy_cfg,
     )
 
@@ -284,6 +308,8 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
         "code_boundary", "code_local", "code_geometry", "code_stable",
         "trust_change", "trust_stable", "coverage_change", "coverage_stable",
         "structural_uncertainty", "fn_correction", "fp_correction",
+        "z2_even", "z2_odd", "z2_even_feature", "z2_odd_feature",
+        "z2_even_odd_cosine", "teacher_odd_abs", "teacher_odd_signed",
         "data_time", "step_time",
     )
     totals = {key: 0.0 for key in metric_keys}
@@ -328,6 +354,13 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
             )
         elif "eir_hsd" in auxiliary:
             details = auxiliary["eir_hsd"]
+            aux_raw = details["total"]
+            factor = hsd_multiplier(global_step, args.max_steps)
+            aux_weighted, aux_ratio = capped_auxiliary(
+                args.hsd_lambda * factor * aux_raw, main_loss, args.hsd_max_ratio,
+            )
+        elif "z2_srd" in auxiliary:
+            details = auxiliary["z2_srd"]
             aux_raw = details["total"]
             factor = hsd_multiplier(global_step, args.max_steps)
             aux_weighted, aux_ratio = capped_auxiliary(
@@ -383,6 +416,13 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
             ),
             "fn_correction": details.get("fn_correction_ratio", zero),
             "fp_correction": details.get("fp_correction_ratio", zero),
+            "z2_even": details.get("z2_even", zero),
+            "z2_odd": details.get("z2_odd", zero),
+            "z2_even_feature": details.get("z2_even_feature", zero),
+            "z2_odd_feature": details.get("z2_odd_feature", zero),
+            "z2_even_odd_cosine": details.get("z2_even_odd_cosine", zero),
+            "teacher_odd_abs": details.get("teacher_odd_abs_mean", zero),
+            "teacher_odd_signed": details.get("teacher_odd_signed_mean", zero),
             "data_time": loss.new_tensor(data_elapsed),
             "step_time": loss.new_tensor(time.perf_counter() - step_started),
         }
@@ -548,13 +588,15 @@ def main():
                 f"but training dataset={args.dataset_name}"
             )
         if manifest.get("teacher_type") != "sam2_struct_v2":
-            raise ValueError("SAM-HSD/EIR-HSD requires a sam2_struct_v2 cache")
+            raise ValueError(
+                "SAM-HSD/EIR-HSD/Z2-SRD requires a sam2_struct_v2 cache"
+            )
 
     train_loader = get_loader(
         args.data_root, os.path.join(args.data_root, "list", "train.txt"),
         batchsize=args.batch_size, trainsize=args.inWidth,
         num_workers=args.num_workers, teacher_cache=teacher_cache,
-        derive_sam_hsd=args.auxiliary_mode in {"sam_hsd", "eir_hsd"},
+        derive_sam_hsd=args.auxiliary_mode in {"sam_hsd", "eir_hsd", "z2_srd"},
     )
     if teacher_cache is not None and set(teacher_cache.entries) != set(train_loader.dataset.file_list):
         raise ValueError("Teacher cache coverage does not exactly match the training list")
