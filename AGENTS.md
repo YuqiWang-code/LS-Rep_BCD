@@ -1,6 +1,6 @@
 # AGENTS.md — LS-Rep_BCD_RSML_3 / SAM-HSD
 
-> Last updated: 2026-09-07  
+> Last updated: 2026-09-08
 > 本文件是当前项目中 AI/Coding Agent 的工作约束。实验上下文仅覆盖 `train_scripts/SAM-HSD/` 中的 baseline、Run1、Run2(EIR-HSD) 与 Run3(Z2-SRD)，不记录或继承其他旧实验、旧服务器结果表或历史完成状态。
 
 ## GitHub 提交流程
@@ -137,6 +137,15 @@ python -c "import torch, torchvision, cv2, numpy, scipy, sklearn, PIL, tqdm, ten
 | Run3 checkpoint | `/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/saved_models/SAM-HSD/Run3` |
 | Run3 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/saved_models/SAM-HSD/Run3` |
 
+本地下载与汇总产物：
+
+| 用途 | 路径 |
+|---|---|
+| Run1/Run2 历史训练日志 | `saved_models/SAM-HSD/` |
+| Run3 下载日志 | `outputs/SAM-HSD/Run3/` |
+| 统一指标表 | `docs/experiment_metrics.xlsx` |
+| Run3 代码与指标快照 | `docs/temporary/models_and_metrics_SAM-HSD_Run3.txt` |
+
 `.vscode/sftp.json` 用于手动上传代码，自动上传保持关闭。该配置忽略 `pre-trained_weights/` 和常见权重文件，权重需要单独传输并在训练前验证。
 
 ## 4. 当前 SAM-HSD 实验批次
@@ -252,7 +261,7 @@ train_scripts/SAM-HSD/Run3/smoke_test.sh
 train_scripts/SAM-HSD/Run3/dry_run_sysu.sh
 ```
 
-Run3 的 checkpoint 与 `train_log.txt` 必须使用第 3 节所列的两个独立根目录；相对目录包含 `steps_<max_steps>/seed_<seed>`，不得让 12k 筛选恢复到 40k 正式运行。当前 Run3 只使用物理 GPU 1：SYSU 与 WHU 队列内部各自串行，两条队列可以并发驻留同一张 32 GiB 卡，但启动后必须检查合计显存。N2 是故意不满足严格群约束的混合式负对照，不得表述为主方法。`Run3_all_shell_scripts.txt` 由 Run3 的 `collect_shell_scripts.py` 生成，修改 Run3 shell 后必须重新生成。
+Run3 的 checkpoint 与 `train_log.txt` 必须使用第 3 节所列的两个独立根目录；相对目录包含 `steps_<max_steps>/seed_<seed>`，不得让 12k 筛选恢复到 40k 正式运行。结果汇总时，`max_steps=12000` 必须标记为 `Stage1` 机制筛选，不能作为 40k 论文正式性能；只有与正式协议一致的 40k 运行才标记为 `Full`。当前 Run3 只使用物理 GPU 1：SYSU 与 WHU 队列内部各自串行，两条队列可以并发驻留同一张 32 GiB 卡，但启动后必须检查合计显存。N2 是故意不满足严格群约束的混合式负对照，不得表述为主方法。`Run3_all_shell_scripts.txt` 由 Run3 的 `collect_shell_scripts.py` 生成，修改 Run3 shell 后必须重新生成。
 
 ## 5. 模型与部署约束
 
@@ -326,6 +335,15 @@ models/tools/dry_run_z2_srd.py
 - 报告 Recall、Precision、OA、F1、IoU、Kappa，以及训练/部署参数量和 FLOPs。
 - 不在本文件保存旧结果表、历史排名或“已完成”状态；每次均以当前服务器文件为准。
 - 单数据集、单种子或阈值以下差异不能被表述为普适提升。
+
+本地统一汇总命令：
+
+```bash
+python -B analyse/extract_metrics.py
+python -B analyse/models_to_txt.py --run3
+```
+
+`extract_metrics.py` 递归读取 `saved_models/SAM-HSD/**/train_log.txt` 与 `outputs/SAM-HSD/Run3/**/train_log.txt`，忽略 launcher tee 日志，只接收最后一个字段完整且数值可解析的正式 test block；任一候选日志不完整时必须报错，不得静默混入结果。指标以百分数保存并保留 4 位小数。`models_to_txt.py --run3` 必须收录当前 `models/` 下全部 Python 源码，以及统一 Excel 的全部工作表。
 
 ## 8. Agent 工作规则
 
