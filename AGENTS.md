@@ -1,7 +1,7 @@
 # AGENTS.md — LS-Rep_BCD_RSML_3 / SAM-HSD
 
 > Last updated: 2026-09-10
-> 本文件是当前项目中 AI/Coding Agent 的工作约束。实验上下文覆盖 `train_scripts/SAM-HSD/` 中的 baseline、Run1、Run2(EIR-HSD) 与 Run3(Z2-SRD)。Run4(CR-SRD) 已判定无效并回退，代码恢复为 Run3 版本；Run3 作为当前主方法重跑 40k 正式矩阵。不记录或继承其他旧实验、旧服务器结果表或历史完成状态。
+> 本文件是当前项目中 AI/Coding Agent 的工作约束。实验上下文覆盖 `train_scripts/SAM-HSD/` 中的 baseline、Run1、Run2(EIR-HSD) 与 Run3(Z2-SRD)。Run4(CR-SRD) 已判定无效并回退，`models/` 已恢复为 Run3 版本；Run3 40k 正式矩阵已完成，主方法 N0 未胜过对照 N3，按 README 停止标准 Z2 主线应停止。**项目当前处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。** 不记录或继承其他旧实验、旧服务器结果表或历史完成状态。
 
 ## GitHub 提交流程
 
@@ -280,6 +280,24 @@ Run3 40k 正式矩阵（`steps_40000`，seed=2333，batch=64）已完成全部 1
 
 **40k 判定（Z2 even/odd 分解未获支持）**：数据集内排名 SYSU `N3 83.4723 > N0 82.8847 > N4 82.2554 > N2 81.7948 > N1 81.6641`，WHU `N3 94.0562 > N1 93.9439 > N2 93.9288 > N0 93.6413 > N4 93.2056`。主方法 N0 相对对照 N3 在**两个数据集均下降**（SYSU `ΔF1 −0.5876`，WHU `ΔF1 −0.4149`），IoU/Kappa 同向下降，未达到 README 的继续标准（平均 `ΔF1 ≥ +0.25` 或平均 `ΔIoU ≥ +0.35`，且单数据集 F1 不低于 `−0.15`）。N0 与 N2 也无一致差异（SYSU `+1.0899`、WHU `−0.2875`），不满足「分离优于混合」。按 README 第「继续与停止标准」，应**停止 Z2 主线**，不再继续堆 correction 或调权重。这是单 seed（2333）结果；README 要求的论文级主比较为 seed `2333/3407/5871`，因此当前结论是机制层面的否定证据，而非最终统计结论。12k Stage1（8 行）仍保留在 Excel 中，标记为 `Stage1`，仅作机制筛选参考。
 
+#### SAM2 结构 teacher 的有效性（当前未获证实）
+
+跨 Run 对照（全部取自 `docs/experiment_metrics.xlsx` 正式 test block）：
+
+| 对比 | 协议 | SYSU ΔF1 | WHU ΔF1 | 可归因性 |
+|---|---|---:|---:|---|
+| Run1 H0 → Run2 R0（同配置重跑） | 64 / 40k | `+0.1132` | `−0.0752` | 单 seed 噪声基线 ≈ 0.1 |
+| Clean anchor → Run3 N3（含 teacher） | 64 / 40k | `+1.4466` | `+0.1177` | **混杂 joint-BN，不可归因 teacher** |
+| **Run4 J0 → J1（同协议，仅差 teacher）** | 128 / 同 steps，均含 joint-BN | **`+0.0061`** | **`−0.7159`** | 目前最干净对照 |
+
+结论：
+
+1. Run3 的 `z2_srd` 在训练态把 T1/T2 合并为 `2B` 一次前向（joint temporal BN），因此 Run3 相对 Run1/Run2 clean anchor 的差值 = `teacher 效应 + joint-BN 效应`，**不能把 SYSU 的 `+1.45` 归因于 teacher**。该混杂即 Run4 设计文档标记的 P0 归因问题。
+2. 唯一同协议 teacher-vs-no-teacher 对照（Run4 `J0_JointBN_Clean` vs `J1_N2_Reproduction`，batch/steps/joint-BN 完全一致）显示 SYSU 差异 `+0.0061`（等价于零）、WHU `−0.7159`（teacher 反而有害）。
+3. Run3 内 5 个 variant 共享同一 teacher，最简单的 N3（R2 式 abs/product 不变量）在两个数据集均最优，说明 teacher 的**结构化用法**同样未带来收益。
+
+**因此：按现有正式结果，不得声称 SAM2 结构 teacher 有效。** 若要正面回答该问题，最小可证伪实验是同协议（同 batch/同 steps）的 `clean` vs `clean + joint-BN` vs `clean + joint-BN + teacher` 三臂对照；在完成该对照前，任何「teacher 提升」的表述都属未经验证。项目处于有效性探寻阶段，本节结论随时可能被新实验推翻。
+
 ## 5. 模型与部署约束
 
 - 主学生模型是 A2Net-LWGANet-L0；SAM2 Teacher Cache 和 HSD 辅助结构只允许参与训练。
@@ -321,6 +339,7 @@ models/tools/dry_run_z2_srd.py
 - 验证通过时不要重新生成缓存。
 - 仅当验证失败、训练列表变化或 schema 明确变更时考虑重建。
 - 不得删除或覆盖数据集、Teacher Cache、checkpoint，除非用户明确授权并已核对绝对路径。
+- **有效性状态**：该 SAM2 结构 teacher 目前**未获证实有效**（见 4.4 节跨 Run 对照）。缓存文件本身已验证可用，但「teacher 能否提升主模型」这一问题仍需同协议三臂对照（`clean` / `clean + joint-BN` / `clean + joint-BN + teacher`）才能回答。在得到该证据前，不得在任何报告或论文中把 teacher 描述为有效组件。
 
 ## 7. 启动、恢复与结果纪律
 
