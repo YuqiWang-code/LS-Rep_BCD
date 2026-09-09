@@ -24,8 +24,7 @@ class TrainingLogger:
             f"Epoch [{epoch}/{total_epochs}] {losses} "
             f"F1={val_metrics['f1']:.4f} IoU={val_metrics['iou']:.4f} "
             f"R={val_metrics['recall']:.4f} P={val_metrics['precision']:.4f} "
-            f"OA={val_metrics['oa']:.4f} Kappa={val_metrics['kappa']:.4f} "
-            f"LR={lr:.7f} GPU={gpu_mem:.2f}GB"
+            f"Kappa={val_metrics['kappa']:.4f} LR={lr:.7f} GPU={gpu_mem:.2f}GB"
         )
         if is_best:
             line += " BEST"

@@ -8,13 +8,7 @@ import torch.nn.functional as F
 
 from .backbone.lwganet import LWGANet_L0_1242_e32_k11_GELU
 from .decoder.a2net_decoder import Decoder, NeighborFeatureAggregation, TemporalFusionModule
-from .distill import (
-    CRSRDAdapter,
-    EIRHSDAdapter,
-    SAMHSDAdapter,
-    SAMStructureAdapter,
-    Z2SRDAdapter,
-)
+from .distill import EIRHSDAdapter, SAMHSDAdapter, SAMStructureAdapter, Z2SRDAdapter
 
 
 class A2Net_LWGANet_L0(nn.Module):
@@ -22,15 +16,12 @@ class A2Net_LWGANet_L0(nn.Module):
 
     def __init__(self, pretrained=True, pretrained_path=None,
                  auxiliary_mode="none", sam_hsd_cfg=None, eir_hsd_cfg=None,
-                 z2_srd_cfg=None, cr_srd_cfg=None, legacy_sam_cfg=None,
-                 joint_temporal_bn="auto"):
+                 z2_srd_cfg=None, legacy_sam_cfg=None):
         super().__init__()
         if auxiliary_mode not in {
-            "none", "legacy_sam", "sam_hsd", "eir_hsd", "z2_srd", "cr_srd",
+            "none", "legacy_sam", "sam_hsd", "eir_hsd", "z2_srd",
         }:
             raise ValueError(f"Unsupported auxiliary_mode: {auxiliary_mode}")
-        if joint_temporal_bn not in {"auto", "on", "off"}:
-            raise ValueError(f"Unsupported joint_temporal_bn: {joint_temporal_bn}")
         self.backbone = LWGANet_L0_1242_e32_k11_GELU(
             pretrained=pretrained, pretrained_path=pretrained_path,
         )
@@ -39,11 +30,6 @@ class A2Net_LWGANet_L0(nn.Module):
         self.tfm = TemporalFusionModule(self.mid_d, self.mid_d)
         self.decoder = Decoder(self.mid_d)
         self.auxiliary_mode = auxiliary_mode
-        self.joint_temporal_bn = joint_temporal_bn
-        self.use_joint_temporal_bn = (
-            auxiliary_mode in {"z2_srd", "cr_srd"}
-            if joint_temporal_bn == "auto" else joint_temporal_bn == "on"
-        )
         if auxiliary_mode == "legacy_sam":
             self.training_auxiliary = SAMStructureAdapter(**(legacy_sam_cfg or {}))
         elif auxiliary_mode == "sam_hsd":
@@ -52,15 +38,13 @@ class A2Net_LWGANet_L0(nn.Module):
             self.training_auxiliary = EIRHSDAdapter(**(eir_hsd_cfg or {}))
         elif auxiliary_mode == "z2_srd":
             self.training_auxiliary = Z2SRDAdapter(**(z2_srd_cfg or {}))
-        elif auxiliary_mode == "cr_srd":
-            self.training_auxiliary = CRSRDAdapter(**(cr_srd_cfg or {}))
 
     @property
     def use_training_auxiliary(self):
         return self.auxiliary_mode != "none" and hasattr(self, "training_auxiliary")
 
     def extract_pair_features(self, x1, x2):
-        if self.training and self.use_joint_temporal_bn:
+        if self.training and self.auxiliary_mode == "z2_srd":
             # One joint Siamese pass makes BN batch statistics independent of
             # temporal ordering.  This is training-only; the deploy graph and
             # its parameter/FLOP counts remain unchanged.
@@ -74,7 +58,7 @@ class A2Net_LWGANet_L0(nn.Module):
 
     def _forward_main_path(self, features1, features2, output_size,
                            return_decoder_features=False):
-        if self.training and self.use_joint_temporal_bn:
+        if self.training and self.auxiliary_mode == "z2_srd":
             # Keep every shared BN layer in the Siamese encoder path blind to
             # the arbitrary T1/T2 ordering. A single 2B pass gives identical
             # batch statistics after exchanging the two temporal inputs.
@@ -142,10 +126,6 @@ class A2Net_LWGANet_L0(nn.Module):
                 auxiliary["z2_srd"] = self.training_auxiliary(
                     features1, features2, target, teacher_pack,
                 )
-            elif self.auxiliary_mode == "cr_srd":
-                auxiliary["cr_srd"] = self.training_auxiliary(
-                    features1, features2, target, teacher_pack,
-                )
         return predictions, auxiliary
 
     def switch_to_deploy(self):
@@ -153,6 +133,4 @@ class A2Net_LWGANet_L0(nn.Module):
         if hasattr(self, "training_auxiliary"):
             del self.training_auxiliary
         self.auxiliary_mode = "none"
-        self.joint_temporal_bn = "off"
-        self.use_joint_temporal_bn = False
         return self

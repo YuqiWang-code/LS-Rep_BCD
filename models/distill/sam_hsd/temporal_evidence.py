@@ -356,14 +356,6 @@ class ExchangeInvariantStructuralEvidence(nn.Module):
         signed_structural_code = torch.cat(
             (signed_boundary, signed_local, signed_geometry), dim=1,
         )
-        # Direction reliability is distinct from change reliability: strong
-        # unsigned cues can disagree in sign. This ratio is parameter-free,
-        # exchange invariant and derived online (the cache schema is unchanged).
-        direction_coherence = torch.where(
-            symmetric_change > 1e-6,
-            signed_structural_code.abs() / symmetric_change.clamp_min(1e-6),
-            torch.zeros_like(symmetric_change),
-        ).clamp(0, 1)
         if self.directional_restore:
             change_code = (0.5 + 0.5 * signed_structural_code).clamp(0, 1)
         else:
@@ -376,8 +368,6 @@ class ExchangeInvariantStructuralEvidence(nn.Module):
         return {
             "structural_code": structural_code.to(torch.float16),
             "signed_structural_code": signed_structural_code.to(torch.float16),
-            "change_magnitude_code": symmetric_change.to(torch.float16),
-            "direction_coherence": direction_coherence.to(torch.float16),
             "boundary_residual": boundary,
             "local_residual": local,
             "geometry_residual": geometry,
