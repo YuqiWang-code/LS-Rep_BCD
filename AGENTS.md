@@ -8,13 +8,13 @@
 完成 `models/` 或 `AGENTS.md` 的修改并通过必要检查后，按以下顺序提交到 GitHub：
 
 ```bash
-git add models AGENTS.md
+git add models AGENTS.md docs/experiment_metrics.xlsx "docs/RSML-3_服务器环境与变化检测数据统一说明.md"
 git status
 git commit -m "Update code"
 git push
 ```
 
-执行 `git commit` 前必须先检查 `git status`，确认暂存区只包含本次准备提交的文件；不要把权重、缓存、数据集、日志或无关改动加入提交。
+执行 `git commit` 前必须先检查 `git status`，确认暂存区只包含本次准备提交的文件；不要把权重、缓存、数据集、日志或无关改动加入提交。`docs/experiment_metrics.xlsx` 与 `docs/RSML-3_服务器环境与变化检测数据统一说明.md` 随代码与 AGENTS.md 一起提交（指标表与服务器/数据环境说明是论文复现所需的一部分）。
 
 ## 研究定位与优先级
 
