@@ -1,4 +1,4 @@
-"""Unified trainer for baseline, SAM-HSD, EIR-HSD and Z2-SRD ablations."""
+"""Unified trainer for baseline and SAM-HSD Run1--Run4 ablations."""
 
 from __future__ import annotations
 
@@ -106,12 +106,26 @@ EXPERIMENTS = {
            "pair_mode": "invariant", "use_even": True, "use_odd": False},
     "N4": {"name": "N4_Z2_Odd_Only", "auxiliary_mode": "z2_srd",
            "pair_mode": "group", "use_even": False, "use_odd": True},
+    "J0": {"name": "J0_JointBN_Clean", "auxiliary_mode": "none",
+           "joint_temporal_bn": "on"},
+    "J1": {"name": "J1_N2_Reproduction", "auxiliary_mode": "z2_srd",
+           "pair_mode": "mixed", "use_even": True, "use_odd": False,
+           "joint_temporal_bn": "on"},
+    "J2": {"name": "J2_CR_SRD_MaskOnly", "auxiliary_mode": "cr_srd",
+           "cr_use_coherence_gate": True, "cr_use_magnitude_fallback": False,
+           "joint_temporal_bn": "on"},
+    "J3": {"name": "J3_CR_SRD_Full", "auxiliary_mode": "cr_srd",
+           "cr_use_coherence_gate": True, "cr_use_magnitude_fallback": True,
+           "joint_temporal_bn": "on"},
+    "J4": {"name": "J4_N4_Odd_Only_Closeout", "auxiliary_mode": "z2_srd",
+           "pair_mode": "group", "use_even": False, "use_odd": True,
+           "joint_temporal_bn": "on"},
 }
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="A2Net baseline / SAM-HSD / EIR-HSD / Z2-SRD training"
+        description="A2Net baseline / SAM-HSD / EIR-HSD / Z2-SRD / CR-SRD training"
     )
     parser.add_argument("--experiment", required=True, choices=sorted(EXPERIMENTS))
     parser.add_argument(
@@ -137,6 +151,12 @@ def parse_args():
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--hsd_lambda", type=float, default=0.06)
     parser.add_argument("--hsd_max_ratio", type=float, default=0.12)
+    parser.add_argument(
+        "--joint_temporal_bn", choices=("auto", "on", "off"), default="auto",
+    )
+    parser.add_argument("--cr_use_coherence_gate", type=int, choices=(0, 1), default=None)
+    parser.add_argument("--cr_use_magnitude_fallback", type=int, choices=(0, 1), default=None)
+    parser.add_argument("--diag_grad_interval", type=int, default=0)
     parser.add_argument("--save_dir", required=True)
     parser.add_argument("--log_file", default="train_log.txt")
     parser.add_argument("--resume", default=None)
@@ -146,13 +166,37 @@ def parse_args():
     args.main_loss_weights = tuple(float(value) for value in args.main_loss_weights.split(","))
     if len(args.main_loss_weights) != 4:
         raise ValueError("main_loss_weights must contain four comma-separated values")
-    if args.batch_size <= 0 or args.max_steps <= 0 or args.num_workers < 0:
+    if (args.batch_size <= 0 or args.max_steps <= 0 or args.num_workers < 0
+            or args.diag_grad_interval < 0):
         raise ValueError("batch_size/max_steps must be positive and num_workers non-negative")
     if not 0.0 <= args.hsd_max_ratio <= 1.0 or args.hsd_lambda < 0:
         raise ValueError("Invalid SAM-HSD weight or cap")
     recipe = EXPERIMENTS[args.experiment]
     args.experiment_name = recipe["name"]
     args.auxiliary_mode = recipe["auxiliary_mode"]
+    required_joint = recipe.get("joint_temporal_bn")
+    if required_joint is not None:
+        if args.joint_temporal_bn not in {"auto", required_joint}:
+            raise ValueError(
+                f"{args.experiment} requires joint_temporal_bn={required_joint}"
+            )
+        args.joint_temporal_bn = required_joint
+    if args.auxiliary_mode == "cr_srd":
+        expected_gate = recipe["cr_use_coherence_gate"]
+        expected_fallback = recipe["cr_use_magnitude_fallback"]
+        for argument, expected in (
+            ("cr_use_coherence_gate", expected_gate),
+            ("cr_use_magnitude_fallback", expected_fallback),
+        ):
+            supplied = getattr(args, argument)
+            if supplied is not None and bool(supplied) != expected:
+                raise ValueError(
+                    f"{args.experiment} requires {argument}={int(expected)}"
+                )
+            setattr(args, argument, expected)
+    else:
+        args.cr_use_coherence_gate = False
+        args.cr_use_magnitude_fallback = False
     if args.auxiliary_mode != "none" and not args.teacher_cache_root:
         raise ValueError("Every non-anchor SAM-HSD/EIR-HSD run requires --teacher_cache_root")
     return args
@@ -218,7 +262,9 @@ def capped_auxiliary(raw_loss, main_loss, max_ratio):
     cap = max_ratio * main_loss.detach()
     scale = torch.clamp(cap / (raw_loss.detach() + 1e-8), max=1.0)
     weighted = raw_loss * scale.detach()
-    return weighted, weighted.detach() / main_loss.detach().clamp_min(1e-8)
+    ratio = weighted.detach() / main_loss.detach().clamp_min(1e-8)
+    cap_hit = (scale < 1.0 - 1e-7).to(weighted.dtype)
+    return weighted, ratio, scale.detach(), cap_hit.detach()
 
 
 def legacy_multiplier(step, total):
@@ -250,6 +296,7 @@ def build_model(args):
     hsd_cfg = None
     eir_cfg = None
     z2_cfg = None
+    cr_cfg = None
     legacy_cfg = None
     if args.auxiliary_mode == "sam_hsd":
         hsd_cfg = {
@@ -279,6 +326,14 @@ def build_model(args):
             "boundary_tolerance": 2,
             "trust_gamma": 1.0,
         }
+    elif args.auxiliary_mode == "cr_srd":
+        cr_cfg = {
+            "spatial_adapter": False,
+            "boundary_tolerance": 2,
+            "trust_gamma": 1.0,
+            "use_coherence_gate": args.cr_use_coherence_gate,
+            "use_magnitude_fallback": args.cr_use_magnitude_fallback,
+        }
     elif args.auxiliary_mode == "legacy_sam":
         legacy_cfg = {"boundary_weight": 0.7, "affinity_weight": 0.3, "boundary_band": 7}
     return A2Net_LWGANet_L0(
@@ -288,7 +343,9 @@ def build_model(args):
         sam_hsd_cfg=hsd_cfg,
         eir_hsd_cfg=eir_cfg,
         z2_srd_cfg=z2_cfg,
+        cr_srd_cfg=cr_cfg,
         legacy_sam_cfg=legacy_cfg,
+        joint_temporal_bn=getattr(args, "joint_temporal_bn", "auto"),
     )
 
 
@@ -297,6 +354,7 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
     meter = ConfuseMatrixMeter(n_class=2)
     metric_keys = (
         "total", "main", "aux_raw", "aux_weighted", "aux_ratio", "aux_factor",
+        "aux_cap_scale", "aux_cap_hit",
         "encoder", "decoder", "scgr", "boundary", "relation", "affinity",
         "boundary_positive", "boundary_negative", "relation_changed",
         "stable_suppression", "prediction_contrast", "feature_relation",
@@ -310,9 +368,22 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
         "structural_uncertainty", "fn_correction", "fp_correction",
         "z2_even", "z2_odd", "z2_even_feature", "z2_odd_feature",
         "z2_even_odd_cosine", "teacher_odd_abs", "teacher_odd_signed",
+        "cr_direction", "cr_magnitude", "cr_stable", "magnitude_mean",
+        "coherence_mean", "coherence_p25", "coherence_p50", "coherence_p75",
+        "coherence_low", "coherence_mid", "coherence_high",
         "data_time", "step_time",
     )
     totals = {key: 0.0 for key in metric_keys}
+    grad_diag_totals = {
+        "main_grad_norm": 0.0, "aux_grad_norm": 0.0,
+        "main_aux_grad_cos": 0.0,
+    }
+    grad_diag_count = 0
+    grad_diag_parameter = next(
+        (parameter for name, parameter in model.named_parameters()
+         if name.startswith("backbone.") and parameter.requires_grad),
+        None,
+    )
     batches, last_lr = 0, args.lr
     data_started = time.perf_counter()
     for batch in loader:
@@ -336,37 +407,69 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
         )
         zero = main_loss.new_zeros(())
         aux_raw = aux_weighted = aux_ratio = zero
+        aux_cap_scale = main_loss.new_ones(())
+        loss_cap_hit = zero
         factor = 0.0
         details = {}
         if "legacy_sam" in auxiliary:
             details = auxiliary["legacy_sam"]
             aux_raw = details["total"]
             factor = legacy_multiplier(global_step, args.max_steps)
-            aux_weighted, aux_ratio = capped_auxiliary(
+            aux_weighted, aux_ratio, aux_cap_scale, loss_cap_hit = capped_auxiliary(
                 0.05 * factor * aux_raw, main_loss, 0.08,
             )
         elif "sam_hsd" in auxiliary:
             details = auxiliary["sam_hsd"]
             aux_raw = details["total"]
             factor = hsd_multiplier(global_step, args.max_steps)
-            aux_weighted, aux_ratio = capped_auxiliary(
+            aux_weighted, aux_ratio, aux_cap_scale, loss_cap_hit = capped_auxiliary(
                 args.hsd_lambda * factor * aux_raw, main_loss, args.hsd_max_ratio,
             )
         elif "eir_hsd" in auxiliary:
             details = auxiliary["eir_hsd"]
             aux_raw = details["total"]
             factor = hsd_multiplier(global_step, args.max_steps)
-            aux_weighted, aux_ratio = capped_auxiliary(
+            aux_weighted, aux_ratio, aux_cap_scale, loss_cap_hit = capped_auxiliary(
                 args.hsd_lambda * factor * aux_raw, main_loss, args.hsd_max_ratio,
             )
         elif "z2_srd" in auxiliary:
             details = auxiliary["z2_srd"]
             aux_raw = details["total"]
             factor = hsd_multiplier(global_step, args.max_steps)
-            aux_weighted, aux_ratio = capped_auxiliary(
+            aux_weighted, aux_ratio, aux_cap_scale, loss_cap_hit = capped_auxiliary(
+                args.hsd_lambda * factor * aux_raw, main_loss, args.hsd_max_ratio,
+            )
+        elif "cr_srd" in auxiliary:
+            details = auxiliary["cr_srd"]
+            aux_raw = details["total"]
+            factor = hsd_multiplier(global_step, args.max_steps)
+            aux_weighted, aux_ratio, aux_cap_scale, loss_cap_hit = capped_auxiliary(
                 args.hsd_lambda * factor * aux_raw, main_loss, args.hsd_max_ratio,
             )
         loss = main_loss + aux_weighted
+        if (args.diag_grad_interval > 0 and grad_diag_parameter is not None
+                and args.auxiliary_mode != "none"
+                and (global_step + 1) % args.diag_grad_interval == 0):
+            main_grad = torch.autograd.grad(
+                main_loss, grad_diag_parameter, retain_graph=True,
+                allow_unused=True,
+            )[0]
+            aux_grad = torch.autograd.grad(
+                aux_weighted, grad_diag_parameter, retain_graph=True,
+                allow_unused=True,
+            )[0]
+            if main_grad is not None and aux_grad is not None:
+                main_vector = main_grad.detach().float().flatten()
+                aux_vector = aux_grad.detach().float().flatten()
+                main_norm = main_vector.norm()
+                aux_norm = aux_vector.norm()
+                cosine = torch.dot(main_vector, aux_vector) / (
+                    main_norm * aux_norm
+                ).clamp_min(1e-12)
+                grad_diag_totals["main_grad_norm"] += float(main_norm)
+                grad_diag_totals["aux_grad_norm"] += float(aux_norm)
+                grad_diag_totals["main_aux_grad_cos"] += float(cosine)
+                grad_diag_count += 1
         loss.backward()
         optimizer.step()
 
@@ -376,6 +479,7 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
             "total": loss, "main": main_loss, "aux_raw": aux_raw,
             "aux_weighted": aux_weighted, "aux_ratio": aux_ratio,
             "aux_factor": loss.new_tensor(factor),
+            "aux_cap_scale": aux_cap_scale, "aux_cap_hit": loss_cap_hit,
             "encoder": details.get("encoder", zero), "decoder": details.get("decoder", zero),
             "scgr": details.get("scgr", zero), "boundary": details.get("boundary", zero),
             "relation": details.get("relation", zero), "affinity": details.get("affinity", zero),
@@ -423,6 +527,17 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
             "z2_even_odd_cosine": details.get("z2_even_odd_cosine", zero),
             "teacher_odd_abs": details.get("teacher_odd_abs_mean", zero),
             "teacher_odd_signed": details.get("teacher_odd_signed_mean", zero),
+            "cr_direction": details.get("cr_direction", zero),
+            "cr_magnitude": details.get("cr_magnitude", zero),
+            "cr_stable": details.get("cr_stable", zero),
+            "magnitude_mean": details.get("magnitude_mean", zero),
+            "coherence_mean": details.get("coherence_mean", zero),
+            "coherence_p25": details.get("coherence_p25", zero),
+            "coherence_p50": details.get("coherence_p50", zero),
+            "coherence_p75": details.get("coherence_p75", zero),
+            "coherence_low": details.get("coherence_low_frac", zero),
+            "coherence_mid": details.get("coherence_mid_frac", zero),
+            "coherence_high": details.get("coherence_high_frac", zero),
             "data_time": loss.new_tensor(data_elapsed),
             "step_time": loss.new_tensor(time.perf_counter() - step_started),
         }
@@ -438,10 +553,15 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
                 f"data={data_elapsed:.3f}s", end="",
             )
         data_started = time.perf_counter()
-    return (
-        {key: value / max(batches, 1) for key, value in totals.items()},
-        meter.get_scores(), last_lr, global_step,
-    )
+    averages = {key: value / max(batches, 1) for key, value in totals.items()}
+    averages.update({
+        key: value / max(grad_diag_count, 1)
+        for key, value in grad_diag_totals.items()
+    })
+    averages["grad_diag_samples"] = float(grad_diag_count)
+    averages["examples_seen"] = float(global_step * args.batch_size)
+    averages["effective_epoch"] = averages["examples_seen"] / max(args.n_train, 1)
+    return averages, meter.get_scores(), last_lr, global_step
 
 
 @torch.no_grad()
@@ -529,7 +649,8 @@ def test_deployed(args, loader, model, device):
 
 
 def append_test_results(logger, args, scores, train_params, infer_params, flops,
-                        auxiliary_error, deploy_error, elapsed):
+                        auxiliary_error, deploy_error, elapsed,
+                        best_val_f1, best_global_step):
     """The test record lives at the end of train_log.txt; no test_infer directory."""
     logger.log_message("=" * 100)
     logger.log_message("=== TEST RESULTS ===")
@@ -541,6 +662,12 @@ def append_test_results(logger, args, scores, train_params, infer_params, flops,
     logger.log_message(f"FLOPs: {flops / 1e9:.4f}G" if flops is not None else "FLOPs: unavailable")
     logger.log_message(f"Auxiliary toggle max error: {auxiliary_error:.8e}")
     logger.log_message(f"Deploy max error: {deploy_error:.8e}")
+    logger.log_message(f"Best Val F1: {best_val_f1:.6f}")
+    logger.log_message(f"Best Global Step: {best_global_step}")
+    logger.log_message(
+        f"Best Effective Epoch: "
+        f"{best_global_step * args.batch_size / max(args.n_train, 1):.4f}"
+    )
     labels = {
         "recall": "Recall", "precision": "Precision", "F1": "F1",
         "IoU": "IoU", "OA": "OA", "Kappa": "Kappa",
@@ -553,7 +680,11 @@ def append_test_results(logger, args, scores, train_params, infer_params, flops,
 
 def validate_resume(args, checkpoint):
     saved = checkpoint.get("args", {})
-    for key in ("experiment", "dataset_name", "batch_size", "max_steps", "seed"):
+    for key in (
+        "experiment", "dataset_name", "batch_size", "max_steps", "seed",
+        "joint_temporal_bn", "cr_use_coherence_gate",
+        "cr_use_magnitude_fallback", "hsd_lambda", "hsd_max_ratio",
+    ):
         if key in saved and saved[key] != getattr(args, key):
             raise ValueError(
                 f"Resume configuration mismatch for {key}: checkpoint={saved[key]!r}, "
@@ -589,14 +720,16 @@ def main():
             )
         if manifest.get("teacher_type") != "sam2_struct_v2":
             raise ValueError(
-                "SAM-HSD/EIR-HSD/Z2-SRD requires a sam2_struct_v2 cache"
+                "SAM-HSD/EIR-HSD/Z2-SRD/CR-SRD requires a sam2_struct_v2 cache"
             )
 
     train_loader = get_loader(
         args.data_root, os.path.join(args.data_root, "list", "train.txt"),
         batchsize=args.batch_size, trainsize=args.inWidth,
         num_workers=args.num_workers, teacher_cache=teacher_cache,
-        derive_sam_hsd=args.auxiliary_mode in {"sam_hsd", "eir_hsd", "z2_srd"},
+        derive_sam_hsd=args.auxiliary_mode in {
+            "sam_hsd", "eir_hsd", "z2_srd", "cr_srd",
+        },
     )
     if teacher_cache is not None and set(teacher_cache.entries) != set(train_loader.dataset.file_list):
         raise ValueError("Teacher cache coverage does not exactly match the training list")
@@ -610,9 +743,11 @@ def main():
         batchsize=args.batch_size, testsize=args.inWidth,
         num_workers=args.num_workers, return_meta=True,
     )
+    args.n_train = len(train_loader.dataset)
     args.max_epochs = int(np.ceil(args.max_steps / len(train_loader)))
 
     start_epoch, global_step, best_val_f1 = 0, 0, -1.0
+    best_global_step = 0
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
         validate_resume(args, checkpoint)
@@ -621,6 +756,7 @@ def main():
         start_epoch = checkpoint["epoch"] + 1
         global_step = checkpoint["global_step"]
         best_val_f1 = checkpoint["best_val_f1"]
+        best_global_step = checkpoint.get("best_global_step") or global_step
         restore_rng_state(checkpoint.get("rng"))
 
     log_path = Path(args.log_file)
@@ -656,8 +792,10 @@ def main():
         is_best = val_scores["F1"] > best_val_f1
         if is_best:
             best_val_f1 = val_scores["F1"]
+            best_global_step = global_step
         checkpoint = build_checkpoint(
             model, optimizer, epoch, global_step, best_val_f1, args,
+            best_global_step=best_global_step,
         )
         save_checkpoint_atomic(checkpoint, last_path)
         if is_best:
@@ -673,7 +811,16 @@ def main():
              "precision": val_scores["precision"], "oa": val_scores["OA"]},
             lr, torch.cuda.max_memory_allocated(device) / 1e9, is_best,
         )
-        logger.log_message(f"Val loss: {val_loss:.6f}; global_step: {global_step}")
+        logger.log_message(
+            f"Progress: global_step={global_step}; "
+            f"examples_seen={global_step * args.batch_size}; "
+            f"effective_epoch={global_step * args.batch_size / max(args.n_train, 1):.4f}; "
+            f"best_val_f1={best_val_f1:.6f}; "
+            f"best_global_step={best_global_step}; "
+            f"best_effective_epoch="
+            f"{best_global_step * args.batch_size / max(args.n_train, 1):.4f}; "
+            f"val_loss={val_loss:.6f}"
+        )
         if global_step >= args.max_steps:
             break
 
@@ -691,6 +838,7 @@ def main():
     append_test_results(
         logger, args, scores, train_params, infer_params, flops,
         auxiliary_error, deploy_error, datetime.datetime.now() - started,
+        best_val_f1, best_global_step,
     )
 
 

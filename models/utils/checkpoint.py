@@ -29,7 +29,8 @@ def restore_rng_state(state):
         torch.cuda.set_rng_state_all(state["cuda"])
 
 
-def build_checkpoint(model, optimizer, epoch, global_step, best_val_f1, args):
+def build_checkpoint(model, optimizer, epoch, global_step, best_val_f1, args,
+                     best_global_step=None):
     """
     Build checkpoint dict.
 
@@ -50,6 +51,7 @@ def build_checkpoint(model, optimizer, epoch, global_step, best_val_f1, args):
         "epoch": epoch,
         "global_step": global_step,
         "best_val_f1": best_val_f1,
+        "best_global_step": best_global_step,
         "args": vars(args),
         "rng": rng_state(),
     }

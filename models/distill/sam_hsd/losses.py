@@ -385,6 +385,103 @@ def structural_code_loss(prediction, teacher_code, trust_change, trust_stable,
     return total, components
 
 
+def coherence_routed_structural_loss(
+        prediction, evidence, channel_weights=(0.25, 0.25, 0.25, 0.25),
+        use_coherence_gate=True, use_magnitude_fallback=True):
+    """Route signed or sign-free supervision using teacher cue coherence.
+
+    Disabling the gate calls ``structural_code_loss`` directly, providing a
+    numerical N2 control with the same student topology. All teacher-derived
+    tensors are detached and the router contains no learnable parameters.
+    """
+    if prediction.ndim != 4 or prediction.shape[1] != 4:
+        raise ValueError(f"CR prediction must be [B,4,H,W], got {prediction.shape}")
+    if len(channel_weights) != 4:
+        raise ValueError("CR channel_weights must contain four values")
+    route_total = sum(float(value) for value in channel_weights)
+    if route_total <= 0:
+        raise ValueError("CR channel weights must have positive sum")
+    route = prediction.new_tensor(
+        [float(value) / route_total for value in channel_weights],
+        dtype=torch.float32,
+    )
+    if not use_coherence_gate:
+        total, components = structural_code_loss(
+            prediction, evidence["structural_code"],
+            evidence["trust_change"], evidence["trust_stable"],
+            channel_weights=channel_weights,
+        )
+        direction = sum(
+            route[index] * components[name]
+            for index, name in enumerate(("boundary", "local", "geometry"))
+        )
+        return total, {
+            **components,
+            "direction": direction,
+            "magnitude": prediction.new_zeros(()),
+            "stable_routed": route[3] * components["stable"],
+        }
+
+    size = prediction.shape[-2:]
+    directional_target = _resize(
+        evidence["structural_code"][:, :3], size,
+    ).detach()
+    magnitude_target = _resize(
+        evidence["change_magnitude_code"], size,
+    ).detach()
+    coherence = _resize(
+        evidence["direction_coherence"], size,
+    ).detach().clamp(0, 1)
+    change_weight = _resize(evidence["trust_change"], size).detach()
+    stable_weight = _resize(evidence["trust_stable"], size).detach()
+    stable_target = _resize(
+        evidence["structural_code"][:, 3:4], size,
+    ).detach()
+
+    directional_map = F.smooth_l1_loss(
+        prediction[:, :3].float(), directional_target.float(), reduction="none",
+    )
+    magnitude_map = F.smooth_l1_loss(
+        torch.abs(2.0 * prediction[:, :3].float() - 1.0),
+        magnitude_target.float(), reduction="none",
+    )
+    stable_map = F.smooth_l1_loss(
+        prediction[:, 3:4].float(), stable_target.float(), reduction="none",
+    )
+
+    total = prediction.new_zeros(())
+    direction_total = prediction.new_zeros(())
+    magnitude_total = prediction.new_zeros(())
+    components = {}
+    for index, name in enumerate(("boundary", "local", "geometry")):
+        direction = weighted_mean(
+            coherence[:, index:index + 1] * directional_map[:, index:index + 1],
+            change_weight,
+        )
+        magnitude = prediction.new_zeros(())
+        if use_magnitude_fallback:
+            magnitude = weighted_mean(
+                (1.0 - coherence[:, index:index + 1])
+                * magnitude_map[:, index:index + 1],
+                change_weight,
+            )
+        component = direction + magnitude
+        components[name] = component
+        total = total + route[index] * component
+        direction_total = direction_total + route[index] * direction
+        magnitude_total = magnitude_total + route[index] * magnitude
+
+    stable = weighted_mean(stable_map, stable_weight)
+    total = total + route[3] * stable
+    return total, {
+        **components,
+        "stable": stable,
+        "direction": direction_total,
+        "magnitude": magnitude_total,
+        "stable_routed": route[3] * stable,
+    }
+
+
 def signed_structural_code_loss(prediction, teacher_code, trust_change,
                                 channel_weights=(1.0, 1.0, 1.0)):
     """Regress the anti-equivariant Boundary/Local/Geometry teacher code.
