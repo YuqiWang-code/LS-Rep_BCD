@@ -1,20 +1,20 @@
 # AGENTS.md — LS-Rep_BCD_RSML_3 / SAM-HSD
 
-> Last updated: 2026-09-10
-> 本文件是当前项目中 AI/Coding Agent 的工作约束。实验上下文覆盖 `train_scripts/SAM-HSD/` 中的 baseline、Run1、Run2(EIR-HSD) 与 Run3(Z2-SRD)。Run4(CR-SRD) 已判定无效并回退，`models/` 已恢复为 Run3 版本；Run3 40k 正式矩阵已完成，主方法 N0 未胜过对照 N3，按 README 停止标准 Z2 主线应停止。**项目当前处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。** 不记录或继承其他旧实验、旧服务器结果表或历史完成状态。
+> Last updated: 2026-09-11
+> 本文件是当前项目中 AI/Coding Agent 的工作约束。实验上下文覆盖 `train_scripts/SAM-HSD/` 中的 baseline、Run1、Run2(EIR-HSD) 与 Run3(Z2-SRD)。Run4(CR-SRD) 已判定无效并回退，`models/` 已恢复为 Run3 版本；Run3 40k 正式矩阵已完成，主方法 N0 未胜过对照 N3，按 README 停止标准 Z2 主线已停止。**下一阶段方向为 CD-specific Difficulty-Aware Reliable Teacher Routing + Reject（方向 C），当前处于调研/设计阶段，尚未改动 `models/` 主代码。** 项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。不记录或继承其他旧实验、旧服务器结果表或历史完成状态。
 
 ## GitHub 提交流程
 
 完成 `models/` 或 `AGENTS.md` 的修改并通过必要检查后，按以下顺序提交到 GitHub：
 
 ```bash
-git add models AGENTS.md docs/experiment_metrics.xlsx "docs/RSML-3_服务器环境与变化检测数据统一说明.md"
+git add models AGENTS.md docs/experiment_metrics.xlsx "docs/RSML-3_服务器环境与变化检测数据统一说明.md" others/teacher_routing_code.txt
 git status
 git commit -m "Update code"
 git push
 ```
 
-执行 `git commit` 前必须先检查 `git status`，确认暂存区只包含本次准备提交的文件；不要把权重、缓存、数据集、日志或无关改动加入提交。`docs/experiment_metrics.xlsx` 与 `docs/RSML-3_服务器环境与变化检测数据统一说明.md` 随代码与 AGENTS.md 一起提交（指标表与服务器/数据环境说明是论文复现所需的一部分）。
+执行 `git commit` 前必须先检查 `git status`，确认暂存区只包含本次准备提交的文件；不要把权重、缓存、数据集、日志或无关改动加入提交。`docs/experiment_metrics.xlsx`、`docs/RSML-3_服务器环境与变化检测数据统一说明.md` 与 `others/teacher_routing_code.txt` 随代码与 AGENTS.md 一起提交（分别是论文复现所需的指标表、服务器/数据环境说明，以及方向 C 关键创新点源码快照）。
 
 ## 研究定位与优先级
 

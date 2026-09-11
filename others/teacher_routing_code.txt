@@ -1,0 +1,3239 @@
+TEACHER ROUTING — KEY INNOVATION PYTHON SOURCE SNAPSHOT
+Generated: 2026-09-11T16:26:33+08:00
+Source directory: F:\Code_Repositories_2\CursorCode\LS-Rep_BCD_RSML_3\others
+Python file count: 13
+
+
+========================================================================================
+FILE: pytorch-change-models-main/torchange/models/segment_any_change/__init__.py
+========================================================================================
+
+# Copyright (c) Zhuo Zheng and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+from torchange.models.segment_any_change.anychange import AnyChange
+from torchange.models.segment_any_change.viz import show_change_masks
+
+
+========================================================================================
+FILE: pytorch-change-models-main/torchange/models/segment_any_change/anychange.py
+========================================================================================
+
+# Copyright (c) Zhuo Zheng and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+import numpy as np
+import torch
+
+import torch.nn.functional as F
+from torchange.models.segment_any_change.segment_anything.utils.amg import rle_to_mask, MaskData
+import copy
+from skimage.filters.thresholding import threshold_otsu
+from torchange.models.segment_any_change.base import SegmentAnyChange
+import math
+from torchvision.ops.boxes import batched_nms
+
+
+def angle2cosine(a):
+    assert 0 <= a <= 180
+    return math.cos(a / 180 * math.pi)
+
+
+def cosine2angle(c):
+    assert -1 <= c <= 1
+    return math.acos(c) * 180 / math.pi
+
+
+class AnyChange(SegmentAnyChange):
+    def __init__(self, model_type='vit_b', sam_checkpoint='./sam_weights/sam_vit_b_01ec64.pth'):
+        super().__init__(model_type, sam_checkpoint)
+
+        layernorm = self.sam.image_encoder.neck[3]
+        w = layernorm.weight.data
+        b = layernorm.bias.data
+        w = w.reshape(w.size(0), 1, 1)
+        b = b.reshape(b.size(0), 1, 1)
+
+        self.inv_transform = lambda e: (e - b) / w
+
+    def set_hyperparameters(
+            self,
+            change_confidence_threshold=155,
+            auto_threshold=False,
+            use_normalized_feature=True,
+            area_thresh=0.8,
+            match_hist=False,
+            object_sim_thresh=60,
+            bitemporal_match=True,
+    ):
+        self.area_thresh = area_thresh
+        self.match_hist = match_hist
+
+        self.change_confidence_threshold = change_confidence_threshold
+        self.auto_threshold = auto_threshold
+        self.use_normalized_feature = use_normalized_feature
+        self.object_sim_thresh = object_sim_thresh
+        self.use_bitemporal_match = bitemporal_match
+
+    def bitemporal_match(self, t1_mask_data, t1_image_embedding, t2_mask_data, t2_image_embedding) -> MaskData:
+        t1_img_embed = t1_image_embedding
+        t2_img_embed = t2_image_embedding
+        h, w = self.embed_data1['original_size']
+
+        seq_img_embed = [t1_img_embed, t2_img_embed]
+        seq_img_embed_data = [{'image_embedding': img_embed,
+                               'original_size': self.embed_data1['original_size']}
+                              for img_embed in seq_img_embed]
+
+        seq_mask_data = [t1_mask_data, ]
+        for img_embed_data in seq_img_embed_data[1:-1]:
+            mask_data = self.maskgen.generate_with_image_embedding(**img_embed_data)
+            mask_data.filter((mask_data['areas'] / (h * w)) < self.area_thresh)
+            seq_mask_data.append(mask_data)
+
+        seq_mask_data.append(t2_mask_data)
+
+        if self.use_normalized_feature:
+            t1_img_embed = self.inv_transform(t1_img_embed)
+            t2_img_embed = self.inv_transform(t2_img_embed)
+
+        t1_img_embed = F.interpolate(t1_img_embed, size=(h, w), mode='bilinear', align_corners=True)
+        t2_img_embed = F.interpolate(t2_img_embed, size=(h, w), mode='bilinear', align_corners=True)
+        t1_img_embed = t1_img_embed.squeeze_(0)
+        t2_img_embed = t2_img_embed.squeeze_(0)
+
+        if self.auto_threshold:
+            cosv = -F.cosine_similarity(t1_img_embed, t2_img_embed, dim=0)
+            cosv = cosv.reshape(-1).cpu().numpy()
+            threshold = threshold_otsu(cosv, cosv.shape[0])
+            self.change_confidence_threshold = cosine2angle(threshold)
+
+        def _latent_match(mask_data, t1_img_embed, t2_img_embed):
+            change_confidence = torch.zeros(len(mask_data['rles']), dtype=torch.float32, device=self.device)
+            for i, rle in enumerate(mask_data['rles']):
+                bmask = torch.from_numpy(rle_to_mask(rle)).to(self.device)
+                t1_mask_embed = torch.mean(t1_img_embed[:, bmask], dim=-1)
+                t2_mask_embed = torch.mean(t2_img_embed[:, bmask], dim=-1)
+                score = -F.cosine_similarity(t1_mask_embed, t2_mask_embed, dim=0)
+                change_confidence[i] += score
+
+            keep = change_confidence > angle2cosine(self.change_confidence_threshold)
+
+            mask_data = copy.deepcopy(mask_data)
+            mask_data['change_confidence'] = change_confidence
+            mask_data.filter(keep)
+            return mask_data
+
+        changemasks = MaskData()
+        if self.use_bitemporal_match:
+            for i in range(2):
+                cmasks = _latent_match(seq_mask_data[i], t1_img_embed, t2_img_embed)
+                changemasks.cat(cmasks)
+        else:
+            cmasks = _latent_match(seq_mask_data[1], t1_img_embed, t2_img_embed)
+            changemasks.cat(cmasks)
+        del cmasks
+
+        return changemasks
+
+    def single_point_q_mask(self, xy, img):
+        point = np.array(xy).reshape(1, 2)
+
+        embed_data = self.maskgen.image_encoder(img)
+
+        embed_data.update(dict(points=point))
+        mask_data = self.maskgen.embedding_point_to_mask(**embed_data)
+
+        if len(mask_data['rles']) > 0:
+            q_mask = torch.from_numpy(rle_to_mask(mask_data['rles'][0]))
+        else:
+            q_mask = torch.zeros(img.shape[0], img.shape[1])
+        return q_mask
+
+    def single_point_match(self, xy, temporal, img1, img2):
+        h, w = img1.shape[:2]
+        point = np.array(xy).reshape(1, 2)
+
+        embed_data1 = self.maskgen.image_encoder(img1)
+        embed_data2 = self.maskgen.image_encoder(img2)
+        self.embed_data1 = embed_data1
+        self.embed_data2 = embed_data2
+
+        mask_data1 = self.maskgen.generate_with_image_embedding(**embed_data1)
+        mask_data2 = self.maskgen.generate_with_image_embedding(**embed_data2)
+        mask_data1.filter((mask_data1['areas'] / (h * w)) < self.area_thresh)
+        mask_data2.filter((mask_data2['areas'] / (h * w)) < self.area_thresh)
+
+        if temporal == 1:
+            embed_data1.update(dict(points=point))
+            mask_data = self.maskgen.embedding_point_to_mask(**embed_data1)
+        elif temporal == 2:
+            embed_data2.update(dict(points=point))
+            mask_data = self.maskgen.embedding_point_to_mask(**embed_data2)
+        else:
+            raise ValueError
+
+        q_area = mask_data['areas'][0]
+        q_mask = torch.from_numpy(rle_to_mask(mask_data['rles'][0]))
+
+        image_embedding1 = F.interpolate(embed_data1['image_embedding'], (h, w), mode='bilinear',
+                                         align_corners=True).squeeze_(0)
+        image_embedding2 = F.interpolate(embed_data2['image_embedding'], (h, w), mode='bilinear',
+                                         align_corners=True).squeeze_(0)
+
+        if temporal == 1:
+            q_mask_features = torch.mean(image_embedding1[:, q_mask], dim=-1)
+        elif temporal == 2:
+            q_mask_features = torch.mean(image_embedding2[:, q_mask], dim=-1)
+        else:
+            raise ValueError
+
+        cosmap1 = torch.cosine_similarity(q_mask_features.reshape(-1, 1, 1), image_embedding1, dim=0)
+        cosmap2 = torch.cosine_similarity(q_mask_features.reshape(-1, 1, 1), image_embedding2, dim=0)
+
+        obj_map1 = cosmap1 > angle2cosine(self.object_sim_thresh)
+        obj_map2 = cosmap2 > angle2cosine(self.object_sim_thresh)
+
+        def _filter_obj(obj_map, mask_data):
+            mask_data = copy.deepcopy(mask_data)
+            keep = (q_area * 0.25 < mask_data['areas']) & (mask_data['areas'] < q_area * 4)
+            mask_data.filter(keep)
+            keep = []
+            for i, rle in enumerate(mask_data['rles']):
+                mask = rle_to_mask(rle)
+                keep.append(np.mean(obj_map[mask]) > 0.5)
+            keep = torch.from_numpy(np.array(keep)).to(torch.bool)
+            mask_data.filter(keep)
+            return mask_data
+
+        mask_data1 = _filter_obj(obj_map1.cpu().numpy(), mask_data1)
+        mask_data2 = _filter_obj(obj_map2.cpu().numpy(), mask_data2)
+
+        data = {
+            't1_mask_data': mask_data1,
+            't1_image_embedding': embed_data1['image_embedding'],
+            't2_mask_data': mask_data2,
+            't2_image_embedding': embed_data2['image_embedding'],
+        }
+        cmasks = self.bitemporal_match(**data)
+
+        keep = batched_nms(
+            cmasks["boxes"].float(),
+            cmasks["iou_preds"],
+            torch.zeros_like(cmasks["boxes"][:, 0]),
+            iou_threshold=self.maskgen.box_nms_thresh,
+        )
+        cmasks.filter(keep)
+        if len(cmasks['rles']) > 1000:
+            scores = cmasks['change_confidence']
+            sorted_scores, _ = torch.sort(scores, descending=True, stable=True)
+            keep = scores > sorted_scores[1000]
+            cmasks.filter(keep)
+
+        return cmasks
+
+    def multi_points_match(self, xyts, img1, img2):
+        h, w = img1.shape[:2]
+
+        embed_data1 = self.maskgen.image_encoder(img1)
+        embed_data2 = self.maskgen.image_encoder(img2)
+        self.embed_data1 = embed_data1
+        self.embed_data2 = embed_data2
+
+        mask_data1 = self.maskgen.generate_with_image_embedding(**embed_data1)
+        mask_data2 = self.maskgen.generate_with_image_embedding(**embed_data2)
+        mask_data1.filter((mask_data1['areas'] / (h * w)) < self.area_thresh)
+        mask_data2.filter((mask_data2['areas'] / (h * w)) < self.area_thresh)
+
+        image_embedding1 = F.interpolate(embed_data1['image_embedding'], (h, w), mode='bilinear',
+                                         align_corners=True).squeeze_(0)
+        image_embedding2 = F.interpolate(embed_data2['image_embedding'], (h, w), mode='bilinear',
+                                         align_corners=True).squeeze_(0)
+
+        q_areas = []
+        q_features = []
+        for xyt in xyts:
+            t = xyt[-1]
+            point = xyt[:2].reshape(1, 2)
+
+            if t == 1:
+                embed_data1.update(dict(points=point))
+                mask_data = self.maskgen.embedding_point_to_mask(**embed_data1)
+            elif t == 2:
+                embed_data2.update(dict(points=point))
+                mask_data = self.maskgen.embedding_point_to_mask(**embed_data2)
+            else:
+                raise ValueError
+
+            q_area = mask_data['areas'][0]
+            q_mask = torch.from_numpy(rle_to_mask(mask_data['rles'][0]))
+
+            q_areas.append(q_area)
+
+            if t == 1:
+                q_mask_features = torch.mean(image_embedding1[:, q_mask], dim=-1)
+            elif t == 2:
+                q_mask_features = torch.mean(image_embedding2[:, q_mask], dim=-1)
+            else:
+                raise ValueError
+            q_features.append(q_mask_features)
+
+        q_area = sum(q_areas) / len(q_areas)
+        q_mask_features = sum(q_features) / len(q_features)
+
+        cosmap1 = torch.cosine_similarity(q_mask_features.reshape(-1, 1, 1), image_embedding1, dim=0)
+        cosmap2 = torch.cosine_similarity(q_mask_features.reshape(-1, 1, 1), image_embedding2, dim=0)
+
+        obj_map1 = cosmap1 > angle2cosine(self.object_sim_thresh)
+        obj_map2 = cosmap2 > angle2cosine(self.object_sim_thresh)
+
+        def _filter_obj(obj_map, mask_data):
+            mask_data = copy.deepcopy(mask_data)
+            keep = (q_area * 0.25 < mask_data['areas']) & (mask_data['areas'] < q_area * 4)
+            mask_data.filter(keep)
+            keep = []
+            for i, rle in enumerate(mask_data['rles']):
+                mask = rle_to_mask(rle)
+                keep.append(np.mean(obj_map[mask]) > 0.5)
+            keep = torch.from_numpy(np.array(keep)).to(torch.bool)
+            mask_data.filter(keep)
+            return mask_data
+
+        mask_data1 = _filter_obj(obj_map1.cpu().numpy(), mask_data1)
+        mask_data2 = _filter_obj(obj_map2.cpu().numpy(), mask_data2)
+
+        data = {
+            't1_mask_data': mask_data1,
+            't1_image_embedding': embed_data1['image_embedding'],
+            't2_mask_data': mask_data2,
+            't2_image_embedding': embed_data2['image_embedding'],
+        }
+        cmasks = self.bitemporal_match(**data)
+
+        keep = batched_nms(
+            cmasks["boxes"].float(),
+            cmasks["iou_preds"],
+            torch.zeros_like(cmasks["boxes"][:, 0]),
+            iou_threshold=self.maskgen.box_nms_thresh,
+        )
+        cmasks.filter(keep)
+        if len(cmasks['rles']) > 1000:
+            scores = cmasks['change_confidence']
+            sorted_scores, _ = torch.sort(scores, descending=True, stable=True)
+            keep = scores > sorted_scores[1000]
+            cmasks.filter(keep)
+
+        return cmasks
+
+
+========================================================================================
+FILE: pytorch-change-models-main/torchange/models/segment_any_change/base.py
+========================================================================================
+
+# Copyright (c) Zhuo Zheng and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+import numpy as np
+import torch
+
+from skimage.exposure import match_histograms
+
+from torchvision.ops.boxes import batched_nms
+from torchange.models.segment_any_change.simple_maskgen import SimpleMaskGenerator
+from torchange.models.segment_any_change.segment_anything import sam_model_registry
+from torchange.models.segment_any_change.segment_anything.utils.amg import MaskData
+from safetensors.torch import load_file
+
+
+class SegmentAnyChange:
+    def __init__(self, model_type='vit_b', sam_checkpoint='./sam_weights/sam_vit_b_01ec64.pth'):
+        sam = sam_model_registry[model_type](checkpoint=sam_checkpoint)
+        self.device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
+        self.sam = sam.to(self.device)
+        self.maskgen = SimpleMaskGenerator(self.sam)
+
+        self.set_hyperparameters()
+
+        self.embed_data1 = None
+        self.embed_data2 = None
+
+    def set_hyperparameters(self, **kwargs):
+        self.match_hist = kwargs.get('match_hist', False)
+        self.area_thresh = kwargs.get('area_thresh', 0.8)
+
+    def make_mask_generator(self, **kwargs):
+        self.maskgen = SimpleMaskGenerator(self.sam, **kwargs)
+
+    def extract_image_embedding(self, img1, img2):
+        self.embed_data1 = self.maskgen.image_encoder(img1)
+        self.embed_data2 = self.maskgen.image_encoder(img2)
+        return self.embed_data1, self.embed_data2
+
+    def set_cached_embedding(self, embedding):
+        data = embedding
+        oh, ow = data['original_size'].numpy()
+        h, w = data['input_size']
+        self.embed_data1 = {
+            'image_embedding': data['t1'].to(self.device),
+            'original_size': (oh, ow),
+        }
+
+        self.embed_data2 = {
+            'image_embedding': data['t2'].to(self.device),
+            'original_size': (oh, ow),
+        }
+        self.maskgen.predictor.input_size = (h, w)
+        self.maskgen.predictor.original_size = (oh, ow)
+
+    def load_cached_embedding(self, filepath):
+        data = load_file(filepath, device='cpu')
+        self.set_cached_embedding(data)
+
+    def clear_cached_embedding(self):
+        self.embed_data1 = None
+        self.embed_data2 = None
+        self.maskgen.predictor.input_size = None
+        self.maskgen.predictor.original_size = None
+
+    def proposal(self, img1, img2):
+        h, w = img1.shape[:2]
+        if self.embed_data1 is None:
+            self.extract_image_embedding(img1, img2)
+
+        mask_data1 = self.maskgen.generate_with_image_embedding(**self.embed_data1)
+        mask_data2 = self.maskgen.generate_with_image_embedding(**self.embed_data2)
+        mask_data1.filter((mask_data1['areas'] / (h * w)) < self.area_thresh)
+        mask_data2.filter((mask_data2['areas'] / (h * w)) < self.area_thresh)
+
+        return {
+            't1_mask_data': mask_data1,
+            't1_image_embedding': self.embed_data1['image_embedding'],
+            't2_mask_data': mask_data2,
+            't2_image_embedding': self.embed_data2['image_embedding'],
+        }
+
+    def bitemporal_match(self, t1_mask_data, t1_image_embedding, t2_mask_data, t2_image_embedding) -> MaskData:
+        return NotImplementedError
+
+    def forward(self, img1, img2):
+        h, w = img1.shape[:2]
+
+        if self.match_hist:
+            img2 = match_histograms(image=img2, reference=img1, channel_axis=-1).astype(np.uint8)
+
+        data = self.proposal(img1, img2)
+
+        changemasks = self.bitemporal_match(**data)
+
+        keep = batched_nms(
+            changemasks["boxes"].float(),
+            changemasks["iou_preds"],
+            torch.zeros_like(changemasks["boxes"][:, 0]),
+            iou_threshold=self.maskgen.box_nms_thresh,
+        )
+        changemasks.filter(keep)
+
+        if len(changemasks['rles']) > 1000:
+            scores = changemasks['change_confidence']
+            sorted_scores, _ = torch.sort(scores, descending=True, stable=True)
+            keep = scores > sorted_scores[1000]
+            changemasks.filter(keep)
+
+        return changemasks, data['t1_mask_data'], data['t2_mask_data']
+
+    def to_eval_format_predictions(self, cmasks):
+        boxes = cmasks['boxes']
+        rle_masks = cmasks['rles']
+        labels = torch.ones(boxes.size(0), dtype=torch.int64)
+        scores = cmasks['change_confidence']
+        predictions = {
+            'boxes': boxes.to(torch.float32).cpu(),
+            'scores': scores.cpu(),
+            'labels': labels.cpu(),
+            'masks': rle_masks
+        }
+        return predictions
+
+    def __call__(self, img1, img2):
+        cmasks, t1_masks, t2_masks = self.forward(img1, img2)
+        predictions = self.to_eval_format_predictions(cmasks)
+        self.clear_cached_embedding()
+        return predictions
+
+
+========================================================================================
+FILE: pytorch-change-models-main/torchange/models/segment_any_change/simple_maskgen.py
+========================================================================================
+
+# Copyright (c) Zhuo Zheng and affiliates.
+# All rights reserved.
+
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
+import torch
+import torch.nn.functional as F
+import numpy as np
+from .segment_anything import SamPredictor
+from .segment_anything.utils.amg import build_point_grid
+from .segment_anything.utils.amg import (
+    MaskData,
+    area_from_rle,
+    batch_iterator,
+    batched_mask_to_box,
+    calculate_stability_score,
+    is_box_near_crop_edge,
+    mask_to_rle_pytorch,
+    remove_small_regions,
+    rle_to_mask,
+    uncrop_boxes_xyxy,
+    uncrop_masks,
+    uncrop_points,
+)
+from torchvision.ops.boxes import batched_nms
+
+__all__ = [
+    'SimpleMaskGenerator',
+]
+
+
+class SimpleMaskGenerator:
+    def __init__(
+            self,
+            model,
+            points_per_side=32,
+            points_per_batch: int = 64,
+            pred_iou_thresh: float = 0.5,
+            stability_score_thresh: float = 0.95,
+            stability_score_offset: float = 1.0,
+            box_nms_thresh: float = 0.7,
+            point_grids=None,
+            min_mask_region_area: int = 0,
+    ):
+        self.predictor = SamPredictor(model)
+        self.points_per_batch = points_per_batch
+        self.pred_iou_thresh = pred_iou_thresh
+        self.stability_score_thresh = stability_score_thresh
+        self.stability_score_offset = stability_score_offset
+        self.box_nms_thresh = box_nms_thresh
+        self.min_mask_region_area = min_mask_region_area
+
+        assert (points_per_side is None) != (
+                point_grids is None
+        ), "Exactly one of points_per_side or point_grid must be provided."
+        if points_per_side is not None:
+            self.point_grids = build_point_grid(points_per_side)
+        elif point_grids is not None:
+            self.point_grids = point_grids
+        else:
+            raise ValueError("Can't have both points_per_side and point_grid be None.")
+
+    @torch.no_grad()
+    def image_encoder(self, image):
+        orig_size = image.shape[:2]
+        self.predictor.set_image(image)
+        return {
+            'image_embedding': self.predictor.get_image_embedding(),
+            'original_size': orig_size,
+        }
+
+    @torch.no_grad()
+    def generate_with_image_embedding(self, image_embedding, original_size):
+        im_h, im_w = original_size
+        # Get points for this crop
+        points_scale = np.array(original_size)[None, ::-1]
+        points_for_image = self.point_grids * points_scale
+
+        data = MaskData()
+        crop_box = [0, 0, im_w, im_h]
+        for (points,) in batch_iterator(self.points_per_batch, points_for_image):
+            batch_data = self._process_batch(image_embedding, points, original_size, crop_box, original_size)
+
+            data.cat(batch_data)
+            del batch_data
+
+        keep_by_nms = batched_nms(
+            data["boxes"].float(),
+            data["iou_preds"],
+            torch.zeros_like(data["boxes"][:, 0]),  # categories
+            iou_threshold=self.box_nms_thresh,
+        )
+        data.filter(keep_by_nms)
+
+        # Return to the original image frame
+        data["boxes"] = uncrop_boxes_xyxy(data["boxes"], crop_box)
+        data["points"] = uncrop_points(data["points"], crop_box)
+        data["crop_boxes"] = torch.tensor([crop_box for _ in range(len(data["rles"]))])
+
+        # Filter small disconnected regions and holes in masks
+        if self.min_mask_region_area > 0:
+            data.to_numpy()
+            data = self.postprocess_small_regions(
+                data,
+                self.min_mask_region_area,
+                max(self.box_nms_thresh, self.crop_nms_thresh),
+            )
+
+        data['areas'] = np.asarray([area_from_rle(rle) for rle in data['rles']])
+        if isinstance(data['boxes'], torch.Tensor):
+            data['areas'] = torch.from_numpy(data['areas'])
+
+        return data
+
+    @torch.no_grad()
+    def generate_with_points(self, image, points):
+        image_embedding_data = self.image_encoder(image)
+        image_embedding_data.update(dict(points=points))
+        return self.embedding_point_to_mask(**image_embedding_data)
+
+    @torch.no_grad()
+    def embedding_point_to_mask(self, image_embedding, original_size, points):
+        h, w = original_size
+        crop_box = [0, 0, w, h]
+        data = self._process_batch(image_embedding, points, (h, w), crop_box, (h, w))
+
+        # Return to the original image frame
+        data["boxes"] = uncrop_boxes_xyxy(data["boxes"], crop_box)
+        data["points"] = uncrop_points(data["points"], crop_box)
+        data["crop_boxes"] = torch.tensor([crop_box for _ in range(len(data["rles"]))])
+
+        data['areas'] = np.asarray([area_from_rle(rle) for rle in data['rles']])
+        if isinstance(data['boxes'], torch.Tensor):
+            data['areas'] = torch.from_numpy(data['areas'])
+        return data
+
+    @torch.no_grad()
+    def generate(self, image, mask_output_mode='rle'):
+        image_embedding_data = self.image_encoder(image)
+        data = self.generate_with_image_embedding(**image_embedding_data)
+
+        if mask_output_mode == 'rle':
+            data["segmentations"] = data["rles"]
+        elif mask_output_mode == 'binary_mask':
+            data["segmentations"] = np.stack([rle_to_mask(rle) for rle in data["rles"]], axis=0)
+        else:
+            raise ValueError
+
+        if isinstance(data['boxes'], torch.Tensor):
+            if mask_output_mode == 'binary_mask':
+                data["segmentations"] = torch.from_numpy(data["segmentations"])
+
+        orig_size = image_embedding_data['original_size']
+        image_embedding = image_embedding_data['image_embedding']
+        image_embedding = F.interpolate(image_embedding, size=orig_size, mode='bilinear', align_corners=True)
+        image_embedding = image_embedding.squeeze_(0)
+        return {
+            'mask_data': data,
+            'image_embedding': image_embedding
+        }
+
+    def _process_batch(
+            self,
+            image_embedding,
+            points: np.ndarray,
+            im_size,
+            crop_box,
+            orig_size,
+    ) -> MaskData:
+        orig_h, orig_w = orig_size
+
+        # Run model on this batch
+        transformed_points = self.predictor.transform.apply_coords(points, im_size)
+        in_points = torch.as_tensor(transformed_points, device=self.predictor.device)
+        in_labels = torch.ones(in_points.shape[0], dtype=torch.int, device=in_points.device)
+        masks, iou_preds, _ = self.predict_torch(
+            self.predictor,
+            image_embedding,
+            in_points[:, None, :],
+            in_labels[:, None],
+            multimask_output=True,
+            return_logits=True,
+        )
+
+        # Serialize predictions and store in MaskData
+        data = MaskData(
+            masks=masks.flatten(0, 1),
+            iou_preds=iou_preds.flatten(0, 1),
+            points=torch.as_tensor(points.repeat(masks.shape[1], axis=0)),
+        )
+        del masks
+
+        # Filter by predicted IoU
+        if self.pred_iou_thresh > 0.0:
+            keep_mask = data["iou_preds"] > self.pred_iou_thresh
+            data.filter(keep_mask)
+
+        # Calculate stability score
+        data["stability_score"] = calculate_stability_score(
+            data["masks"], self.predictor.model.mask_threshold, self.stability_score_offset
+        )
+        if self.stability_score_thresh > 0.0:
+            keep_mask = data["stability_score"] >= self.stability_score_thresh
+            data.filter(keep_mask)
+
+        # Threshold masks and calculate boxes
+        data["masks"] = data["masks"] > self.predictor.model.mask_threshold
+        data["boxes"] = batched_mask_to_box(data["masks"])
+
+        # Filter boxes that touch crop boundaries
+        keep_mask = ~is_box_near_crop_edge(data["boxes"], crop_box, [0, 0, orig_w, orig_h])
+        if not torch.all(keep_mask):
+            data.filter(keep_mask)
+
+        # Compress to RLE
+        data["masks"] = uncrop_masks(data["masks"], crop_box, orig_h, orig_w)
+        data["rles"] = mask_to_rle_pytorch(data["masks"])
+        del data["masks"]
+
+        return data
+
+    @staticmethod
+    def postprocess_small_regions(
+            mask_data: MaskData, min_area: int, nms_thresh: float
+    ) -> MaskData:
+        """
+        Removes small disconnected regions and holes in masks, then reruns
+        box NMS to remove any new duplicates.
+
+        Edits mask_data in place.
+
+        Requires open-cv as a dependency.
+        """
+        if len(mask_data["rles"]) == 0:
+            return mask_data
+
+        # Filter small disconnected regions and holes
+        new_masks = []
+        scores = []
+        for rle in mask_data["rles"]:
+            mask = rle_to_mask(rle)
+
+            mask, changed = remove_small_regions(mask, min_area, mode="holes")
+            unchanged = not changed
+            mask, changed = remove_small_regions(mask, min_area, mode="islands")
+            unchanged = unchanged and not changed
+
+            new_masks.append(torch.as_tensor(mask).unsqueeze(0))
+            # Give score=0 to changed masks and score=1 to unchanged masks
+            # so NMS will prefer ones that didn't need postprocessing
+            scores.append(float(unchanged))
+
+        # Recalculate boxes and remove any new duplicates
+        masks = torch.cat(new_masks, dim=0)
+        boxes = batched_mask_to_box(masks)
+        keep_by_nms = batched_nms(
+            boxes.float(),
+            torch.as_tensor(scores),
+            torch.zeros_like(boxes[:, 0]),  # categories
+            iou_threshold=nms_thresh,
+        )
+
+        # Only recalculate RLEs for masks that have changed
+        for i_mask in keep_by_nms:
+            if scores[i_mask] == 0.0:
+                mask_torch = masks[i_mask].unsqueeze(0)
+                mask_data["rles"][i_mask] = mask_to_rle_pytorch(mask_torch)[0]
+                mask_data["boxes"][i_mask] = boxes[i_mask]  # update res directly
+        mask_data.filter(keep_by_nms)
+
+        return mask_data
+
+    def predict_torch(
+            self, predictor,
+            image_embedding,
+            point_coords,
+            point_labels,
+            boxes=None,
+            mask_input=None,
+            multimask_output: bool = True,
+            return_logits: bool = False,
+    ):
+        if point_coords is not None:
+            points = (point_coords, point_labels)
+        else:
+            points = None
+
+        # Embed prompts
+        sparse_embeddings, dense_embeddings = predictor.model.prompt_encoder(
+            points=points,
+            boxes=boxes,
+            masks=mask_input,
+        )
+
+        # Predict masks
+        low_res_masks, iou_predictions = predictor.model.mask_decoder(
+            image_embeddings=image_embedding,
+            image_pe=predictor.model.prompt_encoder.get_dense_pe(),
+            sparse_prompt_embeddings=sparse_embeddings,
+            dense_prompt_embeddings=dense_embeddings,
+            multimask_output=multimask_output,
+        )
+
+        # Upscale the masks to the original image resolution
+        masks = predictor.model.postprocess_masks(low_res_masks, predictor.input_size, predictor.original_size)
+
+        if not return_logits:
+            masks = masks > predictor.model.mask_threshold
+
+        return masks, iou_predictions, low_res_masks
+
+
+========================================================================================
+FILE: U-Know-DiffPAN-main/dataset/pan_dataset_for_dist.py
+========================================================================================
+
+import random
+import torch
+import torch.utils.data as data
+import torch.nn.functional as F
+import torchvision.transforms as T
+import cv2
+import numpy as np
+import pywt
+
+class Identity:
+    def __call__(self, *args):
+        # args is a tuple
+        # return is also a tuple
+        return args
+
+def RandomEraseChannel(n_channel=8):
+    def _RandomEraseChannel(x):
+        if x.shape[0] != n_channel:
+            return x
+        channel = np.where(np.random.rand(1, n_channel) < 0.5)[0]
+        # print('erase channel {}'.format(channel))
+        x[channel, :, :] = 0.0
+        return x
+
+    return _RandomEraseChannel
+
+class PanDataset(data.Dataset):
+    def __init__(
+        self,
+        d,
+        d_dist,
+        aug_prob=0.0,  # 不需要使用
+        hp=False,  # don't change
+        hp_ksize=(5, 5),  # don't change
+        norm_range=True,
+        full_res=False,
+        division=2047.0,  # don't change
+        wavelets=False,
+        *,
+        constrain_channel=False,  # don't change
+    ):
+        """
+        :param d: h5py.File or dict
+        :param aug_prob: augmentation probability
+        :param hp: high pass for ms and pan. x = x - cv2.boxFilter(x)
+        :param hp_ksize: cv2.boxFiler kernel size
+        :param norm_range: normalize data range to [-1, 1]
+        :param full_res: use full resolution data or not
+                            for full resolution data, there is no gt
+                            for synthetic data, there is gt to compute reference metrics(e.g. PSNR)
+
+        """
+        super(PanDataset, self).__init__()
+        # FIXME: should pass @path rather than @file which is h5py.File object to avoid can not be pickled error
+
+        self.wavelets = wavelets
+
+        if constrain_channel:
+            print(
+                "warning: @constrain_n_channel is only used for test code",
+                "do not use it if you do not fully know about this.",
+            )
+            self.slice_channel = [1, 2, 5]
+        else:
+            self.slice_channel = slice(None)
+
+        if not full_res:
+            self.gt, self.ms, self.lms, self.pan = self.get_divided(d)
+            self.sr, self.var_map, *self.dist_feat =self.get_divided_dist(d_dist)
+            
+            if wavelets:
+                # print("processing wavelets...")
+                # lms_main, (lms_h, lms_v, lms_d) = pywt.wavedec2(
+                #     self.lms, "db1", level=1
+                # )
+                # pan_main, (pan_h, pan_v, pan_d) = pywt.wavedec2(
+                #     self.pan, "db1", level=1, axes=[-2, -1]
+                # )
+                # print("done.")
+                print("processing wavelets...")
+
+                lms_main, (lms_h, lms_v, lms_d) = pywt.swt2(
+                    self.lms, "db1", level=1
+                )[0]
+                pan_main, (pan_h, pan_v, pan_d) = pywt.swt2(
+                    self.pan, "db1", level=1, axes=[-2, -1]
+                )[0]
+                print("done.")
+
+            print("datasets shape:")
+            print("{:^20}{:^20}{:^20}{:^20}".format("pan", "ms", "lms", "gt"))
+            print(
+                "{:^20}{:^20}{:^20}{:^20}".format(
+                    str(self.pan.shape),
+                    str(self.ms.shape),
+                    str(self.lms.shape),
+                    str(self.gt.shape),
+               )            
+            )
+            print("{:^20}{:^20}{:^20}{:^20}{:^20}{:^20}{:^20}{:^20}".format("sr", "var_map", "feat0", "feat1", "feat2", "feat3", "feat4", "feat5"))
+            print(
+                "{:^20}{:^20}{:^20}{:^20}{:^20}{:^20}{:^20}{:^20}".format(
+                    str(self.sr.shape),
+                    str(self.var_map.shape),
+                    str(self.dist_feat[0].shape),
+                    str(self.dist_feat[1].shape),
+                    str(self.dist_feat[2].shape),
+                    str(self.dist_feat[3].shape),
+                    str(self.dist_feat[4].shape),
+                    str(self.dist_feat[5].shape),
+               )            
+            )
+        else:
+            self.ms, self.lms, self.pan = self.get_divided(d, True)
+            if wavelets:
+                # print("processing wavelets...")
+                # lms_main, (lms_h, lms_v, lms_d) = pywt.wavedec2(
+                #     self.lms, "db1", level=1
+                # )
+                # pan_main, (pan_h, pan_v, pan_d) = pywt.wavedec2(
+                #     self.pan, "db1", level=1, axes=[-2, -1]
+                # )
+                # print("done.")
+                print("processing wavelets...")
+                lms_main, (lms_h, lms_v, lms_d) = pywt.swt2(
+                    self.lms, "db1", level=1
+                )[0]
+                pan_main, (pan_h, pan_v, pan_d) = pywt.swt2(
+                    self.pan, "db1", level=1, axes=[-2, -1]
+                )[0]
+                print("done.")
+
+            print("datasets shape:")
+            print("{:^20}{:^20}{:^20}".format("pan", "ms", "lms"))
+            print(
+                "{:^20}{:^20}{:^20}".format(
+                    str(self.pan.shape), str(self.ms.shape), str(self.lms.shape)
+                )
+            )
+
+        self.size = self.ms.shape[0]
+
+        # highpass filter
+        self.hp = hp
+        self.hp_ksize = hp_ksize
+        if hp and hp_ksize is not None:
+            self.group_high_pass(hp_ksize)
+
+        self.pan_hp = self._get_high_pass(self.pan, self.hp_ksize)
+
+        # to tensor
+        if norm_range:
+            print("output data ranging in [-1, 1]")
+        else:
+            print("output data ranging in [0, 1]")
+
+        def to_tensor(x):
+            return torch.tensor(x, dtype=torch.float32)        
+        def norm_func(x):
+            x = to_tensor(x)
+            if not norm_range:
+                x = x / division  # near [0, 1]
+            else:
+                x = x - x.min()
+                x = x / x.max()
+                x = 2 * x - 1  # [-1, 1]
+            # return torch.tensor(x, dtype=torch.float32)
+            return x
+        self.ms = to_tensor(self.ms)
+        self.mms = torch.nn.functional.interpolate(self.ms, size=(self.ms.size(2) * 2, self.ms.size(3) * 2),
+                                          mode="bilinear", align_corners=True)
+        self.pan = norm_func(self.pan)
+        self.ms = norm_func(self.ms)
+        self.mms = norm_func(self.mms)
+        self.lms = norm_func(self.lms)
+        
+        self.sr = norm_func(self.sr)
+        self.var_map = to_tensor(self.var_map)
+        self.dist_feat = [*map(to_tensor, self.dist_feat)]
+        if wavelets:
+            self.wavelets_dcp = torch.cat(
+                [*map(norm_func, [lms_main, pan_h, pan_d, pan_v])], dim=1
+                # [*map(norm_func, [self.mms, pan_h, pan_d, pan_v])], dim=1
+            )
+
+        if not full_res:
+            # self.gt, self.gt_mean, self.gt_std = norm_func(self.gt)
+            self.gt = norm_func(self.gt)
+            # self.gt_min, self.gt_max = self.gt.min(), self.gt.max()
+
+        # geometrical transformation
+        self.aug_prob = aug_prob
+        self.random_erase_channel = RandomEraseChannel(self.lms.shape[1])
+        self.geo_trans = (
+            T.Compose(
+                [T.RandomHorizontalFlip(p=aug_prob), T.RandomVerticalFlip(p=aug_prob)]
+            )
+            if aug_prob != 0.0
+            else Identity()
+        )
+        self.erase_trans = T.RandomChoice(
+            [T.Lambda(self.random_erase_channel)], p=[aug_prob]
+        )
+
+    def get_divided(self, d, full_resolution=False):
+        if not full_resolution:
+            return (
+                np.asarray(d["gt"], dtype=float)[:, self.slice_channel],
+                np.asarray(d["ms"], dtype=float)[:, self.slice_channel],
+                np.asarray(d["lms"], dtype=float)[:, self.slice_channel],
+                np.asarray(d["pan"], dtype=float),
+            )
+        else:
+            return (
+                np.asarray(d["ms"], dtype=float)[:, self.slice_channel],
+                np.asarray(d["lms"], dtype=float)[:, self.slice_channel],
+                np.asarray(d["pan"], dtype=float),
+            )
+    def get_divided_dist(self, d, full_resolution=False):
+        if not full_resolution:
+            return (
+                np.asarray(d["sr"], dtype=float),
+                np.asarray(d["var_map"], dtype=float),
+                np.asarray(d["dist_feat0"], dtype=float),
+                np.asarray(d["dist_feat1"], dtype=float),
+                np.asarray(d["dist_feat2"], dtype=float),
+                np.asarray(d["dist_feat3"], dtype=float),
+                np.asarray(d["dist_feat4"], dtype=float),
+                np.asarray(d["dist_feat5"], dtype=float),
+            )
+        else:
+            return None
+
+    @staticmethod
+    def _get_high_pass(data, k_size):
+        for i, img in enumerate(data):
+            hp = cv2.boxFilter(img.transpose(1, 2, 0), -1, k_size)
+            if hp.ndim == 2:
+                hp = hp[..., np.newaxis]
+            data[i] = img - hp.transpose(2, 0, 1)
+        return data
+
+    def group_high_pass(self, k_size):
+        self.ms = self._get_high_pass(self.ms, k_size)
+        self.pan = self._get_high_pass(self.pan, k_size)
+
+    def aug_trans(self, dict_data):
+        data_dict = {}
+        seed = torch.random.seed()
+        for k in dict_data.keys():
+            if k == 'dist_feat':
+                d = []
+                for x in dict_data[k]:
+                    torch.manual_seed(seed)  # Reset the seed for each element
+                    random.seed(seed)
+                    d.append(self.geo_trans(x))
+            else:
+                torch.manual_seed(seed)
+                random.seed(seed)
+                d = self.geo_trans(dict_data[k])
+            data_dict[k] = d
+        return data_dict
+
+    def __getitem__(self, item):
+        if hasattr(self, "gt"):
+            if not self.wavelets:
+                # tuple_data = (self.pan[item], self.lms[item], self.gt[item])
+                dict_data = {
+                        'pan':self.pan[item], 
+                        'ms':self.ms[item], 
+                        'lms':self.lms[item], 
+                        'gt':self.gt[item],
+                        'sr':self.sr[item],
+                        'var_map':self.var_map[item],
+                        'dist_feat':[d[item] for d in self.dist_feat]
+                        }
+            else:
+                # tuple_data = (
+                #     self.pan[item],
+                #     # self.pan_hp[item],
+                #     self.lms[item],
+                #     self.gt[item],
+                #     self.wavelets_dcp[item],
+                # )
+                dict_data = {
+                    'pan':self.pan[item], 
+                    'ms':self.ms[item], 
+                    'lms':self.lms[item], 
+                    'gt':self.gt[item],
+                    'wavelets_dcp':self.wavelets_dcp[item],
+                    'sr':self.sr[item],
+                    'var_map':self.var_map[item],
+                    'dist_feat':[d[item] for d in self.dist_feat]
+                    }
+        else:
+            if not self.wavelets:
+                # tuple_data = (self.pan[item], self.lms[item])
+                dict_data = {
+                    'pan':self.pan[item], 
+                    'ms':self.ms[item], 
+                    'lms':self.lms[item],
+                    'sr':self.sr[item],
+                    'var_map':self.var_map[item],
+                    'dist_feat':[d[item] for d in self.dist_feat] 
+                    }
+            else:
+                # tuple_data = (self.pan[item], self.lms[item], self.wavelets_dcp[item])
+                dict_data = {
+                    'pan':self.pan[item], 
+                    'ms':self.ms[item], 
+                    'lms':self.lms[item], 
+                    'wavelets_dcp':self.wavelets_dcp[item],
+                    'sr':self.sr[item],
+                    'var_map':self.var_map[item],
+                    'dist_feat':[d[item] for d in self.dist_feat]
+                    }
+        # return self.aug_trans(tuple_data) if self.aug_prob != 0.0 else tuple_data
+        trans_dict_data = self.aug_trans(dict_data) if self.aug_prob != 0.0 else dict_data
+        return trans_dict_data
+        # return dict_data
+
+    def __len__(self):
+        return self.size
+
+    def __repr__(self):
+        return (
+            f"num: {self.size} \n "
+            f"augmentation: {self.geo_trans} \n"
+            f"get high pass ms and pan: {self.hp} \n "
+            f"filter kernel size: {self.hp_ksize}"
+        )
+
+
+if __name__ == "__main__":
+    import h5py
+    from torch.utils.data import DataLoader
+    import matplotlib.pyplot as plt
+# sr=sr,
+#         var_map=var_map,
+#         dist_feat0=dist_feat0,
+#         dist_feat1=dist_feat1,
+#         dist_feat2=dist_feat2,
+#         dist_feat3=dist_feat3,
+#         dist_feat4=dist_feat4,
+#         dist_feat5=dist_feat5,
+#     )
+
+    d_train = h5py.File(
+        "/ssd/sungpyo/Pancollection/training_data/train_wv3.h5"
+    )
+    d_dist = h5py.File(
+        "/ssd/sungpyo/Pancollection/dist_feature_map/train_wv3.h5py"
+    )
+    ds_valid = PanDataset(
+        d_train,
+        d_dist,
+        full_res=False,
+        constrain_channel=False,
+        aug_prob=1.0,
+        norm_range=False,
+        wavelets=True,
+    )
+    dl_train = DataLoader(
+        ds_valid, batch_size=1, shuffle=True, pin_memory=False, num_workers=0
+    )
+
+    fig_name = ["pan", "lms", "hr", "m", "h", "v", "d"]
+    j = 0
+    for pan, lms, hr, wavelets in dl_train:
+        m = wavelets[:, :8]
+        h, v, d = wavelets[:, 8:].chunk(3, dim=1)
+
+        fig, axes = plt.subplots(ncols=2, nrows=4, figsize=(2*3, 4*3))
+        axes = axes.flatten()
+        for i, x in enumerate([pan, lms, hr, m, h, v, d]):
+            ax = axes[i]
+            print(x.shape)
+            x.clip_(0, 1)
+            if x.shape[1] > 3:
+                ax.imshow(x[0, [4, 2, 0]].numpy().transpose(1, 2, 0))
+            else:
+                ax.imshow(x[0].numpy().transpose(1, 2, 0))
+            ax.set_axis_off()
+            ax.set_title(fig_name[i])
+        plt.subplots_adjust(hspace=0.1, wspace=0.1)
+        fig.savefig(f"./{j}.jpg", dpi=200)
+        j += 1
+
+
+========================================================================================
+FILE: U-Know-DiffPAN-main/S1_FSA_T_pretrain_save.py
+========================================================================================
+
+import h5py
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+
+from dataset.pan_dataset import PanDataset
+from diffusion.diffusion_ddpm_pan import make_beta_schedule
+from utils.metric import AnalysisPanAcc
+from utils.misc import model_load, path_legal_checker
+
+from models.FSA_T import UNetSR3 as TeacherUnet
+from diffusion.diffusion_ddpm_pan_for_dist_feature import GaussianDiffusion as Dist_GaussianDiffusion
+from models.priornet.pannet_variance import PanNet_variance
+
+@torch.no_grad()
+def S1_pretrain_save(cfg):
+
+    train_data_path = cfg.train_data_path
+    S1_FSA_T_weight = cfg.S1_FSA_T_weight 
+    prior_net_weight = cfg.prior_net_weight
+    save_h5_dir = cfg.save_h5_dir
+    batch_size = cfg.batch_size
+    n_steps = cfg.n_steps
+    device = cfg.device
+    dataset_name = cfg.dataset
+
+    torch.cuda.set_device(device)
+    if dataset_name in ['wv3', 'gf2', 'qb']:
+        image_size = 256
+        image_n_channel = 8 if dataset_name == 'wv3' else 4
+        pan_channel = 1
+    division_dict = {"wv3": 2047.0, "gf2": 1023.0, "qb": 2047.0}
+    division = division_dict[dataset_name]
+    denoise_fn = TeacherUnet(
+        in_channel=image_n_channel,
+        out_channel=image_n_channel,
+        lms_channel=image_n_channel,
+        pan_channel=pan_channel,#1,
+        inner_channel=32,  # 32,
+        norm_groups=1,
+        channel_mults=(1, 2, 2, 4),  # (64, 32, 16, 8)
+        attn_res=(8,),
+        dropout=0.2,
+        image_size=64,
+        self_condition=True,
+    ).to(device)
+    
+    if prior_net_weight:
+        pretrainnetwork = PanNet_variance(spectral_num=image_n_channel).to(device)
+        pretrain_weight_path = prior_net_weight 
+        pretrain_model_weight = torch.load(pretrain_weight_path)
+        pretrainnetwork.load_state_dict(pretrain_model_weight['model_state_dict'], strict=True)
+        print(f"load pretrain prior weight {pretrain_weight_path}")
+
+    denoise_fn = model_load(S1_FSA_T_weight, denoise_fn, device=device)
+
+    denoise_fn.eval()
+    print(f"load main weight {S1_FSA_T_weight}")
+    diffusion = Dist_GaussianDiffusion(
+        denoise_fn,
+        image_size=image_size,
+        channels=image_n_channel,
+        pred_mode="x_start",
+        loss_type="l1",
+        device=device,
+        clamp_range=(0, 1),
+    )
+    diffusion.set_new_noise_schedule(
+        betas=make_beta_schedule(schedule="cosine", n_timestep=n_steps, cosine_s=8e-3)
+    )
+    diffusion = diffusion.to(device)
+
+    # load dataset
+    d_train = h5py.File(train_data_path)
+    if dataset_name in ["wv3", "gf2", "qb"]:
+        ds_train = PanDataset(
+            d_train, full_res=False, norm_range=False, division=division, wavelets=True
+        )
+    else:
+        pass
+        
+    dl_train = DataLoader(
+            ds_train, batch_size=batch_size, shuffle=False, pin_memory=True, num_workers=0
+        )
+
+    preds = {'sr':[], 
+             'var_map':[], 
+             'dist_feat0':[], 
+             'dist_feat1':[],
+             'dist_feat2':[],
+             'dist_feat3':[],
+             'dist_feat4':[],
+             'dist_feat5':[],
+             }
+    
+    sample_times = len(dl_train)
+    analysis = AnalysisPanAcc()
+    for i, batch in enumerate(dl_train):
+
+        pan = batch['pan']; ms = batch['ms']; lms = batch['lms']; gt = batch['gt']; wavelets = batch['wavelets_dcp']
+
+        print(f"sampling [{i}/{sample_times}]")
+        pan, ms, lms, wavelets = map(lambda x: x.cuda(), (pan, ms, lms, wavelets))
+
+        with torch.no_grad():
+            pretrainnetwork.eval()
+            pre_out_variance = pretrainnetwork(lms,pan) 
+            pre_out = pre_out_variance['out']
+            pre_variance = pre_out_variance['variance']
+
+        cond =  {
+                'lms': lms, 'pan': pan,
+                'pre_out': pre_out, 'pre_variance': pre_variance, 
+                'wavelets': wavelets
+                }
+
+        sr, var_map, dist_feature_map = diffusion(cond, mode="ddim_sample", section_counts="ddim25")        
+
+        sr = sr + lms.cuda()
+        sr = sr.clip(0, 1)
+
+        analysis(sr.detach().cpu(), gt)
+
+        print(analysis.print_str(analysis.last_acc))
+
+        sr, var_map = map(lambda x: x.detach().cpu().numpy(), [sr, var_map])
+        dist_feature_map = list(map(lambda x: x.detach().cpu().numpy(), dist_feature_map))
+        
+        sr = sr * division  # [0, 2047]
+        preds['sr'].append(sr.clip(0, division))
+        preds['var_map'].append(var_map)
+        preds['dist_feat0'].append(dist_feature_map[1])
+        preds['dist_feat1'].append(dist_feature_map[2])
+        preds['dist_feat2'].append(dist_feature_map[3])
+        preds['dist_feat3'].append(dist_feature_map[4])
+        preds['dist_feat4'].append(dist_feature_map[5])
+        preds['dist_feat5'].append(dist_feature_map[6])
+
+    sr, var_map, dist_feat0, dist_feat1, dist_feat2, dist_feat3, dist_feat4, dist_feat5 = map(lambda x: np.concatenate(x, axis=0), preds.values())
+
+    d = dict(
+        sr=sr,
+        var_map=var_map,
+        dist_feat0=dist_feat0,
+        dist_feat1=dist_feat1,
+        dist_feat2=dist_feat2,
+        dist_feat3=dist_feat3,
+        dist_feat4=dist_feat4,
+        dist_feat5=dist_feat5,
+    )
+    
+    save_to_h5(
+        path_legal_checker(f"{save_h5_dir}"),
+        d
+    )
+
+    print(f"save result.... ")
+
+def save_to_h5(filepath, data_dict):
+    with h5py.File(filepath, 'w') as hf:
+        for key, value in data_dict.items():
+            hf.create_dataset(key, data=value)
+
+if __name__ == "__main__":
+    import os
+    from datetime import datetime
+
+    # Get the current date and time
+    now = datetime.now()
+
+    # Format the date and time as mm_dd_hh_mm
+    formatted_time = now.strftime("%m_%d")
+
+# dataset name    
+    # name = 'wv3'
+    # name = 'qb'
+    name = 'gf2'
+
+# model name
+    model_name = 'dwt'
+    # model_name = 'sr3'
+
+# device
+    os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+    # os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+    device = 'cuda:0'
+    # device = 'cuda:1'
+
+# full resolution opt
+    full_res = True
+    # full_res = False
+
+# save path
+    ckpt_dir = '/hdd/sungpyo/Pansharpening/Diffusion/ckpt/'
+
+    if name == 'wv3':
+        image_n_channel = 8
+    else:
+        image_n_channel = 4
+    
+    if name == 'gf2':
+        division = 1023.0
+    else:
+        division = 2047.0
+    if full_res:
+        train_data_path=f"/hdd/sungpyo/Pancollection/train_data/train_{name}_OrigScale_multiExm1.h5"
+    else:
+        train_data_path=f"/hdd/sungpyo/Pancollection/train_data/train_{name}_multiExm1.h5"
+
+    path = os.getcwd()
+
+    torch.cuda.set_device(0)
+
+    # Stage 2를 학습하기 위해서 Stage 1의 pretrain 된 결과를 미리 저장해주는 단계
+    # Pancollection train dataset 과 같은 형태 .h5 로 train dataset 에 대한 Stage 1 네트워크의 pretrain 결과를 저장
+    S1_pretrain_save(
+        train_data_path=f"/ssd/sungpyo/Pancollection/training_data/train_{name}.h5", # train dataset path
+        S1_FSA_T_weight=f"/mnt/hdd/sungpyo/Pansharpening/Diffusion/ckpt/sr3_dwt_teacher/10_13/gf2/ema_diffusion_gf2_iter_300000.pth",   # Stage 1 pretrain weight path
+        prior_net_weight = f"/mnt/hdd/sungpyo/Pansharpening/crossattention/ckpt/{name}/PanNet_variance/best_checkpoint.pth", # PriorNet pretrain weight path
+        save_h5_dir = f"../dist_feature_map/train_{name}.h5py",    # train dataset pretrain result save dir
+        model_name=model_name,
+        batch_size=400,
+        n_steps=25, #500,
+        show=True,
+        dataset_name=name,
+        division=division,
+        full_res=full_res,
+        device=device,
+    )
+
+
+========================================================================================
+FILE: U-Know-DiffPAN-main/S2_FSA_S_train.py
+========================================================================================
+
+from functools import partial
+import time
+from copy import deepcopy
+
+import einops
+import h5py
+import os
+import numpy as np
+import torch
+from torch.utils.data import DataLoader
+import torch.nn as nn
+
+from dataset.pan_dataset import PanDataset
+from dataset.pan_dataset_for_dist import PanDataset as dist_PanDataset
+from diffusion.diffusion_ddpm_pan import make_beta_schedule
+from utils.metric import AnalysisPanAcc
+from utils.logger import TensorboardLogger
+from utils.lr_scheduler import get_lr_from_optimizer, StepsAll
+from utils.misc import exist, grad_clip, model_load
+from utils.optim_utils import EmaUpdater
+from utils.loss_utils import KD_Loss
+from utils.cvt2rgb_save import rgb_save, save_error_map
+
+from tqdm import tqdm
+
+
+def train_FSA_S(cfg):
+    # dataset
+    train_dataset_path = cfg.train_dataset_path
+    valid_dataset_path = cfg.valid_dataset_path
+    dataset_name = cfg.dataset_name
+    # image settings
+    image_size = cfg.image_size
+    # diffusion settings
+    schedule_type = cfg.schedule_type
+    n_steps = cfg.n_steps
+    max_iterations = cfg.max_iterations
+    # device setting
+    device = cfg.device
+    # optimizer settings
+    batch_size = cfg.batch_size
+    lr_d = cfg.lr_d
+    #save path
+    ckpt_save_dir = cfg.ckpt_save_dir
+    save_img_path = cfg.save_img_path
+    # pretrain settings
+    pretrain_weight = cfg.pretrain_weight
+    pretrain_iterations = cfg.pretrain_iterations
+    pretrain_epochs = cfg.pretrain_epochs
+    seed = cfg.seed
+
+    """train and valid function
+    Args:
+        train_dataset_path (str): _description_
+        valid_dataset_path (str): _description_
+        batch_size (int, optional): _description_. Defaults to 240.
+        n_steps (int, optional): _description_. Defaults to 1500.
+        epochs (int, optional): _description_. Defaults to None.
+        device (str, optional): _description_. Defaults to 'cuda:0'.
+        max_iterations (int, optional): _description_. Defaults to 500_000.
+        lr (float, optional): _description_. Defaults to 1e-4.
+        pretrain_weight (str, optional): _description_. Defaults to None.
+        recon_loss (bool, optional): _description_. Defaults to False.
+        show_recon (bool, optional): _description_. Defaults to False.
+        constrain_channel (int, optional): _description_. Defaults to None.
+    """
+    from diffusion.diffusion_ddpm_pan_for_student import GaussianDiffusion as StudentDiffusion
+    from models.FSA_S import UNetSR3 as StudentUnet
+    from torch.utils.tensorboard import SummaryWriter
+    import random
+
+    if seed is not None:
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+
+    # init logger
+    stf_time = time.strftime("%m-%d_%H-%M", time.localtime())
+    comment = "FSA-S"
+    pwd = os.path.dirname(os.path.abspath(__file__))
+    logger = TensorboardLogger(place = f'{pwd}/runs', file_dir=f'{pwd}/logs', file_logger_name="{}-{}".format(stf_time, comment))
+    writer = SummaryWriter(f"{pwd}/logs/{dataset_name}/{stf_time}")
+
+    dataset_name = (
+        train_dataset_path.strip(".h5").split("_")[-1]
+        if not exist(dataset_name)
+        else dataset_name
+    )
+    logger.print(f"dataset name: {dataset_name}")
+    division_dict = {"wv3": 2047.0, "gf2": 1023.0, "qb": 2047.0}
+    image_n_channel_dict = {"wv3": 8, "gf2": 4, "qb": 4}
+    logger.print(f"dataset norm division: {division_dict[dataset_name]}")
+    rgb_channel = {
+        "wv3": [4, 2, 0],
+        "qb": [0, 1, 2],
+        "gf2": [0, 1, 2],
+    }
+    logger.print(f"rgb channel: {rgb_channel[dataset_name]}")
+
+    # student network
+    image_n_channel = image_n_channel_dict[dataset_name]
+    student_denoise_fn = StudentUnet(
+        in_channel=image_n_channel,
+        out_channel=image_n_channel,
+        lms_channel=image_n_channel,
+        pan_channel=1,#1,
+        inner_channel=32,  # 32,
+        norm_groups=1,
+        channel_mults=(1, 2, 2, 4),  # (64, 32, 16, 8)
+        attn_res=(8,),
+        dropout=0.2,
+        image_size=64,
+        self_condition=True,
+    ).to(device)
+
+    # student model check point 에서 불러오기
+    if pretrain_weight is not None:
+        if isinstance(pretrain_weight, (list, tuple)):
+            model_load(pretrain_weight[0], student_denoise_fn, strict=True, device=device)
+        else:
+            model_load(pretrain_weight, student_denoise_fn, strict=False, device=device)
+        print("load pretrain weight from {}".format(pretrain_weight))
+
+    # get dataset
+    dist_dataset_path = f"/ssd/sungpyo/Pancollection/dist_feature_map/train_{dataset_name}.h5py"
+    d_train = h5py.File(train_dataset_path)
+    d_train_dist = h5py.File(dist_dataset_path)
+    d_valid = h5py.File(valid_dataset_path)
+    if dataset_name in ["wv3", "gf2", "qb"]:
+        DatasetUsed = partial(
+            PanDataset,
+            full_res=False,
+            norm_range=False,
+            constrain_channel=None,
+            division=division_dict[dataset_name],
+            aug_prob=0,
+            wavelets=False,
+        )
+        dist_DatasetUsed = partial(
+            dist_PanDataset,
+            full_res=False,
+            norm_range=False,
+            constrain_channel=None,
+            division=division_dict[dataset_name],
+            aug_prob=0.5,   
+            wavelets=False,
+        )
+    else:
+        raise NotImplementedError("dataset {} not supported".format(dataset_name))
+
+    ds_train = dist_DatasetUsed(
+        d_train, d_train_dist
+    )
+    ds_valid = DatasetUsed(
+        d_valid,
+    )
+    dl_train = DataLoader(
+        ds_train,
+        batch_size=batch_size,
+        shuffle=True,
+        pin_memory=True,
+        num_workers=0,
+        drop_last=False,
+    )
+    dl_valid = DataLoader(
+        ds_valid,
+        batch_size=20,
+        shuffle=False,
+        pin_memory=True,
+        num_workers=0,
+        drop_last=False,
+    )
+    # diffusion student 
+    diffusion_student = StudentDiffusion(
+        student_denoise_fn,
+        image_size=image_size,
+        channels=image_n_channel,
+        pred_mode="x_start",
+        loss_type = 'l1',   # 실제 학습에서는 사용하지 않은 부분 (그냥 L1으로 놔둘 것)
+        device=device,
+        clamp_range=(0, 1),
+    )
+
+    if schedule_type is not None:
+        schedule = schedule_type
+    else:
+        schedule = "cosine"
+
+    diffusion_student.set_new_noise_schedule(
+        betas=make_beta_schedule(schedule = schedule, n_timestep=n_steps, cosine_s=8e-3)
+    )
+    diffusion_student = diffusion_student.to(device)
+
+    # 멀티 GPU 설정 (DataParallel)
+    if torch.cuda.device_count() > 1:
+        diffusion_student = nn.DataParallel(diffusion_student)
+
+    # model, optimizer and lr scheduler
+    diffusion_dp = (
+        diffusion_student
+    )
+    ema_updater = EmaUpdater(
+        diffusion_dp, deepcopy(diffusion_dp), decay=0.995, start_iter=20_000
+    )
+    opt_d = torch.optim.AdamW(student_denoise_fn.parameters(), lr=lr_d, weight_decay=1e-4)
+    scheduler_d = torch.optim.lr_scheduler.MultiStepLR(
+        opt_d, milestones=[100_000, 200_000, 350_000], gamma=0.5
+    )
+    schedulers = StepsAll(scheduler_d)
+    criterion_kd = KD_Loss()
+    # training
+    if pretrain_iterations is not None:
+        iterations = pretrain_iterations
+        logger.print("load previous training with {} iterations".format(iterations))
+    else:
+        iterations = 0
+    if pretrain_epochs is not None:
+        epochs = pretrain_epochs
+    else:
+        epochs = 1
+    
+    prenetwork_loss = 0
+    while iterations <= max_iterations:
+        for i, dict_data in enumerate(tqdm(dl_train, desc = f"Epoch {epochs}",unit =" batch"), 1):
+            pan = dict_data['pan'].cuda(); gt = dict_data['gt'].cuda()
+            lms = dict_data['lms'].cuda(); 
+            teacher_sr = dict_data['sr'].cuda(); teacher_variance = dict_data['var_map'].cuda()
+            teacher_feature_map = [tensor.cuda() for tensor in dict_data['dist_feat']]
+
+            # new cond
+            cond =  {
+                    'lms': lms, 'pan': pan,
+                    }
+
+            opt_d.zero_grad()
+
+            res = gt - lms
+            teacher_res = teacher_sr - lms
+
+            out = diffusion_dp(res, cond=cond)
+            _, sr, student_feature_map = diffusion_dp(res, cond=cond)
+            student_feature_map = student_feature_map[1:]
+
+            total_loss = criterion_kd(res, teacher_res, sr, teacher_feature_map, student_feature_map, teacher_variance)
+            total_loss.backward()
+
+            sr = sr + lms
+
+            writer.add_scalar('Train/Loss', total_loss, iterations)
+            # do a grad clip on diffusion model
+            if isinstance(diffusion_dp, nn.DataParallel):
+                diffusion_dp_model = diffusion_dp.module.model
+                ema_updater_ema_model_model = ema_updater.ema_model.model
+            else:
+                diffusion_dp_model = diffusion_dp.model
+                ema_updater_ema_model_model = ema_updater.ema_model.model
+
+            params = diffusion_dp_model.parameters()
+            grad_clip(params, mode="norm", value=0.003)
+
+            opt_d.step()
+            ema_updater.update(iterations)
+            schedulers.step()
+            iterations += 1
+
+            # do some sampling to check quality
+            if iterations % 2_500 == 0:
+                diffusion_dp_model.eval()
+                ema_updater_ema_model_model.eval()
+
+                analysis_d = AnalysisPanAcc()
+                with torch.no_grad():
+                    for i, dict_data in enumerate(dl_valid, 1):
+                        torch.cuda.empty_cache()
+
+                        pan = dict_data['pan'].cuda(); gt = dict_data['gt'].cuda()
+                        lms = dict_data['lms'].cuda(); 
+                        ms = dict_data['ms'].cuda()
+                        cond =  {
+                                'lms': lms, 'pan': pan,
+                                }
+                        sr = ema_updater.ema_model(cond, mode="ddim_sample", section_counts="ddim25")
+
+                        sr = sr[0]
+                        sr = sr + lms
+                        sr = sr.clip(0, 1)
+
+                        gt = gt.to(sr.device)
+
+                        # visualization
+                        save_dir = os.path.join(save_img_path,dataset_name,'reduced')
+                        
+                        stack_pan = einops.rearrange(pan[:,[0]*sr.shape[1],...], 'b c h w -> c (b h) w')
+                        stack_lms = einops.rearrange(lms, 'b c h w -> c (b h) w')
+                        stack_output = einops.rearrange(sr, 'b c h w -> c (b h) w')
+                        stack_gt= einops.rearrange(gt, 'b c h w -> c (b h) w')
+                        stack_gt_minus_out = einops.rearrange(gt-sr, 'b c h w -> c (b h) w')
+
+                        if dataset_name == 'gf2':
+                            img_scale = 2**10-1
+                        else:
+                            img_scale = 2**11-1
+                        # pan                    
+                        rgb_save(stack_pan, img_scale= img_scale, save_dir=os.path.join(save_dir,'pan'), file_name = f'testimg{i}.png')
+                        
+                        # lms
+                        rgb_save(stack_lms, img_scale= img_scale, save_dir=os.path.join(save_dir,'lms'), file_name = f'testimg{i}.png')
+
+                        # output
+                        stack_output = rgb_save(stack_output, img_scale= img_scale, save_dir=os.path.join(save_dir,'output'), file_name = f'testimg{i}.png')
+
+                        # gt
+                        rgb_save(stack_gt, img_scale= img_scale, save_dir=os.path.join(save_dir,'gt'), file_name = f'testimg{i}.png')
+                        
+                        # errormap
+                        stack_gt_minus_out = save_error_map(stack_gt_minus_out, img_scale= img_scale, save_dir=os.path.join(save_dir,'errormap'), file_name = f'testimg{i}.png')
+
+                        analysis_d(gt, sr)
+                        logger.print("---diffusion result---")
+                        logger.print(analysis_d.last_acc)
+                        torch.cuda.empty_cache()
+                    if i != 1:
+                        logger.print("---diffusion result---")
+                        logger.print(analysis_d.print_str())
+                    
+                diffusion_dp_model.train()
+                setattr(ema_updater.model, "image_size", 64)
+
+                save_dir = ckpt_save_dir
+                if not os.path.exists(save_dir):
+                    os.makedirs(save_dir)
+
+                # diffusion save
+                torch.save(
+                    ema_updater.on_fly_model_state_dict,
+                    f"{save_dir}/diffusion_{dataset_name}_iter_{iterations}.pth",
+                )
+                # ema save
+                torch.save(
+                    ema_updater.ema_model_state_dict,
+                    f"{save_dir}/ema_diffusion_{dataset_name}_iter_{iterations}.pth",
+                )
+                # prenetwork save
+                logger.print("save model")
+
+                logger.log_scalars("diffusion_perf", analysis_d.acc_ave, iterations)
+                logger.print("saved performances")
+
+            # log loss
+            if iterations % 50 == 0:
+                logger.log_scalar("denoised_loss", total_loss.item(), iterations)
+
+        logger.print(
+            f"[iter {iterations}/{max_iterations}: "
+            + f"d_lr {get_lr_from_optimizer(opt_d): .6f}] - "
+            + f"prenetwork loss {prenetwork_loss:.6f} "
+            + f"denoise loss {total_loss:.6f} "
+        )
+        epochs += 1
+    writer.close()
+
+
+========================================================================================
+FILE: U-Know-DiffPAN-main/utils/loss_utils.py
+========================================================================================
+
+from typing import Dict, Tuple, Union
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from torch import Tensor
+from torch.autograd import Variable
+import numpy as np
+import cv2
+from math import exp, pi
+
+
+def gaussian(window_size, sigma):
+    gauss = torch.Tensor(
+        [
+            exp(-((x - window_size // 2) ** 2) / float(2 * sigma ** 2))
+            for x in range(window_size)
+        ]
+    )
+    return gauss / gauss.sum()
+
+
+def create_window(window_size, channel, sigma=1.5):
+    _1D_window = gaussian(window_size, sigma).unsqueeze(1)
+    _2D_window = _1D_window.mm(_1D_window.t()).float().unsqueeze(0).unsqueeze(0)
+    window = Variable(
+        _2D_window.expand(channel, 1, window_size, window_size).contiguous()
+    )
+    return window
+
+def cvt2gray(image):
+    #일단 mean으로 적용
+    gray_img = torch.mean(image, 1)    
+    return gray_img                        
+
+def _ssim(img1, img2, window, window_size, channel, size_average=True):
+    mu1 = F.conv2d(img1, window, padding=window_size // 2, groups=channel)
+    mu2 = F.conv2d(img2, window, padding=window_size // 2, groups=channel)
+
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+
+    sigma1_sq = (
+        F.conv2d(img1 * img1, window, padding=window_size // 2, groups=channel) - mu1_sq
+    )
+    sigma2_sq = (
+        F.conv2d(img2 * img2, window, padding=window_size // 2, groups=channel) - mu2_sq
+    )
+    sigma12 = (
+        F.conv2d(img1 * img2, window, padding=window_size // 2, groups=channel)
+        - mu1_mu2
+    )
+
+    C1 = 0.01 ** 2
+    C2 = 0.03 ** 2
+
+    ssim_map = ((2 * mu1_mu2 + C1) * (2 * sigma12 + C2)) / (
+        (mu1_sq + mu2_sq + C1) * (sigma1_sq + sigma2_sq + C2)
+    )
+
+    if size_average:
+        return ssim_map.mean()
+    else:
+        return ssim_map.mean(1).mean(1).mean(1)
+
+def get_HF(data):  # get high-frequency
+    rs = torch.zeros_like(data)
+    if rs.ndim == 4:
+        for b in range(data.shape[0]):
+            for i in range(data.shape[1]):
+                rs[b, i, :, :] = data[b, i, :, :] - cv2.boxFilter(data[b, i, :, :], -1, (5, 5))
+    elif len(rs.shape) == 3:
+        for i in range(data.shape[2]):
+            rs[:, :, i] = data[:, :, i] - cv2.boxFilter(data[:, :, i], -1, (5, 5))
+    else:
+        rs = data - cv2.boxFilter(data, -1, (5, 5))
+    return rs
+
+def get_LF(data):  # get low-frequency
+    rs = np.zeros_like(data)
+    if rs.ndim == 4:
+        for b in range(data.shape[0]):
+            for i in range(data.shape[1]):
+                rs[b, i, :, :] = cv2.boxFilter(data[b, i, :, :], -1, (5, 5))
+    elif len(rs.shape) == 3:
+        for i in range(data.shape[2]):
+            rs[:, :, i] = cv2.boxFilter(data[:, :, i], -1, (5, 5))
+    else:
+        rs = cv2.boxFilter(data, -1, (5, 5))
+    return rs
+
+def beta_nll_loss(mean, variance, target, beta = 0.0):
+    loss = 0.5 * ((target - mean) ** 2 / variance + variance.log())
+
+    if beta > 0:
+        loss = loss * variance.detach() ** beta
+
+    return loss.mean()
+
+def charbonnier_loss(x, y, epsilon=1e-6):
+    return torch.sqrt((x - y) ** 2 + epsilon ** 2)
+
+def crossrestoration_loss(gt, pan, pred, pred_pan):
+    # loss between Teacher and student
+    w_hrms = 0.5
+    b,c,h,w = gt.shape
+
+    pan_extend = pan.repeat(1,c,1,1)
+    
+    hrms_loss = torch.abs(gt - pred)  
+    pan_loss = torch.abs(pan_extend - pred_pan)
+
+    loss = w_hrms * hrms_loss.mean() + (1 - w_hrms) * pan_loss.mean()
+    return loss
+
+# 10-18 kd_v2
+def kd_loss(gt, teacher_out, pred, teacher_feat, student_feat, teacher_variance):
+
+    alpha = 1.0
+
+    feat_loss_list = []
+    for i in [0,1,2,3,4,5]:
+        feat_loss_list.append(charbonnier_loss(teacher_feat[i],student_feat[i]))
+    # hard_out_loss = hard_loss 
+    # soft_out_loss = soft_loss
+    feat_loss = sum([f_loss.mean() for f_loss in feat_loss_list])
+    
+    b,c,h,w = gt.shape
+    # wv3
+    if c == 8:
+        w_hard = 1.0;  w_soft = 0.1;  w_feat = 0.001
+
+    # qb, gf2
+    elif c == 4:
+        w_hard = 1.0;  w_soft = 0.1;  w_feat = 0.001
+    
+    # uncertainty = False
+    uncertainty = True
+    hard_out_loss = (alpha + teacher_variance)*torch.abs(gt - pred) if uncertainty else torch.abs(gt - pred) 
+    soft_out_loss = (alpha - teacher_variance)*torch.abs(teacher_out - pred) if uncertainty else torch.abs(teacher_out - pred)
+
+    loss = w_hard * hard_out_loss.mean() + w_soft * soft_out_loss.mean() + w_feat * feat_loss 
+    return loss
+
+class CrossRes_Loss(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, gt, pan, pred, pred_pan):
+        return crossrestoration_loss(gt, pan, pred, pred_pan)    
+
+class KD_Loss(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, gt, teacher_out, pred, teacher_feature_map, student_feature_map, teacher_variance):
+        return kd_loss(gt, teacher_out, pred, teacher_feature_map, student_feature_map, teacher_variance)    
+
+class Beta_nll_Loss(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, target, mean, variance, beta):
+        return beta_nll_loss(mean, variance, target, beta)
+
+class HybridL1L2(torch.nn.Module):
+    def __init__(self):
+        super(HybridL1L2, self).__init__()
+        self.l1 = torch.nn.L1Loss()
+        self.l2 = torch.nn.MSELoss()
+        self.loss = LossWarpper(l1=self.l1, l2=self.l2)
+
+    def forward(self, pred, gt):
+        loss, loss_dict = self.loss(pred, gt)
+        return loss, loss_dict
+
+class HybridL1SSIM(torch.nn.Module):
+    def __init__(self, channel=31, weighted_r=(1.0, 0.1)):
+        super(HybridL1SSIM, self).__init__()
+        assert len(weighted_r) == 2
+        self._l1 = torch.nn.L1Loss()
+        self._ssim = SSIMLoss(channel=channel)
+        self.loss = LossWarpper(weighted_r, l1=self._l1, ssim=self._ssim)
+
+    def forward(self, pred, gt):
+        loss, loss_dict = self.loss(pred, gt)
+        return loss
+
+class HybridL1SSIMSAM(torch.nn.Module):
+    def __init__(self, channel=31, weighted_r=(1.0, 0.1, 0.1)):
+        super(HybridL1SSIMSAM, self).__init__()
+        assert len(weighted_r) == 3
+        self._l1 = torch.nn.L1Loss()
+        self._ssim = SSIMLoss(channel=channel)
+        self._sam = SAMLoss()
+        self.loss = LossWarpper(weighted_r, l1=self._l1, ssim=self._ssim, sam=self._sam)
+
+    def forward(self, pred, gt):
+        loss, loss_dict = self.loss(pred, gt)
+        return loss
+
+class HybridCharbonnierSSIM(torch.nn.Module):
+    def __init__(self, weighted_r, channel=31) -> None:
+        super().__init__()
+        self._ssim = SSIMLoss(channel=channel)
+        self._charb = CharbonnierLoss(eps=1e-4)
+        self.loss = LossWarpper(weighted_r, charbonnier=self._charb, ssim=self._ssim)
+
+    def forward(self, pred, gt):
+        loss, loss_dict = self.loss(pred, gt)
+        return loss, loss_dict
+    
+class FreqLoss(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.l1 = torch.nn.L1Loss()
+    def forward(self, img1, img2):
+        # convert to freq space
+        fft_img1 = torch.fft.rfft2(img1, dim=(-2, -1), norm="ortho")  # b, c, h, w/2+1
+        fft_img2 = torch.fft.rfft2(img2, dim=(-2, -1), norm="ortho")  # b, c, h, w/2+1
+        #amplitude 성분
+        fft_img1_amp = fft_img1.abs()
+        fft_img2_amp = fft_img2.abs()
+        #phase 성분
+        fft_img1_phase = self.phase_normalize(fft_img1.angle())
+        fft_img2_phase = self.phase_normalize(fft_img2.angle())
+        # 각 성분에 대해 loss 계산
+        loss_amp = self.l1(fft_img1_amp, fft_img2_amp)
+        loss_phase = self.l1(fft_img1_phase, fft_img2_phase)
+
+        return 0.5*loss_amp + 0.5*loss_phase
+    # phase 를 [-pi, pi] -> [0,1]로 normalize
+    def phase_normalize(self, phase):
+        # phi = pi
+        norm_phase = (phase + pi)/(2*pi)
+        norm_phase = torch.clip(norm_phase,min=0,max=1)
+        return norm_phase
+
+class HybridL1Frequency(torch.nn.Module):
+    def __init__(self, weighted_r=(1.0, 0.1)) -> None:
+        super().__init__()
+        self.l1 = torch.nn.L1Loss()
+        self.freq = FreqLoss()
+        self.loss = LossWarpper(weighted_r, l1=self.l1, freq=self.freq)
+        
+    def forward(self, pred, gt):
+        loss, loss_dict = self.loss(pred, gt)
+        return loss
+
+class LossWarpper(torch.nn.Module):
+    def __init__(self, weighted_ratio=(1.0, 1.0), **losses):
+        super(LossWarpper, self).__init__()
+        self.names = []
+        assert len(weighted_ratio) == len(losses.keys())
+        self.weighted_ratio = weighted_ratio
+        for k, v in losses.items():
+            self.names.append(k)
+            setattr(self, k, v)
+
+    def forward(self, pred, gt):
+        loss = 0.0
+        d_loss = {}
+        for i, n in enumerate(self.names):
+            l = getattr(self, n)(pred, gt) * self.weighted_ratio[i]
+            loss += l
+            d_loss[n] = l
+        return loss, d_loss
+
+
+class SSIMLoss(torch.nn.Module):
+    def __init__(
+        self, win_size=11, win_sigma=1.5, data_range=1, size_average=True, channel=3
+    ):
+        super(SSIMLoss, self).__init__()
+        self.window_size = win_size
+        self.size_average = size_average
+        self.channel = channel
+        self.window = create_window(win_size, self.channel, win_sigma)
+        self.win_sigma = win_sigma
+
+    def forward(self, img1, img2):
+        # print(img1.size())
+        (_, channel, _, _) = img1.size()
+
+        if channel == self.channel and self.window.data.type() == img1.data.type():
+            window = self.window
+        else:
+            window = create_window(self.window_size, channel, self.win_sigma)
+
+            if img1.is_cuda:
+                window = window.cuda(img1.get_device())
+            window = window.type_as(img1)
+
+            self.window = window
+            self.channel = channel
+
+        return 1 - _ssim(
+            img1, img2, window, self.window_size, channel, self.size_average
+        )
+
+
+def ssim(img1, img2, win_size=11, data_range=1, size_average=True):
+    (_, channel, _, _) = img1.size()
+    window = create_window(win_size, channel)
+
+    if img1.is_cuda:
+        window = window.cuda(img1.get_device())
+    window = window.type_as(img1)
+
+    return _ssim(img1, img2, window, win_size, channel, size_average)
+
+
+def elementwise_charbonnier_loss(
+    input: Tensor, target: Tensor, eps: float = 1e-3
+) -> Tensor:
+    """Apply element-wise weight and reduce loss between a pair of input and
+    target.
+    """
+    return torch.sqrt((input - target) ** 2 + (eps * eps))
+
+
+class HybridL1L2(nn.Module):
+    def __init__(self, cof=10.0):
+        super(HybridL1L2, self).__init__()
+        self.l1 = nn.L1Loss()
+        self.l2 = nn.MSELoss()
+        self.cof = cof
+
+    def forward(self, pred, gt):
+        return self.l1(pred, gt) / self.cof + self.l2(pred, gt)
+
+
+class CharbonnierLoss(torch.nn.Module):
+    def __init__(self, eps=1e-3) -> None:
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, img1, img2) -> Tensor:
+        return elementwise_charbonnier_loss(img1, img2, eps=self.eps).mean()
+
+class SAMLoss(nn.Module):
+    def __init__(self):
+        super(SAMLoss, self).__init__()
+
+    def forward(self, img1, img2):
+        # 입력 이미지의 차원 검증
+        if not img1.size() == img2.size():
+            raise ValueError('Input images must have the same dimensions.')
+        if img1.ndim != 4 or img1.shape[1] <= 1:
+            raise ValueError("Input dimension should be BxCxHxW and n_channels should be greater than 1")
+
+        # 이미지를 float64로 변환
+        img1_ = img1.to(torch.float64)
+        img2_ = img2.to(torch.float64)
+
+        # 내적과 스펙트럼 노름 계산
+        inner_product = (img1_ * img2_).sum(dim=1)  # BxHxW
+        img1_spectral_norm = torch.sqrt((img1_ ** 2).sum(dim=1))
+        img2_spectral_norm = torch.sqrt((img2_ ** 2).sum(dim=1))
+
+        # 코사인 유사도 계산과 손실 계산을 위한 수치 안정성 보장
+        eps = torch.finfo(torch.float64).eps
+        # eps = 0
+        cos_theta = inner_product / (img1_spectral_norm * img2_spectral_norm + eps)
+        cos_theta = torch.clamp(cos_theta, min=0, max=1)
+
+        # 1에서 코사인 유사도를 빼서 손실 계산
+        loss = 1 - cos_theta
+
+        # 배치 내 모든 이미지의 평균 손실을 반환
+        return loss.mean()
+
+class Spectral1Loss(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.sam = SAMLoss()
+    # ms 그리고 fused img를 input으로 받음
+    def forward(self, ms, fused):
+        degraded = torch.nn.functional.interpolate(fused, size=(ms.size(2), ms.size(3)),
+                                              mode="bilinear", align_corners=True)
+        loss = self.sam(ms, degraded)
+        return loss
+
+# class UIQILoss(nn.Moule):
+#     def __init__(self):
+#         super().__init__()
+
+#     def forward(self, img_base, img_out):
+#         #CC 부분 계산
+#         _, channel, h, w = img_out.shape
+#         C1 = torch.sum(torch.sum(img_base * img_out, 0), 0) - h * w * (
+#         torch.mean(torch.mean(img_base, 0), 0) * torch.mean(torch.mean(img_out, 0), 0))
+#         C2 = torch.sum(torch.sum(img_out ** 2, 0), 0) - h * w * (torch.mean(torch.mean(img_out, 0), 0) ** 2)
+#         C3 = torch.sum(torch.sum(img_base ** 2, 0), 0) - h * w * (torch.mean(torch.mean(img_base, 0), 0) ** 2)
+#         CC = C1 / ((C2 * C3) ** 0.5)
+#         CC = torch.mean(CC)
+        
+#         # 중간 파트
+
+
+#         # 마지막 부분 계산
+#         stdx = C2**0.5
+#         stdy = C3**0.5
+#         third_term = (2*stdx*stdy)/(C2+C3)
+#         return third_term
+
+def get_loss(loss_type):
+    if loss_type == "mse":
+        criterion = nn.MSELoss()
+    elif loss_type == "l1":
+        criterion = nn.L1Loss()
+    elif loss_type == "hybrid":
+        criterion = HybridL1L2()
+    elif loss_type == "smoothl1":
+        criterion = nn.SmoothL1Loss()
+    elif loss_type == "l1ssim":
+        criterion = HybridL1SSIM(channel=8, weighted_r=(1.0, 0.1))
+    elif loss_type == "charbssim":
+        criterion = HybridCharbonnierSSIM(channel=31, weighted_r=(1.0, 1.0))
+    else:
+        raise NotImplementedError(f"loss {loss_type} is not implemented")
+    return criterion
+
+
+if __name__ == "__main__":
+    # loss = SSIMLoss(channel=31)
+    # loss = CharbonnierLoss(eps=1e-3)
+    loss = Spectral1Loss()
+    fused = torch.randn(1, 8, 64, 64, requires_grad=True)
+    pan = fused[:,0,...].unsqueeze(0)
+    # y = x + torch.randn(1, 8, 64, 64) / 10
+    l = loss(pan, fused)
+    l.backward()
+    print(l)
+    print(fused.grad)
+
+
+
+========================================================================================
+FILE: unic-main/main_unic.py
+========================================================================================
+
+import argparse
+import datetime
+import math
+import os
+import shutil
+import sys
+import time
+import logging
+
+import torch
+import torch.backends.cudnn as cudnn
+import torch.distributed as dist
+import torch.nn as nn
+from torchvision.transforms import v2 as T
+from torchvision.datasets import ImageFolder
+
+import utils
+from modeling.unic import build_student_from_args
+from teachers import build_teachers, get_teacher_output
+from modeling.losses import unic_loss
+from dinov2.logging import setup_logging, ExternalLogger, MetricLogger
+from dinov2.distributed import get_global_rank
+
+
+logger = logging.getLogger()
+
+
+def get_args():
+    parser = argparse.ArgumentParser()
+
+    parser.add_argument(
+        "--arch",
+        type=str,
+        default="vit_base",
+        help="Architecture of the student model. "
+        "See dinov2/models/vision_transformer.py for options.",
+    )
+    parser.add_argument(
+        "--patch_size",
+        type=int,
+        default=16,
+        help="Patch size for the student model.",
+    )
+    parser.add_argument(
+        "--drop_path_rate",
+        type=float,
+        default=0.1,
+        help="Drop path rate for the student model.",
+    )
+    parser.add_argument(
+        "--lp_args",
+        type=str,
+        default="{'std': 0.02}",
+        help="Dictionary of keyword arguments for the ladder of projector.",
+    )
+
+    parser.add_argument(
+        "--teachers",
+        type=str,
+        default="dino_vitbase_16,deit3_vitbase_16,ibot_vitbase_16,dbotft_vitbase_16",
+        help="Comma-separated list of teacher names.",
+    )
+    parser.add_argument(
+        "--tnorm_ema_momentum_start",
+        type=float,
+        default=1.0,
+        help="Starting value for the EMA momentum for teacher feature statistics.",
+    )
+    parser.add_argument(
+        "--tnorm_ema_momentum_end",
+        type=float,
+        default=0.001,
+        help="Final value for the EMA momentum for teacher feature statistics.",
+    )
+    parser.add_argument(
+        "--t_drop_prob",
+        type=float,
+        default=0.5,
+        help="Probability of dropping a teacher in loss.",
+    )
+    parser.add_argument(
+        "--lam_lcos",
+        default=0.5,
+        type=float,
+        help="Coefficient for the cosine loss.",
+    )
+    parser.add_argument(
+        "--lam_lsl1",
+        default=0.5,
+        type=float,
+        help="Coefficient for the smooth L1 loss.",
+    )
+
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        help="Path for the ImageNet-1K data directory",
+    )
+    parser.add_argument(
+        "--image_size",
+        type=int,
+        default=224,
+        help="Image size (for both training and validation). "
+        "We assume the input images are square.",
+    )
+
+    parser.add_argument(
+        "--use_fp16",
+        type=utils.bool_flag,
+        default=True,
+        help="Whether or not to use mixed precision for training.",
+    )
+    parser.add_argument(
+        "--clip_grad",
+        type=float,
+        default=0.0,
+        help="Gradient clipping value.",
+    )
+    parser.add_argument(
+        "--batch_size_per_gpu",
+        default=128,
+        type=int,
+        help="Batch size per GPU. Total batch size is proportional to the number of GPUs.",
+    )
+    parser.add_argument(
+        "--epochs",
+        default=200,
+        type=int,
+        help="Number of training epochs.",
+    )
+    parser.add_argument(
+        "--optim_args",
+        type=str,
+        default="{'betas':(0.9, 0.99), 'eps':1e-8}",
+        help="Dictionary of keyword arguments for the optimizer.",
+    )
+    parser.add_argument(
+        "--wd",
+        type=float,
+        default=3e-2,
+        help="Weight decay for the SGD optimizer.",
+    )
+    parser.add_argument(
+        "--lr",
+        default=3e-4,
+        type=float,
+        help="Maximum learning rate at the end of linear warmup.",
+    )
+    parser.add_argument(
+        "--min_lr",
+        type=float,
+        default=1e-6,
+        help="Minimum learning rate at the end of training.",
+    )
+    parser.add_argument(
+        "--warmup_epochs",
+        default=10,
+        type=int,
+        help="Number of training epochs for the learning-rate-warm-up phase.",
+    )
+
+    parser.add_argument(
+        "--output_dir",
+        default="./output",
+        type=str,
+        help="Path to the output folder to save logs and checkpoints.",
+    )
+    parser.add_argument(
+        "--saveckpt_freq",
+        default=20,
+        type=int,
+        help="Frequency of intermediate checkpointing.",
+    )
+    parser.add_argument(
+        "--seed",
+        default=22,
+        type=int,
+        help="Random seed",
+    )
+    parser.add_argument(
+        "--num_workers",
+        default=12,
+        type=int,
+        help="Number of data loading workers per GPU.",
+    )
+    parser.add_argument(
+        "--dist_url",
+        default="env://",
+        type=str,
+        help="Url used to set up distributed training.",
+    )
+    parser.add_argument(
+        "--local_rank",
+        default=0,
+        type=int,
+        help="Please ignore this argument; No need to set it manually.",
+    )
+
+    args = parser.parse_args()
+
+    args.teachers = sorted(args.teachers.split(","))
+    args.num_cpus = len(os.sched_getaffinity(0))
+
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    return args
+
+
+def main(args):
+    utils.init_distributed_mode(args)
+    utils.fix_random_seeds(args.seed + get_global_rank())
+    torch.backends.cuda.matmul.allow_tf32 = True
+    cudnn.benchmark = True
+
+    setup_logging(os.path.join(args.output_dir, "log.txt"), level=logging.INFO)
+    utils.print_program_info(args)
+    ext_logger = ExternalLogger(args.output_dir)
+
+    logger.info("Creating data loaders ...")
+    train_loader, val_loader = get_dataloaders(args)
+
+    logger.info("Loading teachers ...")
+    teachers, teacher_ft_stats = build_teachers(args.teachers)
+
+    logger.info("Creating student model")
+    model = build_student_from_args(args)
+    model = model.cuda()
+    model = nn.parallel.DistributedDataParallel(
+        model, device_ids=[args.gpu], find_unused_parameters=True
+    )
+    utils.save_model_defn(model.module, os.path.join(args.output_dir, "model_defn.txt"))
+
+    optimizer = torch.optim.AdamW(
+        utils.get_params_groups(
+            model,
+            save_file_path=os.path.join(args.output_dir, "params_groups.txt"),
+        ),
+        lr=0,
+        **eval(args.optim_args),
+    )
+    logger.info("Optimizer: {}".format(optimizer))
+
+    fp16_scaler = None
+    if args.use_fp16:
+        fp16_scaler = torch.cuda.amp.GradScaler()
+
+    args.lr_schedule = utils.cosine_scheduler(
+        args.lr * (args.batch_size_per_gpu * dist.get_world_size()) / 256.0,
+        args.min_lr,
+        args.epochs,
+        len(train_loader),
+        warmup_epochs=args.warmup_epochs,
+    )
+
+    args.tnorm_ema_schedule = utils.cosine_scheduler(
+        args.tnorm_ema_momentum_start,
+        args.tnorm_ema_momentum_end,
+        args.epochs,
+        len(train_loader),
+        warmup_epochs=0,
+    )
+
+    to_restore = {"epoch": 0, "teacher_ft_stats": teacher_ft_stats}
+    utils.restart_from_checkpoint(
+        os.path.join(args.output_dir, "checkpoint.pth"),
+        run_variables=to_restore,
+        model=model,
+        optimizer=optimizer,
+        fp16_scaler=fp16_scaler,
+    )
+    start_epoch = to_restore["epoch"]
+    teacher_ft_stats = to_restore["teacher_ft_stats"]
+
+    logger.info("Training starts ...")
+    start_time = time.time()
+
+    for epoch in range(start_epoch, args.epochs):
+        train_loader.sampler.set_epoch(epoch)
+
+        train_one_epoch(
+            model,
+            teachers,
+            teacher_ft_stats,
+            train_loader,
+            optimizer,
+            epoch,
+            fp16_scaler,
+            ext_logger,
+            args,
+        )
+
+        evaluate(
+            model,
+            teachers,
+            teacher_ft_stats,
+            val_loader,
+            epoch,
+            ext_logger,
+            args,
+        )
+
+        save_dict = {
+            "model": model.state_dict(),
+            "teacher_ft_stats": teacher_ft_stats,
+            "optimizer": optimizer.state_dict(),
+            "epoch": epoch + 1,
+            "args": args,
+        }
+        if fp16_scaler is not None:
+            save_dict["fp16_scaler"] = fp16_scaler.state_dict()
+
+        if dist.get_rank() == 0:
+            torch.save(save_dict, os.path.join(args.output_dir, "checkpoint.pth"))
+            if args.saveckpt_freq and epoch % args.saveckpt_freq == 0:
+                shutil.copy(
+                    os.path.join(args.output_dir, "checkpoint.pth"),
+                    os.path.join(args.output_dir, f"checkpoint_{epoch:04}.pth"),
+                )
+
+    total_time = time.time() - start_time
+    total_time_str = str(datetime.timedelta(seconds=int(total_time)))
+    logger.info("Training time {}".format(total_time_str))
+
+
+def train_one_epoch(
+    model,
+    teachers,
+    teacher_ft_stats,
+    data_loader,
+    optimizer,
+    epoch,
+    fp16_scaler,
+    ext_logger,
+    args,
+):
+    logger.info("-" * 50)
+    logger.info("Starting training epoch {}".format(epoch))
+
+    metrics_file = os.path.join(args.output_dir, "metrics_training.json")
+    metric_logger = MetricLogger(delimiter="  ", output_file=metrics_file)
+    header = "Training - Epoch: [{}/{}]".format(epoch, args.epochs)
+
+    model.train()
+
+    for it, (image, target) in enumerate(
+        metric_logger.log_every(
+            data_loader,
+            10,
+            header,
+            start_iteration=epoch * len(data_loader),
+            ext_logger=ext_logger,
+            ext_logger_prefix="train/batch/",
+        )
+    ):
+        image = image.cuda(non_blocking=True)
+        target = target.cuda(non_blocking=True)
+
+        it = len(data_loader) * epoch + it
+        for i, param_group in enumerate(optimizer.param_groups):
+            param_group["lr"] = args.lr_schedule[it]
+            if i == 0:
+                param_group["weight_decay"] = args.wd
+
+        metric_dict = {
+            "lr": optimizer.param_groups[0]["lr"],
+            "wd": optimizer.param_groups[0]["weight_decay"],
+            "tnorm_ema_momentum": args.tnorm_ema_schedule[it],
+        }
+
+        with torch.cuda.amp.autocast(fp16_scaler is not None):
+            student_output = model(image)
+
+            with torch.no_grad():
+                teacher_output = get_teacher_output(
+                    image, teachers, teacher_ft_stats, args.tnorm_ema_schedule[it]
+                )
+
+            loss, _ = unic_loss(
+                student_output,
+                teacher_output,
+                args.lam_lcos,
+                args.lam_lsl1,
+                args.t_drop_prob,
+                metric_dict=metric_dict,
+            )
+
+        if not math.isfinite(loss.item()):
+            logger.info("Loss is {}, stopping training".format(loss.item()))
+            sys.exit(1)
+
+        optimizer.zero_grad()
+        grad_norms = None
+        if fp16_scaler is None:
+            loss.backward()
+            if args.clip_grad > 0:
+                grad_norms = utils.clip_gradients(model, args.clip_grad)
+            optimizer.step()
+        else:
+            fp16_scaler.scale(loss).backward()
+            if args.clip_grad > 0:
+                fp16_scaler.unscale_(optimizer)
+                grad_norms = utils.clip_gradients(model, args.clip_grad)
+            fp16_scaler.step(optimizer)
+            fp16_scaler.update()
+
+        if grad_norms is not None:
+            metric_dict.update(
+                {
+                    "grad_norm/mean": grad_norms.mean().item(),
+                    "grad_norm/std": grad_norms.std().item(),
+                    "grad_norm/max": grad_norms.max().item(),
+                    "grad_norm/min": grad_norms.min().item(),
+                }
+            )
+
+    metric_logger.synchronize_between_processes()
+    metric_dict = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    logger.info("Averaged train stats:")
+    for k, v in metric_dict.items():
+        logger.info("{}: {}".format(k, v))
+
+    ext_logger.log(
+        metric_dict,
+        epoch + 1,
+        prefix="train/epoch/",
+        save_path=os.path.join(args.output_dir, "log_train.txt"),
+    )
+
+    return metric_dict
+
+
+@torch.no_grad()
+def evaluate(
+    model,
+    teachers,
+    teacher_ft_stats,
+    data_loader,
+    epoch,
+    ext_logger,
+    args,
+):
+    metric_logger = MetricLogger(delimiter="  ")
+    header = "Test - Epoch: [{}/{}]".format(epoch, args.epochs)
+
+    model.eval()
+
+    for it, (image, target) in enumerate(
+        metric_logger.log_every(data_loader, 10, header)
+    ):
+        image = image.cuda(non_blocking=True)
+        target = target.cuda(non_blocking=True)
+
+        student_output = model(image)
+        teacher_output = get_teacher_output(image, teachers, teacher_ft_stats, 0.0)
+
+        metric_dict = {}
+        unic_loss(
+            student_output,
+            teacher_output,
+            args.lam_lcos,
+            args.lam_lsl1,
+            args.t_drop_prob,
+            metric_dict=metric_dict,
+        )
+        metric_logger.update(**metric_dict)
+
+    metric_logger.synchronize_between_processes()
+    metric_dict = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+
+    logger.info("Averaged test stats:")
+    for k, v in metric_dict.items():
+        logger.info("{}: {}".format(k, v))
+
+    ext_logger.log(
+        metric_dict,
+        epoch + 1,
+        prefix="test/epoch/",
+        save_path=os.path.join(args.output_dir, "log_test.txt"),
+    )
+
+    return metric_dict
+
+
+def get_dataloaders(args):
+    normalize = T.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+
+    train_dataset = ImageFolder(
+        os.path.join(args.data_dir, "train"),
+        # fmt:off
+        transform=T.Compose(
+            [
+                T.ToImage(),
+                T.RandomResizedCrop(args.image_size, interpolation=T.InterpolationMode.BICUBIC, antialias=True),
+                T.RandomHorizontalFlip(p=0.5),
+                T.RandomApply([T.ColorJitter(brightness=0.4, contrast=0.4, saturation=0.2, hue=0.1)], p=0.8),
+                T.RandomApply([T.Grayscale(num_output_channels=3)], p=0.2),
+                T.ToDtype(torch.float32, scale=True),
+                T.RandomApply([T.GaussianBlur(kernel_size=9, sigma=(0.1, 5.0))], p=0.2),
+                T.RandomSolarize(threshold=0.5, p=0.2),
+                normalize,
+            ]
+        ),
+        # fmt:on
+    )
+    logger.info("Training dataset:\n - {}".format(train_dataset))
+
+    val_dataset = ImageFolder(
+        os.path.join(args.data_dir, "val"),
+        # fmt:off
+        transform=T.Compose(
+            [
+                T.ToImage(),
+                T.Resize(args.image_size, interpolation=T.InterpolationMode.BICUBIC, antialias=True),
+                T.CenterCrop(args.image_size),
+                T.ToDtype(torch.float32, scale=True),
+                normalize,
+            ]
+        ),
+        # fmt:on
+    )
+    logger.info("Validation dataset:\n - {}".format(val_dataset))
+
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        sampler=torch.utils.data.DistributedSampler(
+            train_dataset, seed=args.seed, shuffle=True
+        ),
+        batch_size=args.batch_size_per_gpu,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True,
+        prefetch_factor=4,
+    )
+
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=args.batch_size_per_gpu,
+        num_workers=args.num_workers,
+        shuffle=False,
+        drop_last=False,
+        pin_memory=True,
+    )
+
+    return train_loader, val_loader
+
+
+if __name__ == "__main__":
+    args = get_args()
+    main(args)
+
+
+========================================================================================
+FILE: unic-main/modeling/losses.py
+========================================================================================
+
+from typing import Dict
+
+import torch
+import torch.nn.functional as F
+
+from .teacher_dropping import aggregate_losses
+
+
+def unic_loss(
+    student_output: Dict[str, Dict[str, torch.Tensor]],
+    teacher_output: Dict[str, Dict[str, torch.Tensor]],
+    lam_lcos: float = 0.5,
+    lam_lsl1: float = 0.5,
+    t_drop_prob: float = 0.5,
+    metric_dict: Dict = {},
+):
+    loss_pt = loss_per_teacher(
+        student_output,
+        teacher_output,
+        lam_lcos,
+        lam_lsl1,
+        metric_dict=metric_dict,
+    )
+
+    loss, tcoeffs = aggregate_losses(loss_pt, drop_prob=t_drop_prob)
+
+    for tname in teacher_output.keys():
+        metric_dict["t_coeff_{}".format(tname)] = tcoeffs[tname]
+
+    metric_dict["loss/dist"] = loss.item()
+
+    return loss, metric_dict
+
+
+def loss_per_teacher(
+    student_output: Dict[str, Dict[str, torch.Tensor]],
+    teacher_output: Dict[str, Dict[str, torch.Tensor]],
+    lam_cos: float,
+    lam_sl1: float,
+    metric_dict={},
+) -> Dict[str, torch.Tensor]:
+    loss_pt = {}
+
+    for tname in teacher_output.keys():
+
+        tout_dict = teacher_output[tname]
+        sout_dict = student_output[tname]
+        losses = []
+
+        for ttype in tout_dict.keys():
+            tout = tout_dict[ttype]
+            sout = sout_dict[ttype]
+
+            loss_cos = cosine_loss(sout, tout, avg=False)
+            loss_sl1 = smooth_l1_loss(sout, tout, avg=False)
+            loss = lam_cos * loss_cos + lam_sl1 * loss_sl1
+
+            # for patch tokens
+            if len(loss.shape) == 2:
+                loss = loss.mean(dim=1)
+
+            losses.append(loss)
+
+            # fmt:off
+            metric_dict.update(
+                {
+                    "loss/dist_{}_cos_{}".format(ttype, tname): loss_cos.mean().item(),
+                    "loss/dist_{}_sl1_{}".format(ttype, tname): loss_sl1.mean().item(),
+                    "loss/dist_{}_{}".format(ttype, tname): loss.mean().item(),
+                }
+            )
+            # fmt:on
+
+        losses = torch.stack(losses, dim=1).mean(dim=1)
+        loss_pt[tname] = losses
+
+        metric_dict.update(
+            {
+                "loss/dist_{}".format(tname): losses.mean().item(),
+            }
+        )
+
+    return loss_pt
+
+
+def cosine_loss(pred, target, avg=False):
+    sim = F.cosine_similarity(pred, target, dim=-1)
+    loss = 1 - sim
+
+    if avg:
+        loss = loss.mean()
+
+    return loss
+
+
+def smooth_l1_loss(pred, target, beta=1.0, avg=False):
+    loss = F.smooth_l1_loss(pred, target, reduction="none", beta=beta).mean(dim=-1)
+
+    if avg:
+        loss = loss.mean()
+
+    return loss
+
+
+========================================================================================
+FILE: unic-main/modeling/teacher_dropping.py
+========================================================================================
+
+import random
+import torch
+
+
+def aggregate_losses(loss_dict, drop_prob=0.5):
+    """
+    Given a dictionary of losses, which are expected to be 2D tensors of shape (B, N),
+    where B is the batch size and N is the number of tokens, this function aggregates
+    the losses into a single loss tensor.
+    """
+    sorted_keys = sorted(loss_dict.keys())
+
+    B = next(iter(loss_dict.values())).shape[0]
+    loss_list = torch.stack([loss_dict[key] for key in sorted_keys])
+    assert loss_list.shape == (len(loss_dict), B)
+
+    coeffs = torch.stack(
+        [
+            _get_teacher_coefficients_by_loss(loss_list[:, lix], drop_prob=drop_prob)
+            for lix in range(loss_list.shape[1])
+        ]
+    ).t()
+    assert coeffs.shape == loss_list.shape
+
+    # make sure each image is assigned at least one teacher
+    assert torch.all(coeffs.sum(dim=0) >= 1)
+
+    #####
+    # normalize coefficients such that
+    # each image contributes to the loss with equal weight
+    coeffs.div_(coeffs.sum())
+    loss = (coeffs.clone().detach() * loss_list).sum()
+
+    coeffs = coeffs.sum(dim=1)  # for logging teacher coefficients
+    coeffs = {key: coeff for key, coeff in zip(sorted_keys, coeffs)}
+
+    return loss, coeffs
+
+
+@torch.no_grad()
+def _get_teacher_coefficients_by_loss(losses, drop_prob=0.5):
+    """
+    Given a list of losses from all teachers, return a list for their loss coefficients.
+    Initially, all coefficients are 1.
+    Then we flip coefficients for teachers with lowest loss to zeros with a probability drop_prob.
+    """
+    if isinstance(losses, (list, tuple)):
+        losses = torch.stack(losses)
+
+    # make sure that losses are 1D
+    assert len(losses.shape) == 1
+
+    coeffs = torch.ones_like(losses, requires_grad=False)
+
+    # find the teacher with the highest loss
+    max_loss_idx = torch.argmax(losses)
+
+    # go through other teachers and
+    # flip their coefficients to zeros with a probability drop_prob
+    for i in range(len(losses)):
+        if i != max_loss_idx:
+            p = random.random()
+            if p < drop_prob:
+                coeffs[i] = 0
+
+    return coeffs
+
+
+========================================================================================
+FILE: unic-main/modeling/unic.py
+========================================================================================
+
+import math
+import os
+from collections import defaultdict
+from typing import Dict, List
+
+import torch
+import torch.nn as nn
+
+from dinov2.models import vision_transformer
+
+
+class UNIC(nn.Module):
+    def __init__(self, encoder, lp):
+        super().__init__()
+        self.encoder = encoder
+        self.lp = lp
+
+    def forward(self, image):
+        x, num_register_tokens = self.encoder.prepare_tokens_with_masks(image)
+        output_cls = [x[:, 0, :]]
+        output_patch = [x[:, 1 + num_register_tokens :, :]]
+
+        for blk in self.encoder.blocks[0]:
+            x = blk(x)
+            output_cls.append(x[:, 0, :])
+            output_patch.append(x[:, 1 + num_register_tokens :, :])
+
+        out = self.lp(output_cls, output_patch)
+
+        return out
+
+
+class LP(nn.Module):
+    def __init__(
+        self,
+        input_dim: int,
+        head_dims: Dict[str, int],
+        n_encoder_blocks: int,
+        which_blocks: List[int] = None,
+        hidden_dim: int = 768,
+        last_hidden_dim: int = 3072,
+        prenorm: bool = False,
+        midnorm: bool = False,
+        std: float = 0.02,
+    ):
+        super().__init__()
+
+        if which_blocks is None:
+            which_blocks = list(range(n_encoder_blocks))
+        self.which_blocks = which_blocks
+
+        def _make_head(output_dim):
+            return nn.ModuleList(
+                [
+                    (
+                        AdaptMLP(
+                            hidden_dim=(
+                                last_hidden_dim
+                                if bix == n_encoder_blocks - 1
+                                else hidden_dim
+                            ),
+                            prenorm=prenorm,
+                            midnorm=midnorm,
+                            dim=input_dim,
+                            output_dim=output_dim,
+                        )
+                        if bix in which_blocks
+                        else None
+                    )
+                    for bix in range(n_encoder_blocks)
+                ]
+            )
+
+        self.heads = nn.ModuleDict(
+            {
+                hname: nn.ModuleDict(
+                    {
+                        "cls": _make_head(head_dims[hname]),
+                        "patch": _make_head(head_dims[hname]),
+                    }
+                )
+                for hname in sorted(head_dims.keys())
+            }
+        )
+
+        for m in self.heads.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.trunc_normal_(m.weight, std=std)
+                if m.bias is not None:
+                    nn.init.constant_(m.bias, 0)
+
+    def forward(
+        self, x_cls: List[torch.Tensor], x_patch: List[torch.Tensor]
+    ) -> Dict[str, Dict[str, torch.Tensor]]:
+        out = defaultdict(dict)
+
+        for hname, head_dict in self.heads.items():
+            xc = 0
+            xp = 0
+
+            for bix in self.which_blocks:
+                xc = xc + head_dict["cls"][bix](x_cls[bix + 1])
+                xp = xp + head_dict["patch"][bix](x_patch[bix + 1])
+
+            out[hname]["cls"] = xc
+            out[hname]["patch"] = xp
+
+        return out
+
+
+class AdaptMLP(nn.Module):
+
+    def __init__(
+        self,
+        hidden_dim,
+        prenorm=False,
+        midnorm=False,
+        norm_fn=nn.LayerNorm,
+        act_fn=nn.GELU,
+        scale=1.0,
+        zinit=False,
+        dim=None,
+        output_dim=None,
+    ):
+        super().__init__()
+        self.hidden_dim = hidden_dim
+        self.prenorm = prenorm
+        self.midnorm = midnorm
+        self.norm_fn = norm_fn
+        self.act_fn = act_fn
+        self.scale = nn.Parameter(torch.ones(1).float()) if scale == 0.0 else scale
+        self.zinit = zinit
+        if dim is not None:
+            self.setup(dim, output_dim)
+
+    def extra_repr(self):
+        repr = "scale={}, zinit={}".format(self.scale, self.zinit)
+        return repr
+
+    def setup(self, dim, output_dim=None):
+        layers = []
+
+        if self.prenorm:
+            layers.append(self.norm_fn(dim))
+
+        layers.append(nn.Linear(dim, self.hidden_dim))
+        if self.zinit:
+            nn.init.kaiming_uniform_(layers[-1].weight, a=math.sqrt(5))
+            nn.init.zeros_(layers[-1].bias)
+
+        if self.midnorm:
+            layers.append(self.norm_fn(self.hidden_dim))
+
+        layers.append(self.act_fn())
+
+        layers.append(
+            nn.Linear(self.hidden_dim, dim if output_dim is None else output_dim)
+        )
+        if self.zinit:
+            nn.init.zeros_(layers[-1].weight)
+            nn.init.zeros_(layers[-1].bias)
+
+        self.layers = nn.Sequential(*layers)
+
+    def forward(self, x):
+        return self.scale * self.layers(x)
+
+
+def _build_encoder_from_args(args):
+    return vision_transformer.get_model(
+        arch=args.arch,
+        patch_size=args.patch_size,
+        drop_path_rate=args.drop_path_rate,
+        img_size=args.image_size,
+    )
+
+
+def load_student_encoder_from_checkpoint(ckpt_fname, ckpt_key="model"):
+    assert os.path.isfile(ckpt_fname), "Student checkpoint ({}) not found!".format(
+        ckpt_fname
+    )
+    ckpt = torch.load(ckpt_fname, "cpu")
+
+    encoder = _build_encoder_from_args(ckpt["args"])
+
+    state_dict = ckpt.get(ckpt_key, ckpt)
+    encoder.load_state_dict(
+        {
+            k.replace("module.", "").replace("encoder.", ""): v
+            for k, v in state_dict.items()
+            if "encoder." in k
+        }
+    )
+
+    return encoder, ckpt["epoch"]
+
+
+def build_student_from_args(args):
+
+    encoder = _build_encoder_from_args(args)
+
+    from teachers import TEACHER_CFG
+
+    lp_args = eval(args.lp_args)
+    lp = LP(
+        input_dim=encoder.embed_dim,
+        head_dims={
+            tname: TEACHER_CFG[tname]["num_features"] for tname in args.teachers
+        },
+        n_encoder_blocks=encoder.n_blocks,
+        **lp_args,
+    )
+
+    model = UNIC(encoder, lp)
+
+    return model
+
+
+def load_student_from_checkpoint(ckpt_fname, ckpt_key="model"):
+    assert os.path.isfile(ckpt_fname), ckpt_fname
+    ckpt = torch.load(ckpt_fname, "cpu")
+
+    model = build_student_from_args(ckpt["args"])
+    tnorms = ckpt["teacher_ft_stats"] if "teacher_ft_stats" in ckpt else None
+
+    state_dict = ckpt.get(ckpt_key, ckpt)
+    model.load_state_dict({k.replace("module.", ""): v for k, v in state_dict.items()})
+
+    return model, tnorms, ckpt["epoch"]
+
+
+========================================================================================
+FILE: unic-main/teachers/__init__.py
+========================================================================================
+
+import logging
+from collections import defaultdict
+from typing import List, Dict
+
+import torch
+
+from utils import standard_normalize
+from .config import TEACHER_CFG
+from .builder import build_teachers
+
+
+logger = logging.getLogger()
+
+
+@torch.no_grad()
+def get_teacher_output(
+    image: torch.Tensor,
+    teachers: List[str],
+    teacher_ft_stats: Dict[str, Dict[str, Dict[str, torch.Tensor]]],
+    teacher_ft_stat_ema_momentum: float = 0.0,
+) -> Dict[str, Dict[str, torch.Tensor]]:
+
+    teacher_output = defaultdict(dict)
+
+    for tname in teachers.keys():
+        tout_dict = teachers[tname].forward_features(image)
+
+        for ttype in ["cls", "patch"]:
+            key = "x_norm_{}{}".format(ttype, "token" if ttype == "cls" else "tokens")
+            tout = tout_dict[key]
+            tout = standard_normalize(
+                tout,
+                mean_ema=teacher_ft_stats[tname][ttype]["mean"],
+                std_ema=teacher_ft_stats[tname][ttype]["std"],
+                ema_momentum=teacher_ft_stat_ema_momentum,
+            )
+
+            teacher_output[tname][ttype] = tout
+
+    return teacher_output
