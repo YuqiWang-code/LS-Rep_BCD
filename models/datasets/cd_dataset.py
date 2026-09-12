@@ -31,6 +31,7 @@ class CDDataset(torch.utils.data.Dataset):
         return_meta: bool = False,
         teacher_cache=None,
         seed: int = 2333,
+        cache_replay: str = 'legacy',
     ):
         self.split = dataset
         self.root = Path(file_root)
@@ -44,6 +45,7 @@ class CDDataset(torch.utils.data.Dataset):
         self.teacher_cache = teacher_cache
         self.seed = int(seed)
         self.epoch = 0
+        self.cache_replay = cache_replay
 
     def __len__(self):
         return len(self.file_list)
@@ -109,7 +111,7 @@ class CDDataset(torch.utils.data.Dataset):
 
         if self.teacher_cache is not None:
             pack = self.teacher_cache.load(sample_id)
-            pack = replay_teacher_pack(pack, aug_state)
+            pack = replay_teacher_pack(pack, aug_state, self.cache_replay)
             return image, label, sample_id, pack
         if self.return_meta:
             return image, label, sample_id
@@ -142,6 +144,7 @@ def get_loader(
     return_meta=False,
     teacher_cache=None,
     seed=2333,
+    cache_replay='legacy',
 ):
     mean = [0.406, 0.456, 0.485, 0.406, 0.456, 0.485]
     std = [0.225, 0.224, 0.229, 0.225, 0.224, 0.229]
@@ -165,6 +168,7 @@ def get_loader(
         return_meta=return_meta,
         teacher_cache=teacher_cache,
         seed=seed,
+        cache_replay=cache_replay,
     )
     return torch.utils.data.DataLoader(
         dataset,

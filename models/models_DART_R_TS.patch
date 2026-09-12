@@ -1,0 +1,1213 @@
+--- a/models/README_DIRECTION_C.md
++++ b/models/README_DIRECTION_C.md
+@@ -1,129 +1,33 @@
+-# 方向 C 代码交付说明
++# DART-R-TS 代码包（C1 主方案）
+ 
+-本包基于执行时 GitHub 提交 [`c1d43561a35efedeefce6142d514f139d2238863`](https://github.com/YuqiWang-code/LS-Rep_BCD/tree/c1d43561a35efedeefce6142d514f139d2238863)，复用已有材料，没有重新开展文献调研。`implementation_version=direction_c_v1`。这是方向 C 的首个可运行实验实现；通过程序检查不代表已经证明精度收益。
++基于 GitHub `98c58266a99e73e340ae844a81aca366613fda4b`。附件与该提交全部 65 个 Python 文件的 AST 一致。完整诊断、数学定义、实验表与限制见压缩包根目录 `DELIVERY_REPORT.md`。
+ 
+-## 1. 替换范围
++- **运行改进版用 C1**；B0 是 clean baseline，C0 保留旧梯度路由，C0F 只修复旧 C0 的增强，C2–C5 是机制消融。
++- **C1 不再训练 MLP/辅助头**：使用 SAM 结构引导的变化概率传输、OV 软变化提案、GT 检查的逐像素收益路由；部署完全删除辅助对象。
++- C1 训练/部署均为 **2,913,094 参数**。CPU 实测 256×256 THOP **2.7676336G**；不能据此宣称真实数据精度提升。
++- `routing_cfg={'mechanism':'task_space'}` 才实例化新机制；省略时仍为 legacy，避免旧工具静默改变语义。
++- 新版 `implementation_version=dart_r_ts_v2`。旧 v1 checkpoint 可导出学生，不能当作新机制的精确恢复点。不要从 C0 best 接着训练当作 C1 的 40k 公平结果。
++- Cache 只读；不含、不调用 Cache 重建流程。教师 relation 字段仍被校验，但 C1 不使用未确认语义的 OV Gram 监督。
++- `README_DIRECTION_C_V1.md` 仅用于旧版本归档，其实验状态和日期不适用于 C1。
+ 
+-`models.zip` 内是完整 `models/`。先将服务器原 `models/` 移到项目外备份，再解压放入项目根目录；不要直接覆盖混合，否则旧文件仍会残留。其余数据、Cache、权重及历史结果目录不需要移动。包内不含数据、预训练权重或测试环境依赖。
+-
+-保留 B0（clean baseline）与 C0（方向 C）两个入口。原 backbone、SWA/TFM/decoder 主计算路径、四尺度 GT loss 保留；清理旧蒸馏实现、旧 H/R/N 实验分支及旧专用工具。项目根目录旧脚本如仍传入旧实验名或 HSD 参数，需要改用本说明命令。
+-
+-| 文件 | 实现职责 |
+-|---|---|
+-| `a2net.py` | 原学生路径、训练辅助接口、`switch_to_deploy()` |
+-| `distill/diagnostics.py` | `build_cd_difficulty()`：六维困难画像及空间困难权重 |
+-| `distill/routing.py` | `estimate_teacher_fit()`、`DirectionC`、带硬 Reject 的损失聚合 |
+-| `distill/losses.py` | 两位教师各自的辅助头、response/boundary/relation loss |
+-| `distill/teacher_cache.py` | 两套离线 Cache 的配对、覆盖与格式校验 |
+-| `datasets/cache_transforms.py` | Cache 几何增强重放 |
+-| `scripts/train.py` | B0/C0 训练、原日志/保存协议及新增诊断字段 |
+-| `utils/checkpoint.py` | 学生/辅助头/Router、两个优化器及 RNG 状态 |
+-| `tools/validate_teacher_cache.py` | 只读检查全部训练 Cache |
+-| `tools/dry_run_direction_c.py` | 真实 Cache 单批前后向与部署检查 |
+-| `tools/smoke_direction_c.py` | 无数据的必要功能检查 |
+-| `tools/export_deploy.py` | 导出只含学生的权重 |
+-
+-## 2. 已落地的设计选择
+-
+-原材料未确定的适配度、Router 学习信号和 relation 语义，按以下明确约定实现，不能写成某篇论文已经验证的结论。
+-
+-**诊断。** `h` 依次为边界漏检率、内部碎裂度、小变化漏检率、背景误报率、预测二元熵、GT 变化面积比。全部从 `sg(P)` 和训练 GT 计算。边界半径默认 2，小目标阈值默认 64 像素；碎裂根据 GT 连通区域内预测的连通片数量计算。无对应 GT 支持时指标为 0，并在返回值中提供有效标志。连通域用 SciPy 在 CPU 上计算。
+-
+-**可靠性。** 用困难空间权重加权教师 quality/confidence，形成 `q_k`。`d_k` 是该教师损失与 GT 代理损失在最终 decoder 特征处的梯度加权余弦相似度；空间权重关注边界漏检、碎裂、小变化漏检、误报和不确定位置。`d` 的范围是 [-1,1]，`r_k=q_k*max(d_k,0)`。GT 代理使用最终输出的逐样本 BCE+Dice；学生主损失仍是原四尺度 BCE+Dice。`d` 是局部一阶适配度代理，并非真实参数更新后的收益，也未证明能预测跨数据集收益。
+-
+-**Router 与 stop-gradient。** MLP 为 `8 -> 16 -> 3`，输出 SAM/OV/Reject 的 softmax 权重。h、q、d、r 均不向学生反传，Router 的输入显式 detach；用于学生蒸馏损失的权重也 detach。Router 独立用交叉熵学习标签：若最大 `q*d > utility_margin`（默认 0.02），标签是该教师，否则是 Reject。Router 有独立 Adam；不通过最小化自己加权后的教师损失学习，以免直接通过减小权重降低目标。
+-
+-**Reject。** 每个样本取三个输出中的 argmax；若为 Reject，有效教师权重全部置零，否则保留两个原 softmax 教师权重，不重新归一化。学生更新目标为 `L_GT + kd_lambda * mean_i(sum_k(w_eff[i,k]*L[i,k]))`，默认 `kd_lambda=0.06`。Reject 样本对学生只提供 GT 监督；Router 仍接受自身交叉熵监督。辅助损失先逐样本计算再加权，避免某个样本 Reject 后仍泄漏教师梯度。原始教师损失仍会被计算和记录，以构造适配度；归零的是教师对学生总损失的贡献。
+-
+-**两个独立教师。** SAM 为边界 BCE + 0.1 × 同实例邻接关系损失，t1/t2 各自处理，绝不直接比较两个时相的 instance ID 数值。OV 为 soft_change BCE + 0.1 × 空间余弦 Gram 损失，l1/l2 平均。辅助头只读取现有 decoder 特征，训练参数共增加 1,365，其中 Router 195。
+-
+-**relation 的边界。** 文档只给出了 OV relation 的 8 通道形状，没有完整生成器语义。因此使用池化到 8×8 空间后的两两余弦关系，比较空间 Gram，未将通道臆定为八邻域方向或 DINO 原始特征。该比较对统一通道置换不变，但这不能证明任意时相变换下缓存都正确；真实 Cache 的生成语义仍须结合生成器确认。当前将 OV 缓存视为无序时相对的变化描述。
+-
+-**冷启动限制。** 辅助头随机初始化，梯度代理可能不稳定，初期甚至长期全 Reject 都可能发生。实现不强迫教师参与；请同时检查 `target_reject_ratio`、`reject_ratio`、`d_*` 与 `router_accuracy`，区分教师代理不适配与 Router 未学会标签。缓存 q 也不自动等同于已校准的变化置信度。这些属于需要真实实验评估的方法问题。
+-
+-## 3. 数据、Cache 与权重
+-
+-沿用数据目录中的 `A/`、`B/`、`label/`、`list/train.txt`、`list/val.txt`、`list/test.txt`。保留原图像读取/归一化及标签阈值协议；输入为已对齐的 256×256 图像，GT 继续使用原 0/255 标签。不重划分数据，不生成伪 GT，不读取验证/测试 GT 来训练 Router。
+-
+-C0 只读取训练 split 的 SAMStruct 与 OVCDistill。两个 manifest 的 sample ID 集合必须与训练列表一致；不接受缺失后静默降级。GT、A/B、SAM、OV 同步重放裁剪和翻转，instance ID 使用最近邻；OV 保留 l1/l2 原生空间分辨率。时相交换同步交换 SAM 的 t1/t2，OV 按上述无序时相对约定处理。不得将旧缓存再套一套独立随机增强。
+-
+-读取约定：`manifest.json` 含 `cache_version=1`、`source_dataset`、`config_hash`、`entries`（ID -> 相对 `train/` 的文件路径）。SAM 的 `teacher_type=sam2_struct_v2`。每个 pt 含 `sample_id` 和 `meta.config_hash`。SAM 的 `t1/t2` 各含 `[1,H,W]` 的 `instance_id/boundary/quality`；OV 的 `soft_change/confidence/relation` 各含 `l1/l2`，通道数分别 1/1/8。概率/quality 在 [0,1]；ID 为非负 int32/int64。加载器校验格式和范围，不自动裁掉异常值或改写原 Cache。
+-
+-继续使用已有 `lwganet_l0_e299.pth` 初始化学生，不需要新的 SAM/DINO 预训练权重；教师已由离线 Cache 提供。新辅助头和 Router 随机初始化。依赖沿用 PyTorch、NumPy、OpenCV、SciPy，THOP 用于 FLOPs 检查；不在线导入 UNIC、DiffPAN 或 SAM 推理工程。
+-
+-增强改成按 seed/epoch/sample ID 对应索引确定随机状态，B0/C0 在本包内使用相同数据顺序和增强；这和历史版本随机数消费顺序并非逐步相同。正式对照应重跑本包的 B0，不能将旧 B0 当成逐随机状态一致的对照。
+-
+-## 4. 服务器命令
+-
+-在项目根目录及原训练环境执行。以下使用 SYSU，WHU 可修改 `cd_dataset`；文档未确认 CDD/LEVIR 的两套缓存齐备，不默认它们可以直接运行 C0。
++在服务器原 `lsrep` 环境和项目根目录运行：
+ 
+ ```bash
+-cd /home/yqwang/projects/LS-Rep_BCD_RSML_3
+-cd_dataset=SYSU
+-cd_data_root="/home/yqwang/datasets/CD/${cd_dataset}-CD-256"
+-cd_sam_root="/home/yqwang/datasets/CD_teacher_cache/SAMStruct/sam2.1_hiera_large/${cd_dataset}-CD-256"
+-cd_ov_root="/home/yqwang/datasets/CD_teacher_cache/OVCDistill/dinov2_vitb14/${cd_dataset}-CD-256"
+-cd_pretrained="/home/yqwang/projects/LS-Rep_BCD_RSML_3/pre-trained_weights/lwganet_l0_e299.pth"
+-cd_ckpt_root="/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/DirectionC"
+-cd_log_root="/home/yqwang/outputs/LS-Rep_BCD_RSML_3/DirectionC"
+-
+-# 首次运行前：全训练集 Cache 只读校验，然后真实单批检查。
+-python -m models.tools.validate_teacher_cache \
+-  --data_root "$cd_data_root" --dataset_name "$cd_dataset" \
+-  --sam_cache_root "$cd_sam_root" --ov_cache_root "$cd_ov_root"
+-python -m models.tools.dry_run_direction_c \
+-  --data_root "$cd_data_root" --dataset_name "$cd_dataset" \
+-  --sam_cache_root "$cd_sam_root" --ov_cache_root "$cd_ov_root" \
+-  --pretrained_path "$cd_pretrained" --device cuda:0 --batch_size 2
+-
+-# B0 与 C0 使用同一协议，结果分别保存在新目录。
+-python -m models.scripts.train --experiment B0 \
+-  --dataset_name "$cd_dataset" --data_root "$cd_data_root" \
+-  --pretrained_path "$cd_pretrained" --gpu_id 0 \
+-  --batch_size 64 --max_steps 40000 --seed 2333 \
+-  --save_dir "$cd_ckpt_root/B0/$cd_dataset/steps_40000/seed_2333" \
+-  --log_file "$cd_log_root/B0/$cd_dataset/steps_40000/seed_2333/train_log.txt"
+-
+-python -m models.scripts.train --experiment C0 \
+-  --dataset_name "$cd_dataset" --data_root "$cd_data_root" \
+-  --pretrained_path "$cd_pretrained" --gpu_id 0 \
+-  --sam_cache_root "$cd_sam_root" --ov_cache_root "$cd_ov_root" \
+-  --batch_size 64 --max_steps 40000 --seed 2333 \
+-  --kd_lambda 0.06 --router_lr 0.001 --utility_margin 0.02 \
+-  --save_dir "$cd_ckpt_root/C0/$cd_dataset/steps_40000/seed_2333" \
+-  --log_file "$cd_log_root/C0/$cd_dataset/steps_40000/seed_2333/train_log.txt"
++python -m models.tools.smoke_task_space --device cuda:0
++python -m models.tools.dry_run_task_space \
++  --dataset_name SYSU --data_root /home/yqwang/datasets/CD/SYSU-CD-256 \
++  --sam_cache_root /home/yqwang/datasets/CD_teacher_cache/SAMStruct/sam2.1_hiera_large/SYSU-CD-256 \
++  --ov_cache_root /home/yqwang/datasets/CD_teacher_cache/OVCDistill/dinov2_vitb14/SYSU-CD-256 \
++  --pretrained_path /home/yqwang/projects/LS-Rep_BCD_RSML_3/pre-trained_weights/lwganet_l0_e299.pth \
++  --device cuda:0 --batch_size 2
++bash models/scripts/run_task_space.sh B0 SYSU 0 2333
++bash models/scripts/run_task_space.sh C1 SYSU 0 2333
+ ```
+ 
+-若 batch 64 在真实 GPU 上不足，需同时调整 B0/C0 并使用新的对照目录；本地未测显存。本实现每批为适配度额外计算一次 GT 代理梯度和两个教师梯度，并进行 CPU 连通域诊断，训练速度不能由部署 FLOPs 推断。
+-
+-恢复训练：使用原启动命令加 `--resume <该次运行目录>/last_checkpoint.pth`，保留同样实验、数据、Cache、超参、save_dir 和 log_file。恢复从保存的 epoch 边界开始；不提供任意 batch 中断位置恢复。新版本严格检查配置与列表/manifest 指纹，旧蒸馏 checkpoint 不能恢复为 C0，本包也不把旧格式 B0 当作新格式恢复点。
+-
+-导出已由验证集 F1 选择的最佳 checkpoint：
++恢复 C1：原相同命令最后加 `resume`：
+ 
+ ```bash
+-python -m models.tools.export_deploy \
+-  --checkpoint /实际运行目录/best_model_F1=实际数值.pth \
+-  --output /实际运行目录/student_deploy.pth
++bash models/scripts/run_task_space.sh C1 SYSU 0 2333 resume
+ ```
+ 
+-导出文件保留 `model` 权重字典，仅含学生；推理模型用 `A2Net_LWGANet_L0(pretrained=False)` 严格加载该字典。它不再含训练状态，不能作为恢复训练 checkpoint。
+-
+-## 5. 日志与保存
+-
+-保留 `train_log.txt` 默认文件名、原 epoch/指标记录结构、`last_checkpoint.pth`、`best_model_F1={F1:.6f}.pth`、验证 F1 严格变好时更新最佳模型，以及 `=== TEST RESULTS ===` / `=== END TEST RESULTS ===` 块和原指标名称。日志首行方法标题更新为通用 A2Net 标题。路径仍由 `save_dir` 和 `log_file` 控制，上面的新子目录用于隔离旧实验。
+-
+-新增 h 六项、q/d/r、教师 softmax/有效权重、Reject 比例、目标 Reject 比例、Router 准确率及 CE、独立教师损失等字段。checkpoint 的 `model` 同时包含辅助头及 Router；主 `optimizer` 包含学生/辅助头，新增 `router_optimizer`，保留 epoch/global_step/best_val_f1/args/RNG，并增加格式版本字段。保存格式兼容约定不等于旧方法参数可直接恢复。
+-
+-## 6. 已完成验证与未验证范围
+-
+-本地 CPU / PyTorch 2.14.0+cpu，真实 A2Net 模型，合成输入及按文档构造的磁盘 Cache：
+-
+-- 导入、前向/反向通过；B0/C0 在相同初始化下训练预测和主路径 BN 状态一致。
+-- 强制 Reject 后所有教师贡献为 0，学生梯度与纯 GT baseline 一致；两个教师分别启用时都能向学生及辅助头反传。
+-- Router 独立收到非零梯度，其更新不向学生/辅助头反传；h/q/d/r/有效权重切断学生梯度。
+-- 空 GT、碎裂、零 quality、适配度正负号、relation 通道置换及几何重放检查通过。
+-- 学生/辅助头/Router/两个优化器及 RNG 保存恢复通过；恢复后下一优化步与不中断路径一致。
+-- B0/C0 各完成两步完整训练、验证最佳模型保存、test 结果块、已完成 checkpoint 重载与部署导出。
+-- 辅助分支删除前后预测最大误差 **0**；部署参数 **2,913,094**，本环境 THOP **2.767634G**（256×256）。保留原图及既有约 2.75G 的计数口径差异。
+-
+-上述结果证明实现路径可运行，不是遥感数据集指标。未验证 RSML-3 实际数据/Cache 内容、已有预训练文件加载、CUDA 数值和显存、长程恢复、多进程真实 I/O 吞吐、teacher reliability 的实际有效性及 C0 相对 B0 的收益。部署图不含任何 Cache、诊断器、Router 或辅助头。
++默认 batch64 / 40k / seed2333；`DART_STEPS`、`DART_BATCH` 仅供明确改变实验预算时使用。checkpoint 与日志分开存入 `DART-R-TS/<ID>/<dataset>/steps_<steps>/seed_<seed>`。四数据集必须各做真实 Cache dry run；本交付仅验证了合成磁盘 Cache，没有访问 RSML-3。
+--- /dev/null
++++ b/models/README_DIRECTION_C_V1.md
+@@ -0,0 +1,129 @@
++# 方向 C 代码交付说明
++
++本包基于执行时 GitHub 提交 [`c1d43561a35efedeefce6142d514f139d2238863`](https://github.com/YuqiWang-code/LS-Rep_BCD/tree/c1d43561a35efedeefce6142d514f139d2238863)，复用已有材料，没有重新开展文献调研。`implementation_version=direction_c_v1`。这是方向 C 的首个可运行实验实现；通过程序检查不代表已经证明精度收益。
++
++## 1. 替换范围
++
++`models.zip` 内是完整 `models/`。先将服务器原 `models/` 移到项目外备份，再解压放入项目根目录；不要直接覆盖混合，否则旧文件仍会残留。其余数据、Cache、权重及历史结果目录不需要移动。包内不含数据、预训练权重或测试环境依赖。
++
++保留 B0（clean baseline）与 C0（方向 C）两个入口。原 backbone、SWA/TFM/decoder 主计算路径、四尺度 GT loss 保留；清理旧蒸馏实现、旧 H/R/N 实验分支及旧专用工具。项目根目录旧脚本如仍传入旧实验名或 HSD 参数，需要改用本说明命令。
++
++| 文件 | 实现职责 |
++|---|---|
++| `a2net.py` | 原学生路径、训练辅助接口、`switch_to_deploy()` |
++| `distill/diagnostics.py` | `build_cd_difficulty()`：六维困难画像及空间困难权重 |
++| `distill/routing.py` | `estimate_teacher_fit()`、`DirectionC`、带硬 Reject 的损失聚合 |
++| `distill/losses.py` | 两位教师各自的辅助头、response/boundary/relation loss |
++| `distill/teacher_cache.py` | 两套离线 Cache 的配对、覆盖与格式校验 |
++| `datasets/cache_transforms.py` | Cache 几何增强重放 |
++| `scripts/train.py` | B0/C0 训练、原日志/保存协议及新增诊断字段 |
++| `utils/checkpoint.py` | 学生/辅助头/Router、两个优化器及 RNG 状态 |
++| `tools/validate_teacher_cache.py` | 只读检查全部训练 Cache |
++| `tools/dry_run_direction_c.py` | 真实 Cache 单批前后向与部署检查 |
++| `tools/smoke_direction_c.py` | 无数据的必要功能检查 |
++| `tools/export_deploy.py` | 导出只含学生的权重 |
++
++## 2. 已落地的设计选择
++
++原材料未确定的适配度、Router 学习信号和 relation 语义，按以下明确约定实现，不能写成某篇论文已经验证的结论。
++
++**诊断。** `h` 依次为边界漏检率、内部碎裂度、小变化漏检率、背景误报率、预测二元熵、GT 变化面积比。全部从 `sg(P)` 和训练 GT 计算。边界半径默认 2，小目标阈值默认 64 像素；碎裂根据 GT 连通区域内预测的连通片数量计算。无对应 GT 支持时指标为 0，并在返回值中提供有效标志。连通域用 SciPy 在 CPU 上计算。
++
++**可靠性。** 用困难空间权重加权教师 quality/confidence，形成 `q_k`。`d_k` 是该教师损失与 GT 代理损失在最终 decoder 特征处的梯度加权余弦相似度；空间权重关注边界漏检、碎裂、小变化漏检、误报和不确定位置。`d` 的范围是 [-1,1]，`r_k=q_k*max(d_k,0)`。GT 代理使用最终输出的逐样本 BCE+Dice；学生主损失仍是原四尺度 BCE+Dice。`d` 是局部一阶适配度代理，并非真实参数更新后的收益，也未证明能预测跨数据集收益。
++
++**Router 与 stop-gradient。** MLP 为 `8 -> 16 -> 3`，输出 SAM/OV/Reject 的 softmax 权重。h、q、d、r 均不向学生反传，Router 的输入显式 detach；用于学生蒸馏损失的权重也 detach。Router 独立用交叉熵学习标签：若最大 `q*d > utility_margin`（默认 0.02），标签是该教师，否则是 Reject。Router 有独立 Adam；不通过最小化自己加权后的教师损失学习，以免直接通过减小权重降低目标。
++
++**Reject。** 每个样本取三个输出中的 argmax；若为 Reject，有效教师权重全部置零，否则保留两个原 softmax 教师权重，不重新归一化。学生更新目标为 `L_GT + kd_lambda * mean_i(sum_k(w_eff[i,k]*L[i,k]))`，默认 `kd_lambda=0.06`。Reject 样本对学生只提供 GT 监督；Router 仍接受自身交叉熵监督。辅助损失先逐样本计算再加权，避免某个样本 Reject 后仍泄漏教师梯度。原始教师损失仍会被计算和记录，以构造适配度；归零的是教师对学生总损失的贡献。
++
++**两个独立教师。** SAM 为边界 BCE + 0.1 × 同实例邻接关系损失，t1/t2 各自处理，绝不直接比较两个时相的 instance ID 数值。OV 为 soft_change BCE + 0.1 × 空间余弦 Gram 损失，l1/l2 平均。辅助头只读取现有 decoder 特征，训练参数共增加 1,365，其中 Router 195。
++
++**relation 的边界。** 文档只给出了 OV relation 的 8 通道形状，没有完整生成器语义。因此使用池化到 8×8 空间后的两两余弦关系，比较空间 Gram，未将通道臆定为八邻域方向或 DINO 原始特征。该比较对统一通道置换不变，但这不能证明任意时相变换下缓存都正确；真实 Cache 的生成语义仍须结合生成器确认。当前将 OV 缓存视为无序时相对的变化描述。
++
++**冷启动限制。** 辅助头随机初始化，梯度代理可能不稳定，初期甚至长期全 Reject 都可能发生。实现不强迫教师参与；请同时检查 `target_reject_ratio`、`reject_ratio`、`d_*` 与 `router_accuracy`，区分教师代理不适配与 Router 未学会标签。缓存 q 也不自动等同于已校准的变化置信度。这些属于需要真实实验评估的方法问题。
++
++## 3. 数据、Cache 与权重
++
++沿用数据目录中的 `A/`、`B/`、`label/`、`list/train.txt`、`list/val.txt`、`list/test.txt`。保留原图像读取/归一化及标签阈值协议；输入为已对齐的 256×256 图像，GT 继续使用原 0/255 标签。不重划分数据，不生成伪 GT，不读取验证/测试 GT 来训练 Router。
++
++C0 只读取训练 split 的 SAMStruct 与 OVCDistill。两个 manifest 的 sample ID 集合必须与训练列表一致；不接受缺失后静默降级。GT、A/B、SAM、OV 同步重放裁剪和翻转，instance ID 使用最近邻；OV 保留 l1/l2 原生空间分辨率。时相交换同步交换 SAM 的 t1/t2，OV 按上述无序时相对约定处理。不得将旧缓存再套一套独立随机增强。
++
++读取约定：`manifest.json` 含 `cache_version=1`、`source_dataset`、`config_hash`、`entries`（ID -> 相对 `train/` 的文件路径）。SAM 的 `teacher_type=sam2_struct_v2`。每个 pt 含 `sample_id` 和 `meta.config_hash`。SAM 的 `t1/t2` 各含 `[1,H,W]` 的 `instance_id/boundary/quality`；OV 的 `soft_change/confidence/relation` 各含 `l1/l2`，通道数分别 1/1/8。概率/quality 在 [0,1]；ID 为非负 int32/int64。加载器校验格式和范围，不自动裁掉异常值或改写原 Cache。
++
++继续使用已有 `lwganet_l0_e299.pth` 初始化学生，不需要新的 SAM/DINO 预训练权重；教师已由离线 Cache 提供。新辅助头和 Router 随机初始化。依赖沿用 PyTorch、NumPy、OpenCV、SciPy，THOP 用于 FLOPs 检查；不在线导入 UNIC、DiffPAN 或 SAM 推理工程。
++
++增强改成按 seed/epoch/sample ID 对应索引确定随机状态，B0/C0 在本包内使用相同数据顺序和增强；这和历史版本随机数消费顺序并非逐步相同。正式对照应重跑本包的 B0，不能将旧 B0 当成逐随机状态一致的对照。
++
++## 4. 服务器命令
++
++在项目根目录及原训练环境执行。以下使用 SYSU，WHU 可修改 `cd_dataset`；文档未确认 CDD/LEVIR 的两套缓存齐备，不默认它们可以直接运行 C0。
++
++```bash
++cd /home/yqwang/projects/LS-Rep_BCD_RSML_3
++cd_dataset=SYSU
++cd_data_root="/home/yqwang/datasets/CD/${cd_dataset}-CD-256"
++cd_sam_root="/home/yqwang/datasets/CD_teacher_cache/SAMStruct/sam2.1_hiera_large/${cd_dataset}-CD-256"
++cd_ov_root="/home/yqwang/datasets/CD_teacher_cache/OVCDistill/dinov2_vitb14/${cd_dataset}-CD-256"
++cd_pretrained="/home/yqwang/projects/LS-Rep_BCD_RSML_3/pre-trained_weights/lwganet_l0_e299.pth"
++cd_ckpt_root="/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/DirectionC"
++cd_log_root="/home/yqwang/outputs/LS-Rep_BCD_RSML_3/DirectionC"
++
++# 首次运行前：全训练集 Cache 只读校验，然后真实单批检查。
++python -m models.tools.validate_teacher_cache \
++  --data_root "$cd_data_root" --dataset_name "$cd_dataset" \
++  --sam_cache_root "$cd_sam_root" --ov_cache_root "$cd_ov_root"
++python -m models.tools.dry_run_direction_c \
++  --data_root "$cd_data_root" --dataset_name "$cd_dataset" \
++  --sam_cache_root "$cd_sam_root" --ov_cache_root "$cd_ov_root" \
++  --pretrained_path "$cd_pretrained" --device cuda:0 --batch_size 2
++
++# B0 与 C0 使用同一协议，结果分别保存在新目录。
++python -m models.scripts.train --experiment B0 \
++  --dataset_name "$cd_dataset" --data_root "$cd_data_root" \
++  --pretrained_path "$cd_pretrained" --gpu_id 0 \
++  --batch_size 64 --max_steps 40000 --seed 2333 \
++  --save_dir "$cd_ckpt_root/B0/$cd_dataset/steps_40000/seed_2333" \
++  --log_file "$cd_log_root/B0/$cd_dataset/steps_40000/seed_2333/train_log.txt"
++
++python -m models.scripts.train --experiment C0 \
++  --dataset_name "$cd_dataset" --data_root "$cd_data_root" \
++  --pretrained_path "$cd_pretrained" --gpu_id 0 \
++  --sam_cache_root "$cd_sam_root" --ov_cache_root "$cd_ov_root" \
++  --batch_size 64 --max_steps 40000 --seed 2333 \
++  --kd_lambda 0.06 --router_lr 0.001 --utility_margin 0.02 \
++  --save_dir "$cd_ckpt_root/C0/$cd_dataset/steps_40000/seed_2333" \
++  --log_file "$cd_log_root/C0/$cd_dataset/steps_40000/seed_2333/train_log.txt"
++```
++
++若 batch 64 在真实 GPU 上不足，需同时调整 B0/C0 并使用新的对照目录；本地未测显存。本实现每批为适配度额外计算一次 GT 代理梯度和两个教师梯度，并进行 CPU 连通域诊断，训练速度不能由部署 FLOPs 推断。
++
++恢复训练：使用原启动命令加 `--resume <该次运行目录>/last_checkpoint.pth`，保留同样实验、数据、Cache、超参、save_dir 和 log_file。恢复从保存的 epoch 边界开始；不提供任意 batch 中断位置恢复。新版本严格检查配置与列表/manifest 指纹，旧蒸馏 checkpoint 不能恢复为 C0，本包也不把旧格式 B0 当作新格式恢复点。
++
++导出已由验证集 F1 选择的最佳 checkpoint：
++
++```bash
++python -m models.tools.export_deploy \
++  --checkpoint /实际运行目录/best_model_F1=实际数值.pth \
++  --output /实际运行目录/student_deploy.pth
++```
++
++导出文件保留 `model` 权重字典，仅含学生；推理模型用 `A2Net_LWGANet_L0(pretrained=False)` 严格加载该字典。它不再含训练状态，不能作为恢复训练 checkpoint。
++
++## 5. 日志与保存
++
++保留 `train_log.txt` 默认文件名、原 epoch/指标记录结构、`last_checkpoint.pth`、`best_model_F1={F1:.6f}.pth`、验证 F1 严格变好时更新最佳模型，以及 `=== TEST RESULTS ===` / `=== END TEST RESULTS ===` 块和原指标名称。日志首行方法标题更新为通用 A2Net 标题。路径仍由 `save_dir` 和 `log_file` 控制，上面的新子目录用于隔离旧实验。
++
++新增 h 六项、q/d/r、教师 softmax/有效权重、Reject 比例、目标 Reject 比例、Router 准确率及 CE、独立教师损失等字段。checkpoint 的 `model` 同时包含辅助头及 Router；主 `optimizer` 包含学生/辅助头，新增 `router_optimizer`，保留 epoch/global_step/best_val_f1/args/RNG，并增加格式版本字段。保存格式兼容约定不等于旧方法参数可直接恢复。
++
++## 6. 已完成验证与未验证范围
++
++本地 CPU / PyTorch 2.14.0+cpu，真实 A2Net 模型，合成输入及按文档构造的磁盘 Cache：
++
++- 导入、前向/反向通过；B0/C0 在相同初始化下训练预测和主路径 BN 状态一致。
++- 强制 Reject 后所有教师贡献为 0，学生梯度与纯 GT baseline 一致；两个教师分别启用时都能向学生及辅助头反传。
++- Router 独立收到非零梯度，其更新不向学生/辅助头反传；h/q/d/r/有效权重切断学生梯度。
++- 空 GT、碎裂、零 quality、适配度正负号、relation 通道置换及几何重放检查通过。
++- 学生/辅助头/Router/两个优化器及 RNG 保存恢复通过；恢复后下一优化步与不中断路径一致。
++- B0/C0 各完成两步完整训练、验证最佳模型保存、test 结果块、已完成 checkpoint 重载与部署导出。
++- 辅助分支删除前后预测最大误差 **0**；部署参数 **2,913,094**，本环境 THOP **2.767634G**（256×256）。保留原图及既有约 2.75G 的计数口径差异。
++
++上述结果证明实现路径可运行，不是遥感数据集指标。未验证 RSML-3 实际数据/Cache 内容、已有预训练文件加载、CUDA 数值和显存、长程恢复、多进程真实 I/O 吞吐、teacher reliability 的实际有效性及 C0 相对 B0 的收益。部署图不含任何 Cache、诊断器、Router 或辅助头。
+--- a/models/a2net.py
++++ b/models/a2net.py
+@@ -27,11 +27,18 @@
+         self.decoder = Decoder(self.mid_d)
+         self.auxiliary_mode = auxiliary_mode
+         if auxiliary_mode == "direction_c":
+-            from .distill.routing import DirectionC
++            cfg = dict(routing_cfg or {})
++            mechanism = cfg.pop('mechanism', 'legacy')
++            if mechanism == 'legacy':
++                from .distill.routing import DirectionC
++            elif mechanism == 'task_space':
++                from .distill.task_space import TaskSpaceDirectionC as DirectionC
++            else:
++                raise ValueError('Unknown training mechanism: '+str(mechanism))
+             # Keep baseline and C identical under the same seed, including the
+             # next random input/augmentation. Auxiliary initialization is isolated.
+             with torch.random.fork_rng(devices=[]):
+-                self.training_auxiliary = DirectionC(self.mid_d, **(routing_cfg or {}))
++                self.training_auxiliary = DirectionC(self.mid_d, **cfg)
+ 
+     @property
+     def use_training_auxiliary(self):
+--- a/models/datasets/cache_transforms.py
++++ b/models/datasets/cache_transforms.py
+@@ -35,12 +35,61 @@
+     return out.to(dtype)
+ 
+ 
+-def replay_teacher_pack(pack,state):
++def _resize_aligned(value, size, integer=False):
++    if tuple(value.shape[-2:]) == tuple(size):
++        return value
++    if integer:
++        # OpenCV INTER_NEAREST uses floor(dst * src / dst_size). Preserve
++        # arbitrary int64 IDs without a float conversion or round-to-nearest.
++        h, w = value.shape[-2:]
++        yi = torch.arange(size[0], device=value.device)*h//size[0]
++        xi = torch.arange(size[1], device=value.device)*w//size[1]
++        return value.index_select(-2, yi).index_select(-1, xi)
++    return F.interpolate(value.float().unsqueeze(0), size=size, mode='bilinear',
++                         align_corners=False).squeeze(0)
++
++
++def _replay_aligned(value, state, key, native_resolution):
++    """Replay Scale -> crop/resize -> flips; OV returns to its native grid.
++
++    OV is first reconstructed on the student raster so fractional native-grid
++    margins do not create different crop geometry. No cache is modified on disk.
++    """
++    if value.ndim != 3:
++        raise ValueError('Cache tensors must be [C,H,W]')
++    dtype, original = value.dtype, value.shape[-2:]
++    integer = key == 'instance_id'
++    scale = state.get('scale')
++    crop = state.get('crop_resize', {})
++    canvas = (int(scale['height']), int(scale['width'])) if scale else original
++    x = _resize_aligned(value if integer else value.float(), canvas, integer)
++    if crop.get('enabled', False):
++        if tuple(canvas) != (crop['source_height'], crop['source_width']):
++            raise ValueError('Cache crop source must match the scaled image raster')
++        top, left = int(crop['top']), int(crop['left'])
++        h, w = canvas
++        if top < 0 or left < 0 or 2*top >= h or 2*left >= w:
++            raise ValueError('Invalid cache crop')
++        x = _resize_aligned(x[:, top:h-top, left:w-left], canvas, integer)
++    if state.get('flip_v', False):
++        x = x.flip(-2)
++    if state.get('flip_h', False):
++        x = x.flip(-1)
++    if native_resolution:
++        x = _resize_aligned(x, original, integer)
++    return x.to(dtype)
++
++
++def replay_teacher_pack(pack,state,version='aligned'):
++    if version not in ('legacy', 'aligned'):
++        raise ValueError('Unknown cache replay version')
+     def visit(data,is_ov=False,parent=None):
+         result={}
+         for key,value in data.items():
+             if isinstance(value,dict):result[key]=visit(value,is_ov or key=='ov',key)
+-            elif torch.is_tensor(value):result[key]=_replay_tensor(value,state,key,is_ov)
++            elif torch.is_tensor(value):
++                result[key]=(_replay_tensor(value,state,key,is_ov) if version=='legacy'
++                             else _replay_aligned(value,state,key,is_ov))
+         if state.get('exchange',False) and 't1' in result and 't2' in result:
+             result['t1'],result['t2']=result['t2'],result['t1']
+         return result
+--- a/models/datasets/cd_dataset.py
++++ b/models/datasets/cd_dataset.py
+@@ -31,6 +31,7 @@
+         return_meta: bool = False,
+         teacher_cache=None,
+         seed: int = 2333,
++        cache_replay: str = 'legacy',
+     ):
+         self.split = dataset
+         self.root = Path(file_root)
+@@ -44,6 +45,7 @@
+         self.teacher_cache = teacher_cache
+         self.seed = int(seed)
+         self.epoch = 0
++        self.cache_replay = cache_replay
+ 
+     def __len__(self):
+         return len(self.file_list)
+@@ -109,7 +111,7 @@
+ 
+         if self.teacher_cache is not None:
+             pack = self.teacher_cache.load(sample_id)
+-            pack = replay_teacher_pack(pack, aug_state)
++            pack = replay_teacher_pack(pack, aug_state, self.cache_replay)
+             return image, label, sample_id, pack
+         if self.return_meta:
+             return image, label, sample_id
+@@ -142,6 +144,7 @@
+     return_meta=False,
+     teacher_cache=None,
+     seed=2333,
++    cache_replay='legacy',
+ ):
+     mean = [0.406, 0.456, 0.485, 0.406, 0.456, 0.485]
+     std = [0.225, 0.224, 0.229, 0.225, 0.224, 0.229]
+@@ -165,6 +168,7 @@
+         return_meta=return_meta,
+         teacher_cache=teacher_cache,
+         seed=seed,
++        cache_replay=cache_replay,
+     )
+     return torch.utils.data.DataLoader(
+         dataset,
+--- /dev/null
++++ b/models/distill/task_space.py
+@@ -0,0 +1,180 @@
++"""DART-R-TS: GT-audited task-space proposals, pixel routing and rejection.
++
++SAM supplies partitions, not change labels. It transports detached student
++probabilities within each temporal instance (leave-one-out). OV supplies soft
++change probabilities. GT is used ONLY to audit proposal utility, never to make
++the proposals. No auxiliary classifier, MLP, gradient probe or persistent cache.
++This is a new hypothesis, not a demonstrated accuracy improvement.
++"""
++from __future__ import annotations
++
++import torch
++from torch import nn
++import torch.nn.functional as F
++
++from .diagnostics import build_cd_difficulty, masked_mean
++from .losses import resize
++
++
++@torch.no_grad()
++def instance_transport(probability, ids, quality, boundary):
++    """Quality-weighted leave-one-out mean, independently for each image/ID.
++
++    IDs are opaque labels; unique compaction prevents huge-ID allocations.
++    A singleton, uncovered pixel or zero source support returns identity with
++    confidence zero. Boundary pixels are downweighted as *sources*, not targets.
++    """
++    if ids.shape != probability.shape:
++        raise ValueError('SAM IDs must match the augmented student raster')
++    proposals, confidences = [], []
++    for p, labels, q, edge in zip(probability, ids, quality, boundary):
++        p, labels, q, edge = [v.flatten() for v in (p, labels, q, edge)]
++        _, index = torch.unique(labels, sorted=True, return_inverse=True)
++        source = q * (1-edge) * (labels > 0)
++        # N bins is an upper bound independent of ID values, avoiding item().
++        mass = torch.zeros_like(p).scatter_add_(0, index, source)
++        sums = torch.zeros_like(p).scatter_add_(0, index, source*p)
++        remaining = mass[index]-source
++        valid = (labels > 0) & (remaining > 1e-6)
++        value = ((sums[index]-source*p)/remaining.clamp_min(1e-6)).clamp(0, 1)
++        proposals.append(torch.where(valid, value, p))
++        confidences.append(q*valid)
++    shape = probability.shape
++    return torch.stack(proposals).reshape(shape), torch.stack(confidences).reshape(shape)
++
++
++@torch.no_grad()
++def build_task_proposals(prediction, pack):
++    """No GT access. Return [B,2,H,W] candidates/confidence in change space."""
++    p = prediction.detach().float()
++    sam_values, sam_quality = [], []
++    for temporal in ('t1', 't2'):
++        cache = pack['sam'][temporal]
++        value, quality = instance_transport(
++            p, cache['instance_id'].detach(), cache['quality'].detach().float(),
++            cache['boundary'].detach().float())
++        sam_values.append(value)
++        sam_quality.append(quality)
++    mass = sam_quality[0]+sam_quality[1]
++    sam = torch.where(mass > 0,
++                      (sam_values[0]*sam_quality[0]+sam_values[1]*sam_quality[1]) /
++                      mass.clamp_min(1e-8), p)
++    q_sam = mass*.5
++    values, qualities = [], []
++    for level in ('l1', 'l2'):
++        values.append(resize(pack['ov']['soft_change'][level].detach(), p.shape[-2:]))
++        qualities.append(resize(pack['ov']['confidence'][level].detach(), p.shape[-2:]))
++    mass = qualities[0]+qualities[1]
++    ov = torch.where(mass > 0, (values[0]*qualities[0]+values[1]*qualities[1]) /
++                     mass.clamp_min(1e-8), p)
++    # Opaque OV relation channels deliberately unused: their generation semantics
++    # are not established consistently for historical and rebuilt caches.
++    return torch.cat((sam, ov), 1), torch.cat((q_sam, mass*.5), 1)
++
++
++@torch.no_grad()
++def task_space_route(prediction, target, proposals, quality, policy='advantage',
++                     teacher='both', force_action=None):
++    """Audit exact Brier improvement; no feature-gradient cosine or learned gate.
++
++    Relative improvement sets teacher proportions. Absolute confidence attenuates
++    the mixture ONCE. Rejected pixels remain in the spatial loss denominator.
++    force_action is a debug override of teacher choice, NOT of the GT safety gate.
++    """
++    p, y = prediction.detach().float(), target.detach().float()
++    base_error = (p-y).square()
++    gain = base_error-(proposals-y).square()
++    relative = (gain/base_error.clamp_min(1e-8)).clamp(-1, 1)
++    available = quality > 0
++    if teacher not in ('both', 'sam', 'ov'):
++        raise ValueError('teacher must be both/sam/ov')
++    if teacher != 'both':
++        available[:, 1 if teacher == 'sam' else 0] = False
++    if force_action is not None:
++        if int(force_action) not in (0, 1, 2):
++            raise ValueError('force_action must be 0, 1 or 2')
++        for k in (0, 1):
++            if int(force_action) != k:
++                available[:, k] = False
++    tolerance = 8*torch.finfo(p.dtype).eps  # numerical equality, not utility margin
++    if policy == 'advantage':
++        eligible = available & (gain > tolerance)
++        score = quality*relative.clamp_min(0)*eligible
++    elif policy == 'quality':
++        # Negative/ablation control: removes GT utility auditing.
++        eligible = available
++        score = quality*eligible
++    else:
++        raise ValueError('policy must be advantage/quality')
++    total = score.sum(1, keepdim=True)
++    admitted = total > 0
++    mixture = score/total.clamp_min(1e-12)
++    strength = (mixture*quality).sum(1, keepdim=True)
++    effective = mixture*strength
++    action = torch.where(admitted[:, 0], score.argmax(1),
++                         torch.full_like(score[:, 0], 2, dtype=torch.long))
++    return {'gain_map': gain, 'relative_map': relative,
++            'eligible_map': eligible, 'available_map': available,
++            'mixture_map': mixture, 'effective_map': effective,
++            'action': action, 'accepted_map': admitted}
++
++
++def bernoulli_kl(prediction, target):
++    """KL(Ber(target)||Ber(prediction)); identical derivative to soft BCE.
++
++    Subtracting target entropy avoids logging irreducible soft-target entropy as
++    distillation error. FP32 supports the existing probability-output network.
++    """
++    p = prediction.float().clamp(1e-6, 1-1e-6)
++    t = target.detach().float()
++    return F.binary_cross_entropy(p.expand_as(t), t, reduction='none') + \
++        torch.special.xlogy(t, t) + torch.special.xlogy(1-t, 1-t)
++
++
++class TaskSpaceDirectionC(nn.Module):
++    """Removable, parameter-free training mechanism; all maps are local values."""
++    def __init__(self, channels=64, boundary_radius=2, small_area=64,
++                 policy='advantage', teacher='both', difficulty=True):
++        super().__init__()
++        self.boundary_radius, self.small_area = int(boundary_radius), int(small_area)
++        self.policy, self.teacher, self.difficulty = policy, teacher, bool(difficulty)
++
++    def forward(self, feature, prediction, target, teacher_pack, force_action=None):
++        # feature is accepted for the existing call contract; no auxiliary head.
++        diagnosis = build_cd_difficulty(prediction, target, self.boundary_radius, self.small_area)
++        with torch.autocast(device_type=prediction.device.type, enabled=False):
++            proposals, quality = build_task_proposals(prediction, teacher_pack)
++            route = task_space_route(prediction, target, proposals, quality,
++                                     self.policy, self.teacher, force_action)
++            importance = diagnosis['importance'] if self.difficulty else torch.ones_like(prediction)
++            losses = bernoulli_kl(prediction, proposals)
++            effective = route['effective_map']
++            # Full-image denominator: never turn a tiny admitted region into a
++            # full-image-strength loss, and never dilute through sample rejection.
++            per_teacher = (losses*effective*importance).sum((2, 3)) / \
++                importance.sum((2, 3)).clamp_min(1.)
++            kd = per_teacher.sum(1).mean()
++        def summary(x):
++            return (x.detach().float()*importance).sum((2, 3)) / importance.sum((2, 3)).clamp_min(1.)
++        q = summary(quality)
++        support = route['accepted_map'].float()
++        base_error = (prediction.detach().float()-target).square()
++        changed_support = masked_mean(support, target).mean()
++        bg_support = masked_mean(support, 1-target).mean()
++        return {'total': kd, 'loss_per_teacher': per_teacher,
++                'h': diagnosis['h'], 'h_valid': diagnosis['valid'], 'q': q,
++                'effective_weights': summary(effective),
++                'weights': torch.cat((summary(route['mixture_map']), summary(1-support)), 1),
++                'action': route['action'], 'proposals': proposals,
++                'pixel_reject_ratio': (1-support).mean(),
++                'image_reject_ratio': (~route['accepted_map'].flatten(1).any(1)).float().mean(),
++                'accepted_change_ratio': changed_support, 'accepted_bg_ratio': bg_support,
++                'proposal_gain': summary(route['gain_map']),
++                'relative_gain': summary(route['relative_map']),
++                'eligible_ratio': route['eligible_map'].float().mean((2, 3)),
++                'available_ratio': route['available_map'].float().mean((2, 3)),
++                'student_brier': base_error.mean(),
++                'proposal_brier': summary((proposals-target).square()),
++                'effective_mass': effective.sum(1).mean(),
++                'sam_transport': per_teacher[:, 0].mean(),
++                'ov_task': per_teacher[:, 1].mean()}
+--- /dev/null
++++ b/models/scripts/TASK_SPACE_SHELLS.txt
+@@ -0,0 +1,36 @@
++Generated from run_task_space.sh; do not edit this summary.
++
++#!/usr/bin/env bash
++set -euo pipefail
++# Run inside the existing lsrep environment; no package/environment mutations.
++dart_experiment="${1:-C1}"
++dart_dataset="${2:-SYSU}"
++dart_gpu="${3:-0}"
++dart_seed="${4:-2333}"
++dart_resume="${5:-fresh}"
++case "$dart_experiment" in B0|C0|C0F|C1|C2|C3|C4|C5) ;; *) echo 'Unknown experiment' >&2; exit 2;; esac
++case "$dart_dataset" in CDD|LEVIR|SYSU|WHU) ;; *) echo 'Unknown dataset' >&2; exit 2;; esac
++case "$dart_resume" in fresh|resume) ;; *) echo 'Last argument must be fresh or resume' >&2; exit 2;; esac
++cd "$(dirname "${BASH_SOURCE[0]}")/../.."
++dart_steps="${DART_STEPS:-40000}"
++dart_batch="${DART_BATCH:-64}"
++dart_data="/home/yqwang/datasets/CD/${dart_dataset}-CD-256"
++dart_sam="/home/yqwang/datasets/CD_teacher_cache/SAMStruct/sam2.1_hiera_large/${dart_dataset}-CD-256"
++dart_ov="/home/yqwang/datasets/CD_teacher_cache/OVCDistill/dinov2_vitb14/${dart_dataset}-CD-256"
++dart_run="${dart_experiment}/${dart_dataset}/steps_${dart_steps}/seed_${dart_seed}"
++dart_save="/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/DART-R-TS/${dart_run}"
++dart_log="/home/yqwang/outputs/LS-Rep_BCD_RSML_3/DART-R-TS/${dart_run}/train_log.txt"
++dart_args=(--experiment "$dart_experiment" --dataset_name "$dart_dataset" --data_root "$dart_data"
++  --pretrained_path "$PWD/pre-trained_weights/lwganet_l0_e299.pth"
++  --batch_size "$dart_batch" --max_steps "$dart_steps" --seed "$dart_seed" --gpu_id "$dart_gpu"
++  --lr 0.0005 --weight_decay 0.0001 --dice_reduction batch --kd_lambda 0.06
++  --save_dir "$dart_save" --log_file "$dart_log")
++if [[ "$dart_experiment" != B0 ]]; then
++  dart_args+=(--sam_cache_root "$dart_sam" --ov_cache_root "$dart_ov")
++fi
++if [[ "$dart_resume" == resume ]]; then
++  dart_args+=(--resume "$dart_save/last_checkpoint.pth")
++fi
++# Physical GPU numbering matches the existing server convention.
++unset CUDA_VISIBLE_DEVICES
++exec python -m models.scripts.train "${dart_args[@]}"
+--- /dev/null
++++ b/models/scripts/run_task_space.sh
+@@ -0,0 +1,34 @@
++#!/usr/bin/env bash
++set -euo pipefail
++# Run inside the existing lsrep environment; no package/environment mutations.
++dart_experiment="${1:-C1}"
++dart_dataset="${2:-SYSU}"
++dart_gpu="${3:-0}"
++dart_seed="${4:-2333}"
++dart_resume="${5:-fresh}"
++case "$dart_experiment" in B0|C0|C0F|C1|C2|C3|C4|C5) ;; *) echo 'Unknown experiment' >&2; exit 2;; esac
++case "$dart_dataset" in CDD|LEVIR|SYSU|WHU) ;; *) echo 'Unknown dataset' >&2; exit 2;; esac
++case "$dart_resume" in fresh|resume) ;; *) echo 'Last argument must be fresh or resume' >&2; exit 2;; esac
++cd "$(dirname "${BASH_SOURCE[0]}")/../.."
++dart_steps="${DART_STEPS:-40000}"
++dart_batch="${DART_BATCH:-64}"
++dart_data="/home/yqwang/datasets/CD/${dart_dataset}-CD-256"
++dart_sam="/home/yqwang/datasets/CD_teacher_cache/SAMStruct/sam2.1_hiera_large/${dart_dataset}-CD-256"
++dart_ov="/home/yqwang/datasets/CD_teacher_cache/OVCDistill/dinov2_vitb14/${dart_dataset}-CD-256"
++dart_run="${dart_experiment}/${dart_dataset}/steps_${dart_steps}/seed_${dart_seed}"
++dart_save="/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/DART-R-TS/${dart_run}"
++dart_log="/home/yqwang/outputs/LS-Rep_BCD_RSML_3/DART-R-TS/${dart_run}/train_log.txt"
++dart_args=(--experiment "$dart_experiment" --dataset_name "$dart_dataset" --data_root "$dart_data"
++  --pretrained_path "$PWD/pre-trained_weights/lwganet_l0_e299.pth"
++  --batch_size "$dart_batch" --max_steps "$dart_steps" --seed "$dart_seed" --gpu_id "$dart_gpu"
++  --lr 0.0005 --weight_decay 0.0001 --dice_reduction batch --kd_lambda 0.06
++  --save_dir "$dart_save" --log_file "$dart_log")
++if [[ "$dart_experiment" != B0 ]]; then
++  dart_args+=(--sam_cache_root "$dart_sam" --ov_cache_root "$dart_ov")
++fi
++if [[ "$dart_resume" == resume ]]; then
++  dart_args+=(--resume "$dart_save/last_checkpoint.pth")
++fi
++# Physical GPU numbering matches the existing server convention.
++unset CUDA_VISIBLE_DEVICES
++exec python -m models.scripts.train "${dart_args[@]}"
+--- a/models/scripts/train.py
++++ b/models/scripts/train.py
+@@ -43,6 +43,12 @@
+ EXPERIMENTS = {
+     "B0": {"name": "Baseline_A2Net_LWGANet_L0", "auxiliary_mode": "none"},
+     "C0": {"name": "C0_Difficulty_Reliable_Routing_Reject", "auxiliary_mode": "direction_c"},
++    "C0F": {"name": "C0F_Legacy_AlignedReplay", "auxiliary_mode": "direction_c"},
++    "C1": {"name": "C1_DART_R_TaskSpace", "auxiliary_mode": "direction_c"},
++    "C2": {"name": "C2_TaskSpace_QualityOnly", "auxiliary_mode": "direction_c"},
++    "C3": {"name": "C3_TaskSpace_OVOnly", "auxiliary_mode": "direction_c"},
++    "C4": {"name": "C4_TaskSpace_SAMOnly", "auxiliary_mode": "direction_c"},
++    "C5": {"name": "C5_TaskSpace_NoDifficulty", "auxiliary_mode": "direction_c"},
+ }
+ 
+ 
+@@ -106,7 +112,12 @@
+     recipe = EXPERIMENTS[args.experiment]
+     args.experiment_name = recipe["name"]
+     args.auxiliary_mode = recipe["auxiliary_mode"]
+-    args.implementation_version = "direction_c_v1"
++    args.mechanism = "task_space" if args.experiment in {"C1", "C2", "C3", "C4", "C5"} else "legacy"
++    args.cache_replay = "legacy" if args.experiment in {"B0", "C0"} else "aligned"
++    args.implementation_version = "dart_r_ts_v2"
++    args.routing_signal = "relative_brier_gain" if args.mechanism=="task_space" else "feature_gradient_cosine"
++    args.reject_unit = "pixel" if args.mechanism=="task_space" else "image"
++    args.legacy_d_r_router_fields_active = args.mechanism=="legacy"
+     if args.auxiliary_mode == "direction_c" and not (args.sam_cache_root and args.ov_cache_root):
+         raise ValueError("C0 requires --sam_cache_root AND --ov_cache_root")
+     return args
+@@ -169,12 +180,19 @@
+ 
+ 
+ def build_router_optimizer(args, model):
+-    if not model.use_training_auxiliary:
++    if not model.use_training_auxiliary or not hasattr(model.training_auxiliary, "router"):
+         return None
+     return torch.optim.Adam(model.training_auxiliary.router.parameters(), lr=args.router_lr)
+ 
+ 
+ def build_model(args):
++    if getattr(args, 'mechanism', 'legacy') == 'task_space':
++        cfg = dict(mechanism='task_space', boundary_radius=args.boundary_radius,
++                   small_area=args.small_area, policy='quality' if args.experiment=='C2' else 'advantage',
++                   teacher={'C3':'ov', 'C4':'sam'}.get(args.experiment, 'both'),
++                   difficulty=args.experiment!='C5')
++        return A2Net_LWGANet_L0(pretrained=args.pretrained, pretrained_path=args.pretrained_path,
++                                auxiliary_mode=args.auxiliary_mode, routing_cfg=cfg)
+     cfg = dict(hidden=args.router_hidden, utility_margin=args.utility_margin,
+                boundary_radius=args.boundary_radius, small_area=args.small_area)
+     return A2Net_LWGANet_L0(pretrained=args.pretrained, pretrained_path=args.pretrained_path,
+@@ -192,10 +210,15 @@
+             "ov_response", "ov_relation", "data_time", "step_time")
+     keys += tuple("h_"+name for name in H_NAMES)
+     keys += tuple(prefix+name for prefix in ("q_", "d_", "r_", "w_", "effective_") for name in ("sam", "ov"))
+-    keys += ("w_reject",)
++    keys += ("w_reject", "pixel_reject_ratio", "image_reject_ratio", "accepted_change_ratio",
++             "accepted_bg_ratio", "effective_mass", "student_brier", "sam_transport", "ov_task")
++    keys += tuple(prefix+name for prefix in ("proposal_gain_", "relative_gain_", "eligible_ratio_",
++                  "available_ratio_", "proposal_brier_") for name in ("sam", "ov"))
++    keys += ("probe_cls_kd_gt_ratio", "probe_cls_kd_gt_cosine")
+     totals = dict.fromkeys(keys, 0.)
+     batches, last_lr = 0, args.lr
+     data_started = time.perf_counter()
++    probe_ratio, probe_cosine = 0., 0.
+     for batch in loader:
+         data_elapsed = time.perf_counter()-data_started
+         step_started = time.perf_counter()
+@@ -217,6 +240,16 @@
+         aux_weighted=args.kd_lambda*aux_raw
+         router_loss=detail.get("router_loss",zero)
+         loss=main_loss+aux_weighted
++        if batches == 0 and detail:
++            # Diagnostic ONLY: exact weighted KD and actual four-scale GT loss
++            # at final classifier weights. Never used to gate or train the router.
++            cls = model.decoder.cls.weight
++            gm = torch.autograd.grad(main_loss, cls, retain_graph=True)[0].detach().float()
++            gk = torch.autograd.grad(aux_weighted, cls, retain_graph=True, allow_unused=True)[0]
++            if gk is not None:
++                gk = gk.detach().float()
++                probe_ratio = float(gk.norm()/gm.norm().clamp_min(1e-12))
++                probe_cosine = float((gm*gk).sum()/(gm.norm()*gk.norm()).clamp_min(1e-12))
+         if not torch.isfinite(loss) or not torch.isfinite(router_loss):
+             raise FloatingPointError("Non-finite training loss; checkpoint not overwritten")
+         loss.backward()
+@@ -231,7 +264,7 @@
+         values={key:zero for key in keys}
+         values.update(total=loss,main=main_loss,aux_raw=aux_raw,aux_weighted=aux_weighted,
+                       aux_ratio=aux_ratio,router_loss=router_loss)
+-        if detail:
++        if detail and "target_action" in detail:
+             action=detail["action"];target_action=detail["target_action"]
+             values.update(reject_ratio=(action==2).float().mean(),
+                           target_reject_ratio=(target_action==2).float().mean(),
+@@ -243,7 +276,21 @@
+             values["w_reject"]=detail["weights"][:,2].mean()
+             for name in ("sam_boundary","sam_relation","ov_response","ov_relation"):
+                 values[name]=detail[name]
++        elif detail:
++            for j,name in enumerate(H_NAMES): values["h_"+name]=detail["h"][:,j].mean()
++            for key,prefix in (("q","q_"),("weights","w_"),("effective_weights","effective_"),
++                               ("proposal_gain","proposal_gain_"),("relative_gain","relative_gain_"),
++                               ("eligible_ratio","eligible_ratio_"),("available_ratio","available_ratio_"),
++                               ("proposal_brier","proposal_brier_")):
++                for j,name in enumerate(("sam","ov")): values[prefix+name]=detail[key][:,j].mean()
++            values["w_reject"]=detail["weights"][:,2].mean()
++            values["reject_ratio"]=detail["pixel_reject_ratio"]
++            for name in ("pixel_reject_ratio", "image_reject_ratio", "accepted_change_ratio",
++                         "accepted_bg_ratio", "effective_mass", "student_brier", "sam_transport", "ov_task"):
++                values[name]=detail[name]
+         values["data_time"]=zero.new_tensor(data_elapsed)
++        values["probe_cls_kd_gt_ratio"]=zero.new_tensor(probe_ratio)
++        values["probe_cls_kd_gt_cosine"]=zero.new_tensor(probe_cosine)
+         values["step_time"]=zero.new_tensor(time.perf_counter()-step_started)
+         for key,value in values.items():totals[key]+=float(value.detach())
+         batches+=1;global_step+=1
+@@ -254,7 +301,14 @@
+                   f"data={data_elapsed:.3f}s",end="")
+         data_started=time.perf_counter()
+     if not batches:raise RuntimeError("No training batches; check batch size and max_steps")
+-    return ({key:value/batches for key,value in totals.items()},meter.get_scores(),last_lr,global_step)
++    averages = {key:value/batches for key,value in totals.items()}
++    if getattr(args, 'mechanism', 'legacy') == 'task_space':
++        # Never fabricate v1 cosine/reliability/router accuracy values for v2.
++        inactive = {'router_loss','router_accuracy','target_reject_ratio',
++                    'sam_boundary','sam_relation','ov_response','ov_relation',
++                    'd_sam','d_ov','r_sam','r_ov'}
++        averages = {key:value for key,value in averages.items() if key not in inactive}
++    return (averages,meter.get_scores(),last_lr,global_step)
+ 
+ 
+ @torch.no_grad()
+@@ -371,7 +425,8 @@
+     keys=("implementation_version", "experiment", "dataset_name", "batch_size", "max_steps", "seed",
+           "lr", "lr_mode", "step_loss", "weight_decay", "backbone_lr_mult", "dice_reduction",
+           "main_loss_weights", "router_lr", "router_hidden", "utility_margin", "boundary_radius",
+-          "small_area", "kd_lambda", "inWidth", "inHeight", "data_fingerprint", "cache_fingerprint")
++          "small_area", "kd_lambda", "inWidth", "inHeight", "data_fingerprint", "cache_fingerprint",
++          "mechanism", "cache_replay")
+     for key in keys:
+         if saved.get(key) != getattr(args,key,None):
+             raise ValueError(f"Resume configuration mismatch for {key}: {saved.get(key)!r} vs {getattr(args,key,None)!r}")
+@@ -417,6 +472,7 @@
+         args.data_root, os.path.join(args.data_root, "list", "train.txt"),
+         batchsize=args.batch_size, trainsize=args.inWidth,
+         num_workers=args.num_workers, teacher_cache=teacher_cache, seed=args.seed,
++        cache_replay=args.cache_replay,
+     )
+     if len(train_loader)==0:
+         raise ValueError("Training dataset smaller than batch_size with drop_last=True")
+--- /dev/null
++++ b/models/tools/dry_run_task_space.py
+@@ -0,0 +1,64 @@
++"""Read-only real-cache dry run for C1. Does not save/update datasets or caches.
++The report is an implementation diagnostic, never a formal accuracy result.
++"""
++import argparse
++import json
++from pathlib import Path
++import torch
++from models import A2Net_LWGANet_L0, build_loss
++from models.distill import PairedTeacherCache
++from models.datasets.cd_dataset import get_loader
++from models.scripts.train import nested_to, auxiliary_toggle_consistency
++
++
++def main():
++    p=argparse.ArgumentParser()
++    p.add_argument('--data_root',required=True)
++    p.add_argument('--dataset_name',required=True,choices=['CDD','LEVIR','SYSU','WHU'])
++    p.add_argument('--sam_cache_root',required=True);p.add_argument('--ov_cache_root',required=True)
++    p.add_argument('--pretrained_path');p.add_argument('--device',default='cuda:0')
++    p.add_argument('--batch_size',type=int,default=2);p.add_argument('--num_workers',type=int,default=0)
++    args=p.parse_args();device=torch.device(args.device);torch.set_num_threads(2);torch.manual_seed(2333)
++    entries=[v.strip() for v in (Path(args.data_root)/'list/train.txt').read_text().splitlines() if v.strip()]
++    cache=PairedTeacherCache(args.sam_cache_root,args.ov_cache_root,args.dataset_name,entries)
++    loader=get_loader(args.data_root,'train.txt',batchsize=args.batch_size,num_workers=args.num_workers,
++                      teacher_cache=cache,cache_replay='aligned')
++    if not len(loader):raise ValueError('Dataset smaller than batch_size')
++    image,gt,ids,pack=next(iter(loader));image,gt=image.to(device),gt.to(device)
++    pack=nested_to(pack,device)
++    model=A2Net_LWGANet_L0(pretrained=bool(args.pretrained_path),pretrained_path=args.pretrained_path,
++                           auxiliary_mode='direction_c',routing_cfg={'mechanism':'task_space'}).to(device).train()
++    criterion=build_loss('batch')
++    pred,aux=model(image[:,:3],image[:,3:],target=gt,teacher_pack=pack)
++    detail=aux['direction_c'];main_loss=sum(criterion(x,gt) for x in pred)
++    # Measure actual student gradient contribution, with the same coefficient as C1.
++    cls=model.decoder.cls.weight
++    gm=torch.autograd.grad(main_loss,cls,retain_graph=True)[0]
++    gk=torch.autograd.grad(.06*detail['total'],cls,retain_graph=True)[0]
++    ratio=float(gk.norm()/gm.norm().clamp_min(1e-12))
++    cosine=float((gm*gk).sum()/(gm.norm()*gk.norm()).clamp_min(1e-12))
++    loss=main_loss+.06*detail['total'];loss.backward()
++    assert torch.isfinite(loss)
++    assert all(torch.isfinite(x.grad).all() for x in model.parameters() if x.grad is not None)
++    observed={key:detail[key].detach().cpu().tolist() for key in (
++        'q','effective_weights','pixel_reject_ratio','image_reject_ratio',
++        'accepted_change_ratio','accepted_bg_ratio','proposal_gain','relative_gain',
++        'eligible_ratio','available_ratio','student_brier','proposal_brier','effective_mass')}
++    model.zero_grad(set_to_none=True)
++    _,aux=model(image[:,:3],image[:,3:],target=gt,teacher_pack=pack,force_action=2)
++    assert aux['direction_c']['total'].item()==0
++    toggle=auxiliary_toggle_consistency(model,loader.dataset,device)
++    model.eval()
++    with torch.no_grad():before=model(image[:1,:3],image[:1,3:])
++    model.switch_to_deploy()
++    with torch.no_grad():after=model(image[:1,:3],image[:1,3:])
++    error=max(float((x-y).abs().max()) for x,y in zip(before,after))
++    assert error<1e-6 and sum(x.numel() for x in model.parameters())==2_913_094
++    print(json.dumps({'status':'passed','sample_ids':list(ids),'cache_fingerprint':cache.fingerprint,
++                      'scope':'one batch implementation check; not accuracy validation',
++                      'cls_kd_gt_grad_ratio':ratio,'cls_kd_gt_grad_cosine':cosine,
++                      'no_kd_on_this_batch':ratio==0.,'auxiliary_toggle_error':toggle,
++                      'deploy_max_error':error,'diagnostics':observed},indent=2))
++
++
++if __name__=='__main__':main()
+--- /dev/null
++++ b/models/tools/integration_task_space.py
+@@ -0,0 +1,88 @@
++"""Temporary synthetic on-disk dataset/cache -> trainer -> test block -> export.
++Never points at the user's dataset/cache/checkpoint directories.
++"""
++import hashlib
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++import cv2
++import numpy as np
++import torch
++from models.tools.smoke_direction_c import synthetic_pack
++
++
++def make_fixture(root):
++    data=root/'SYSU-CD-256';sam=root/'sam';ov=root/'ov'
++    for folder in ('A','B','label','list'):(data/folder).mkdir(parents=True,exist_ok=True)
++    for folder in (sam,ov):(folder/'train').mkdir(parents=True,exist_ok=True)
++    rng=np.random.default_rng(2333)
++    entries={};torch.manual_seed(2333)
++    for split in ('train','val','test'):
++        names=[f'{split}_{i}.png' for i in range(2)]
++        (data/'list'/f'{split}.txt').write_text('\n'.join(names)+'\n')
++        for name in names:
++            y,pack=synthetic_pack(batch=1,size=256)
++            a=rng.integers(0,256,(256,256,3),dtype=np.uint8)
++            b=rng.integers(0,256,(256,256,3),dtype=np.uint8)
++            cv2.imwrite(str(data/'A'/name),a);cv2.imwrite(str(data/'B'/name),b)
++            cv2.imwrite(str(data/'label'/name),(y[0,0].numpy()*255).astype(np.uint8))
++            if split=='train':
++                filename=hashlib.sha1(name.encode()).hexdigest()+'.pt';entries[name]=filename
++                for kind,path in (('sam',sam),('ov',ov)):
++                    content={k:{kk:vv[0].cpu() for kk,vv in v.items()} for k,v in pack[kind].items()}
++                    content.update(sample_id=name,meta={'config_hash':'synthetic-test-only'})
++                    torch.save(content,path/'train'/filename)
++    for kind,path in (('sam',sam),('ov',ov)):
++        manifest={'cache_version':1,'source_dataset':'SYSU','config_hash':'synthetic-test-only',
++                  'teacher_type':'sam2_struct_v2' if kind=='sam' else 'synthetic_ov', 'entries':entries}
++        (path/'manifest.json').write_text(json.dumps(manifest))
++    return data,sam,ov
++
++
++def run():
++    project=Path(__file__).resolve().parents[2]
++    env=dict(os.environ,OMP_NUM_THREADS='2',MKL_NUM_THREADS='2')
++    results={}
++    with tempfile.TemporaryDirectory(prefix='dartr_ts_fixture_') as temporary:
++        root=Path(temporary);data,sam,ov=make_fixture(root)
++        before={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for base in (data,sam,ov) for p in base.rglob('*') if p.is_file()}
++        def execute(argv):
++            proc=subprocess.run([sys.executable,*argv],cwd=project,env=env,text=True,capture_output=True)
++            if proc.returncode:raise RuntimeError(proc.stdout+'\n'+proc.stderr)
++            return proc.stdout
++        for experiment in ('B0','C1'):
++            save=root/'checkpoints'/experiment;log=root/'logs'/experiment/'train_log.txt'
++            command=['-m','models.scripts.train','--experiment',experiment,'--dataset_name','SYSU',
++                     '--data_root',str(data),'--sam_cache_root',str(sam),'--ov_cache_root',str(ov),
++                     '--no-pretrained','--device','cpu','--batch_size','2','--max_steps','2',
++                     '--num_workers','0','--save_dir',str(save),'--log_file',str(log)]
++            execute(command)
++            text=log.read_text();assert '=== END TEST RESULTS ===' in text
++            block=text.rsplit('=== TEST RESULTS ===',1)[1].split('=== END TEST RESULTS ===')[0]
++            assert all(label+':' in block for label in ('Recall','Precision','OA','F1','IoU','Kappa'))
++            ckpt=torch.load(save/'last_checkpoint.pth',map_location='cpu',weights_only=False)
++            assert ckpt['global_step']==2 and ckpt['router_optimizer'] is None
++            # Completion resume must reload the validation-selected best and retain log blocks.
++            execute(command+['--resume',str(save/'last_checkpoint.pth')])
++            assert log.read_text().count('=== END TEST RESULTS ===')==2
++            export=root/f'{experiment}_deploy.pth'
++            execute(['-m','models.tools.export_deploy','--checkpoint',str(next(save.glob('best_model_F1=*.pth'))),
++                     '--output',str(export)])
++            deployed=torch.load(export,map_location='cpu',weights_only=False)
++            assert deployed['deploy_parameters']==2_913_094
++            assert not any(k.startswith('training_auxiliary.') for k in deployed['model'])
++            results[experiment]={'train_steps':2,'formal_block_format':True,'completed_resume':True,'export':True}
++        output=execute(['-m','models.tools.dry_run_task_space','--dataset_name','SYSU','--data_root',str(data),
++                        '--sam_cache_root',str(sam),'--ov_cache_root',str(ov),'--device','cpu'])
++        results['disk_fixture_dry_run']=json.loads(output)
++        after={str(p):hashlib.sha256(p.read_bytes()).hexdigest() for base in (data,sam,ov) for p in base.rglob('*') if p.is_file()}
++        assert before==after
++    report={'status':'passed','scope':'synthetic disk fixture, NOT RSML-3 real cache',
++            'dataset_and_cache_unchanged':True,'results':results}
++    print(json.dumps(report,indent=2));return report
++
++
++if __name__=='__main__':run()
+--- /dev/null
++++ b/models/tools/smoke_task_space.py
+@@ -0,0 +1,195 @@
++"""Contract tests on the real student; synthetic data, no accuracy claims.
++Run from project root: python -m models.tools.smoke_task_space --device cpu
++"""
++from __future__ import annotations
++import argparse
++import copy
++import json
++import tempfile
++from pathlib import Path
++from types import SimpleNamespace
++import cv2
++import numpy as np
++import torch
++from thop import profile
++
++from models import A2Net_LWGANet_L0, build_loss
++from models.distill.task_space import (TaskSpaceDirectionC, build_task_proposals,
++                                      instance_transport, task_space_route, bernoulli_kl)
++from models.datasets.cache_transforms import replay_teacher_pack, _replay_tensor
++from models.scripts.train import build_optimizer, build_router_optimizer, validate_resume
++from models.utils.checkpoint import build_checkpoint, restore_rng_state, save_checkpoint_atomic
++from models.tools.smoke_direction_c import synthetic_pack
++
++
++def check_geometry():
++    # Every pixel has a distinct large int64 ID: reveals nearest-coordinate bugs.
++    ids = np.arange(256*256, dtype=np.int64).reshape(256, 256)+2**30
++    val = np.linspace(0, 1, 256*256, dtype=np.float32).reshape(256, 256)
++    pack = {'sam': {t: {'instance_id': torch.from_numpy(ids.copy())[None],
++                       'boundary': torch.from_numpy(val.copy())[None],
++                       'quality': torch.ones(1, 256, 256)} for t in ('t1', 't2')},
++            'ov': {'soft_change': {'l1': torch.rand(1, 32, 32)}}}
++    legacy_mismatch = None
++    for fv in (False, True):
++        for fh in (False, True):
++            state = {'scale': {'height': 256, 'width': 256},
++                     'crop_resize': {'enabled': True, 'top': 7, 'left': 8,
++                                     'source_height': 256, 'source_width': 256},
++                     'flip_v': fv, 'flip_h': fh, 'exchange': True}
++            expected = cv2.resize((ids-2**30).astype(np.int32)[7:-7, 8:-8],
++                                  (256, 256), interpolation=cv2.INTER_NEAREST).astype(np.int64)+2**30
++            soft = cv2.resize(val[7:-7, 8:-8], (256, 256), interpolation=cv2.INTER_LINEAR)
++            if fv: expected, soft = expected[::-1], soft[::-1]
++            if fh: expected, soft = expected[:, ::-1], soft[:, ::-1]
++            result = replay_teacher_pack(pack, state, 'aligned')
++            assert np.array_equal(result['sam']['t1']['instance_id'][0], expected)
++            assert np.max(np.abs(result['sam']['t1']['boundary'][0].numpy()-soft)) < 1e-6
++            assert result['ov']['soft_change']['l1'].shape == (1, 32, 32)
++            original = pack['ov']['soft_change']['l1'][0].numpy()
++            ov_expected = cv2.resize(original, (256,256), interpolation=cv2.INTER_LINEAR)
++            ov_expected = cv2.resize(ov_expected[7:-7,8:-8], (256,256), interpolation=cv2.INTER_LINEAR)
++            if fv: ov_expected = ov_expected[::-1]
++            if fh: ov_expected = ov_expected[:,::-1]
++            ov_expected = cv2.resize(ov_expected, (32,32), interpolation=cv2.INTER_LINEAR)
++            assert np.max(np.abs(result['ov']['soft_change']['l1'][0].numpy()-ov_expected)) < 2e-6
++            if not fv and not fh:
++                legacy = _replay_tensor(pack['sam']['t1']['instance_id'], state, 'instance_id')[0]
++                legacy_mismatch = {'large_int64_ids': float((legacy != torch.from_numpy(expected.copy())).float().mean())}
++                small = _replay_tensor(pack['sam']['t1']['instance_id']-2**30, state, 'instance_id')[0]
++                legacy_mismatch['ordinary_ids'] = float((small != torch.from_numpy(expected.copy())-2**30).float().mean())
++    return legacy_mismatch
++
++
++def run(device='cpu'):
++    torch.set_num_threads(2)
++    torch.manual_seed(2333)
++    y, pack = synthetic_pack(size=64, device=device)
++    p = (torch.rand_like(y)*.8+.1).requires_grad_()
++    mechanism = TaskSpaceDirectionC()
++    for k in (0, 1):
++        out = mechanism(None, p, y, pack, force_action=k)
++        grad = torch.autograd.grad(out['total'], p, retain_graph=True)[0]
++        assert torch.isfinite(grad).all() and grad.abs().sum() > 0
++        # Direct probability descent must point toward binary GT on admitted pixels.
++        assert (grad*(p.detach()-y) >= -1e-7).all()
++    proposals, quality = build_task_proposals(p, pack)
++    assert not proposals.requires_grad and not quality.requires_grad
++    swapped = {'sam': {'t1': pack['sam']['t2'], 't2': pack['sam']['t1']}, 'ov': pack['ov']}
++    assert torch.equal(proposals, build_task_proposals(p, swapped)[0])
++    renamed = copy.deepcopy(pack)
++    for t in ('t1', 't2'):
++        renamed['sam'][t]['instance_id'] = renamed['sam'][t]['instance_id'].long()*1234567+2**30
++    assert torch.equal(proposals, build_task_proposals(p, renamed)[0])
++    # Analytic extremes: useful, adverse, equal and zero-confidence teachers.
++    for gt in (torch.zeros_like(y), torch.ones_like(y)):
++        start = torch.full_like(y, .5)
++        candidates = torch.cat((gt, 1-gt), 1)
++        route = task_space_route(start, gt, candidates, torch.ones_like(candidates))
++        assert (route['action']==0).all() and (route['effective_map'][:,1]==0).all()
++        same = task_space_route(start, gt, start.expand_as(candidates), torch.ones_like(candidates))
++        assert (same['action']==2).all()
++        missing = task_space_route(start, gt, candidates, torch.zeros_like(candidates))
++        assert (missing['action']==2).all()
++        loss = mechanism(None, start.requires_grad_(), gt, pack)['total']
++        assert torch.isfinite(loss)
++    singleton = torch.arange(64*64,device=device).reshape(1,1,64,64)+1
++    identity, q = instance_transport(p[:1], singleton, torch.ones_like(p[:1]), torch.zeros_like(p[:1]))
++    assert torch.equal(identity,p[:1]) and q.count_nonzero()==0
++    # All-Reject is exact zero and retains a differentiable zero for train loss.
++    out = mechanism(None, p, y, pack, force_action=2)
++    assert out['total'].item()==0
++    assert torch.autograd.grad(out['total'], p)[0].count_nonzero()==0
++
++    torch.manual_seed(2333)
++    baseline = A2Net_LWGANet_L0(pretrained=False).to(device).train()
++    rng_baseline = torch.get_rng_state().clone()
++    torch.manual_seed(2333)
++    model = A2Net_LWGANet_L0(pretrained=False, auxiliary_mode='direction_c',
++                            routing_cfg={'mechanism':'task_space'}).to(device).train()
++    assert torch.equal(rng_baseline, torch.get_rng_state())
++    assert all(torch.equal(v, model.state_dict()[k]) for k,v in baseline.state_dict().items())
++    a,b = torch.randn(2,3,64,64,device=device), torch.randn(2,3,64,64,device=device)
++    criterion = build_loss('batch')
++    bp,_ = baseline(a,b)
++    pred,aux = model(a,b,target=y,teacher_pack=pack,force_action=2)
++    assert all(torch.equal(x,z) for x,z in zip(bp,pred))
++    sum(criterion(x,y) for x in bp).backward()
++    (sum(criterion(x,y) for x in pred)+.06*aux['direction_c']['total']).backward()
++    for n,param in baseline.named_parameters():
++        other = dict(model.named_parameters())[n]
++        assert torch.equal(param.grad, other.grad), n
++    assert all(torch.equal(v,dict(model.named_buffers())[k]) for k,v in baseline.named_buffers())
++    model.zero_grad(set_to_none=True)
++    pred,aux = model(a,b,target=y,teacher_pack=pack)
++    aux['direction_c']['total'].backward()
++    kd_backbone_grad = sum(float(v.grad.abs().sum()) for v in model.backbone.parameters() if v.grad is not None)
++    assert kd_backbone_grad > 0
++    assert sum(v.numel() for v in model.training_auxiliary.parameters())==0
++    args = SimpleNamespace(lr=5e-4,backbone_lr_mult=1.,weight_decay=1e-4,router_lr=1e-3,
++                           implementation_version='dart_r_ts_v2',mechanism='task_space',cache_replay='aligned')
++    opt = build_optimizer(args,model)
++    assert build_router_optimizer(args,model) is None
++    def step(net, optimizer):
++        optimizer.zero_grad(set_to_none=True)
++        ps,ad = net(a,b,target=y,teacher_pack=pack)
++        (sum(criterion(x,y) for x in ps)+.06*ad['direction_c']['total']).backward()
++        optimizer.step()
++    step(model,opt)
++    with tempfile.TemporaryDirectory() as tmp:
++        path = Path(tmp)/'last_checkpoint.pth'
++        save_checkpoint_atomic(build_checkpoint(model,opt,0,1,.5,args),path)
++        loaded = torch.load(path,map_location='cpu',weights_only=False)
++        validate_resume(args,loaded)
++        restored = copy.deepcopy(model)
++        restored.load_state_dict(loaded['model'])
++        ropt = build_optimizer(args,restored); ropt.load_state_dict(loaded['optimizer'])
++        assert loaded['router_optimizer'] is None and len(ropt.state)>0
++        restore_rng_state(loaded['rng']); x = torch.rand(8)
++        restore_rng_state(loaded['rng']); assert torch.equal(x,torch.rand(8))
++        step(model,opt); step(restored,ropt)
++        restore_error = max(float((v-restored.state_dict()[k]).abs().max())
++                            for k,v in model.state_dict().items())
++        assert restore_error < 1e-6
++        bad = copy.deepcopy(loaded); bad['args']['implementation_version']='direction_c_v1'
++        try: validate_resume(args,bad)
++        except ValueError: pass
++        else: raise AssertionError('Old-method checkpoint accepted as TS resume')
++    model.eval(); model.training=True
++    with torch.no_grad():
++        off,_ = model(a,b,compute_auxiliary=False)
++        on,_ = model(a,b,target=y,teacher_pack=pack)
++    toggle_error = max(float((x-z).abs().max()) for x,z in zip(off,on))
++    assert toggle_error==0
++    model.eval()
++    with torch.no_grad():
++        before = model(a,b)
++        exchanged = model(b,a)
++    exchange_error = max(float((x-z).abs().max()) for x,z in zip(before,exchanged))
++    assert exchange_error < 1e-6
++    model.switch_to_deploy().switch_to_deploy().eval()
++    assert not hasattr(model,'training_auxiliary')
++    with torch.no_grad(): after=model(a,b)
++    deploy_error=max(float((x-z).abs().max()) for x,z in zip(before,after))
++    assert deploy_error==0 and sum(v.numel() for v in model.parameters())==2_913_094
++    dummy = torch.zeros(1,3,256,256,device=device)
++    with torch.no_grad(): flops,_=profile(model,inputs=(dummy,dummy),verbose=False)
++    assert abs(flops-2.7475e9)<.03e9
++    geometry_mismatch=check_geometry()
++    report={'status':'passed','scope':'synthetic contract tests; not dataset accuracy',
++            'torch':torch.__version__,'device':device,'train_parameters':2_913_094,
++            'deploy_parameters':2_913_094,'flops_256':flops,'auxiliary_toggle_error':toggle_error,
++            'deploy_max_error':deploy_error,'exchange_error':exchange_error,
++            'resume_next_step_error':restore_error,'kd_backbone_grad_l1':kd_backbone_grad,
++            'legacy_geometry_probe_mismatch_fraction':geometry_mismatch,
++            'checks':['proposal detachment','ID relabel and temporal symmetry','both teacher gradients',
++                      'GT-directed probability gradients','adverse/equal/missing teacher rejection',
++                      'empty/full GT and singleton IDs','Reject baseline gradient and BN equality',
++                      'optimizer and RNG resume','stale version rejected','aligned OpenCV geometry',
++                      'auxiliary toggle','deploy removal and FLOPs']}
++    print(json.dumps(report,indent=2));return report
++
++
++if __name__=='__main__':
++    parser=argparse.ArgumentParser();parser.add_argument('--device',default='cpu')
++    run(parser.parse_args().device)
+--- a/models/validation_results.json
++++ /dev/null
+@@ -1,28 +0,0 @@
+-{
+-  "status": "passed",
+-  "device": "cpu",
+-  "torch": "2.14.0+cpu",
+-  "train_parameters": 2914459,
+-  "deploy_parameters": 2913094,
+-  "flops_256": 2767633600.0,
+-  "deploy_max_error": 0.0,
+-  "checks": [
+-    "train BN/main path equality",
+-    "Reject GT-only gradients",
+-    "router-only gradients",
+-    "both teacher gradients",
+-    "fit sign",
+-    "empty GT/coverage",
+-    "fragmentation",
+-    "relation Gram invariance",
+-    "geometry replay",
+-    "model and two optimizer checkpoint",
+-    "identical next step after restore",
+-    "RNG restore",
+-    "legacy resume rejection",
+-    "deployment"
+-  ],
+-  "base_commit": "c1d43561a35efedeefce6142d514f139d2238863",
+-  "full_trainer": "B0/C0 synthetic train4/val2/test2; 2 optimizer steps; checkpoint reload; deployment export passed",
+-  "real_server_tested": false
+-}

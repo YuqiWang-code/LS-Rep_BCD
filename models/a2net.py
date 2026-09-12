@@ -27,11 +27,18 @@ class A2Net_LWGANet_L0(nn.Module):
         self.decoder = Decoder(self.mid_d)
         self.auxiliary_mode = auxiliary_mode
         if auxiliary_mode == "direction_c":
-            from .distill.routing import DirectionC
+            cfg = dict(routing_cfg or {})
+            mechanism = cfg.pop('mechanism', 'legacy')
+            if mechanism == 'legacy':
+                from .distill.routing import DirectionC
+            elif mechanism == 'task_space':
+                from .distill.task_space import TaskSpaceDirectionC as DirectionC
+            else:
+                raise ValueError('Unknown training mechanism: '+str(mechanism))
             # Keep baseline and C identical under the same seed, including the
             # next random input/augmentation. Auxiliary initialization is isolated.
             with torch.random.fork_rng(devices=[]):
-                self.training_auxiliary = DirectionC(self.mid_d, **(routing_cfg or {}))
+                self.training_auxiliary = DirectionC(self.mid_d, **cfg)
 
     @property
     def use_training_auxiliary(self):

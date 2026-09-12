@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+set -euo pipefail
+# Run inside the existing lsrep environment; no package/environment mutations.
+dart_experiment="${1:-C1}"
+dart_dataset="${2:-SYSU}"
+dart_gpu="${3:-0}"
+dart_seed="${4:-2333}"
+dart_resume="${5:-fresh}"
+case "$dart_experiment" in B0|C0|C0F|C1|C2|C3|C4|C5) ;; *) echo 'Unknown experiment' >&2; exit 2;; esac
+case "$dart_dataset" in CDD|LEVIR|SYSU|WHU) ;; *) echo 'Unknown dataset' >&2; exit 2;; esac
+case "$dart_resume" in fresh|resume) ;; *) echo 'Last argument must be fresh or resume' >&2; exit 2;; esac
+cd "$(dirname "${BASH_SOURCE[0]}")/../.."
+dart_steps="${DART_STEPS:-40000}"
+dart_batch="${DART_BATCH:-64}"
+dart_data="/home/yqwang/datasets/CD/${dart_dataset}-CD-256"
+dart_sam="/home/yqwang/datasets/CD_teacher_cache/SAMStruct/sam2.1_hiera_large/${dart_dataset}-CD-256"
+dart_ov="/home/yqwang/datasets/CD_teacher_cache/OVCDistill/dinov2_vitb14/${dart_dataset}-CD-256"
+dart_run="${dart_experiment}/${dart_dataset}/steps_${dart_steps}/seed_${dart_seed}"
+dart_save="/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/DART-R-TS/${dart_run}"
+dart_log="/home/yqwang/outputs/LS-Rep_BCD_RSML_3/DART-R-TS/${dart_run}/train_log.txt"
+dart_args=(--experiment "$dart_experiment" --dataset_name "$dart_dataset" --data_root "$dart_data"
+  --pretrained_path "$PWD/pre-trained_weights/lwganet_l0_e299.pth"
+  --batch_size "$dart_batch" --max_steps "$dart_steps" --seed "$dart_seed" --gpu_id "$dart_gpu"
+  --lr 0.0005 --weight_decay 0.0001 --dice_reduction batch --kd_lambda 0.06
+  --save_dir "$dart_save" --log_file "$dart_log")
+if [[ "$dart_experiment" != B0 ]]; then
+  dart_args+=(--sam_cache_root "$dart_sam" --ov_cache_root "$dart_ov")
+fi
+if [[ "$dart_resume" == resume ]]; then
+  dart_args+=(--resume "$dart_save/last_checkpoint.pth")
+fi
+# Physical GPU numbering matches the existing server convention.
+unset CUDA_VISIBLE_DEVICES
+exec python -m models.scripts.train "${dart_args[@]}"

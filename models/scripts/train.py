@@ -43,6 +43,12 @@ DEPLOY_FLOPS_ATOL = 0.03e9
 EXPERIMENTS = {
     "B0": {"name": "Baseline_A2Net_LWGANet_L0", "auxiliary_mode": "none"},
     "C0": {"name": "C0_Difficulty_Reliable_Routing_Reject", "auxiliary_mode": "direction_c"},
+    "C0F": {"name": "C0F_Legacy_AlignedReplay", "auxiliary_mode": "direction_c"},
+    "C1": {"name": "C1_DART_R_TaskSpace", "auxiliary_mode": "direction_c"},
+    "C2": {"name": "C2_TaskSpace_QualityOnly", "auxiliary_mode": "direction_c"},
+    "C3": {"name": "C3_TaskSpace_OVOnly", "auxiliary_mode": "direction_c"},
+    "C4": {"name": "C4_TaskSpace_SAMOnly", "auxiliary_mode": "direction_c"},
+    "C5": {"name": "C5_TaskSpace_NoDifficulty", "auxiliary_mode": "direction_c"},
 }
 
 
@@ -106,7 +112,12 @@ def parse_args():
     recipe = EXPERIMENTS[args.experiment]
     args.experiment_name = recipe["name"]
     args.auxiliary_mode = recipe["auxiliary_mode"]
-    args.implementation_version = "direction_c_v1"
+    args.mechanism = "task_space" if args.experiment in {"C1", "C2", "C3", "C4", "C5"} else "legacy"
+    args.cache_replay = "legacy" if args.experiment in {"B0", "C0"} else "aligned"
+    args.implementation_version = "dart_r_ts_v2"
+    args.routing_signal = "relative_brier_gain" if args.mechanism=="task_space" else "feature_gradient_cosine"
+    args.reject_unit = "pixel" if args.mechanism=="task_space" else "image"
+    args.legacy_d_r_router_fields_active = args.mechanism=="legacy"
     if args.auxiliary_mode == "direction_c" and not (args.sam_cache_root and args.ov_cache_root):
         raise ValueError("C0 requires --sam_cache_root AND --ov_cache_root")
     return args
@@ -169,12 +180,19 @@ def build_optimizer(args, model):
 
 
 def build_router_optimizer(args, model):
-    if not model.use_training_auxiliary:
+    if not model.use_training_auxiliary or not hasattr(model.training_auxiliary, "router"):
         return None
     return torch.optim.Adam(model.training_auxiliary.router.parameters(), lr=args.router_lr)
 
 
 def build_model(args):
+    if getattr(args, 'mechanism', 'legacy') == 'task_space':
+        cfg = dict(mechanism='task_space', boundary_radius=args.boundary_radius,
+                   small_area=args.small_area, policy='quality' if args.experiment=='C2' else 'advantage',
+                   teacher={'C3':'ov', 'C4':'sam'}.get(args.experiment, 'both'),
+                   difficulty=args.experiment!='C5')
+        return A2Net_LWGANet_L0(pretrained=args.pretrained, pretrained_path=args.pretrained_path,
+                                auxiliary_mode=args.auxiliary_mode, routing_cfg=cfg)
     cfg = dict(hidden=args.router_hidden, utility_margin=args.utility_margin,
                boundary_radius=args.boundary_radius, small_area=args.small_area)
     return A2Net_LWGANet_L0(pretrained=args.pretrained, pretrained_path=args.pretrained_path,
@@ -192,10 +210,15 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
             "ov_response", "ov_relation", "data_time", "step_time")
     keys += tuple("h_"+name for name in H_NAMES)
     keys += tuple(prefix+name for prefix in ("q_", "d_", "r_", "w_", "effective_") for name in ("sam", "ov"))
-    keys += ("w_reject",)
+    keys += ("w_reject", "pixel_reject_ratio", "image_reject_ratio", "accepted_change_ratio",
+             "accepted_bg_ratio", "effective_mass", "student_brier", "sam_transport", "ov_task")
+    keys += tuple(prefix+name for prefix in ("proposal_gain_", "relative_gain_", "eligible_ratio_",
+                  "available_ratio_", "proposal_brier_") for name in ("sam", "ov"))
+    keys += ("probe_cls_kd_gt_ratio", "probe_cls_kd_gt_cosine")
     totals = dict.fromkeys(keys, 0.)
     batches, last_lr = 0, args.lr
     data_started = time.perf_counter()
+    probe_ratio, probe_cosine = 0., 0.
     for batch in loader:
         data_elapsed = time.perf_counter()-data_started
         step_started = time.perf_counter()
@@ -217,6 +240,16 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
         aux_weighted=args.kd_lambda*aux_raw
         router_loss=detail.get("router_loss",zero)
         loss=main_loss+aux_weighted
+        if batches == 0 and detail:
+            # Diagnostic ONLY: exact weighted KD and actual four-scale GT loss
+            # at final classifier weights. Never used to gate or train the router.
+            cls = model.decoder.cls.weight
+            gm = torch.autograd.grad(main_loss, cls, retain_graph=True)[0].detach().float()
+            gk = torch.autograd.grad(aux_weighted, cls, retain_graph=True, allow_unused=True)[0]
+            if gk is not None:
+                gk = gk.detach().float()
+                probe_ratio = float(gk.norm()/gm.norm().clamp_min(1e-12))
+                probe_cosine = float((gm*gk).sum()/(gm.norm()*gk.norm()).clamp_min(1e-12))
         if not torch.isfinite(loss) or not torch.isfinite(router_loss):
             raise FloatingPointError("Non-finite training loss; checkpoint not overwritten")
         loss.backward()
@@ -231,7 +264,7 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
         values={key:zero for key in keys}
         values.update(total=loss,main=main_loss,aux_raw=aux_raw,aux_weighted=aux_weighted,
                       aux_ratio=aux_ratio,router_loss=router_loss)
-        if detail:
+        if detail and "target_action" in detail:
             action=detail["action"];target_action=detail["target_action"]
             values.update(reject_ratio=(action==2).float().mean(),
                           target_reject_ratio=(target_action==2).float().mean(),
@@ -243,7 +276,21 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
             values["w_reject"]=detail["weights"][:,2].mean()
             for name in ("sam_boundary","sam_relation","ov_response","ov_relation"):
                 values[name]=detail[name]
+        elif detail:
+            for j,name in enumerate(H_NAMES): values["h_"+name]=detail["h"][:,j].mean()
+            for key,prefix in (("q","q_"),("weights","w_"),("effective_weights","effective_"),
+                               ("proposal_gain","proposal_gain_"),("relative_gain","relative_gain_"),
+                               ("eligible_ratio","eligible_ratio_"),("available_ratio","available_ratio_"),
+                               ("proposal_brier","proposal_brier_")):
+                for j,name in enumerate(("sam","ov")): values[prefix+name]=detail[key][:,j].mean()
+            values["w_reject"]=detail["weights"][:,2].mean()
+            values["reject_ratio"]=detail["pixel_reject_ratio"]
+            for name in ("pixel_reject_ratio", "image_reject_ratio", "accepted_change_ratio",
+                         "accepted_bg_ratio", "effective_mass", "student_brier", "sam_transport", "ov_task"):
+                values[name]=detail[name]
         values["data_time"]=zero.new_tensor(data_elapsed)
+        values["probe_cls_kd_gt_ratio"]=zero.new_tensor(probe_ratio)
+        values["probe_cls_kd_gt_cosine"]=zero.new_tensor(probe_cosine)
         values["step_time"]=zero.new_tensor(time.perf_counter()-step_started)
         for key,value in values.items():totals[key]+=float(value.detach())
         batches+=1;global_step+=1
@@ -254,7 +301,14 @@ def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, d
                   f"data={data_elapsed:.3f}s",end="")
         data_started=time.perf_counter()
     if not batches:raise RuntimeError("No training batches; check batch size and max_steps")
-    return ({key:value/batches for key,value in totals.items()},meter.get_scores(),last_lr,global_step)
+    averages = {key:value/batches for key,value in totals.items()}
+    if getattr(args, 'mechanism', 'legacy') == 'task_space':
+        # Never fabricate v1 cosine/reliability/router accuracy values for v2.
+        inactive = {'router_loss','router_accuracy','target_reject_ratio',
+                    'sam_boundary','sam_relation','ov_response','ov_relation',
+                    'd_sam','d_ov','r_sam','r_ov'}
+        averages = {key:value for key,value in averages.items() if key not in inactive}
+    return (averages,meter.get_scores(),last_lr,global_step)
 
 
 @torch.no_grad()
@@ -371,7 +425,8 @@ def validate_resume(args, checkpoint):
     keys=("implementation_version", "experiment", "dataset_name", "batch_size", "max_steps", "seed",
           "lr", "lr_mode", "step_loss", "weight_decay", "backbone_lr_mult", "dice_reduction",
           "main_loss_weights", "router_lr", "router_hidden", "utility_margin", "boundary_radius",
-          "small_area", "kd_lambda", "inWidth", "inHeight", "data_fingerprint", "cache_fingerprint")
+          "small_area", "kd_lambda", "inWidth", "inHeight", "data_fingerprint", "cache_fingerprint",
+          "mechanism", "cache_replay")
     for key in keys:
         if saved.get(key) != getattr(args,key,None):
             raise ValueError(f"Resume configuration mismatch for {key}: {saved.get(key)!r} vs {getattr(args,key,None)!r}")
@@ -417,6 +472,7 @@ def main():
         args.data_root, os.path.join(args.data_root, "list", "train.txt"),
         batchsize=args.batch_size, trainsize=args.inWidth,
         num_workers=args.num_workers, teacher_cache=teacher_cache, seed=args.seed,
+        cache_replay=args.cache_replay,
     )
     if len(train_loader)==0:
         raise ValueError("Training dataset smaller than batch_size with drop_last=True")
