@@ -1,7 +1,7 @@
 # AGENTS.md — LS-Rep_BCD_RSML_3 / SAM-HSD
 
 > Last updated: 2026-09-12
-> 本文件是当前项目中 AI/Coding Agent 的工作约束。实验上下文覆盖 `train_scripts/SAM-HSD/` 中的 baseline、Run1、Run2(EIR-HSD)、Run3(Z2-SRD) 与 `train_scripts/DART-R/`（方向 C）。Run4(CR-SRD) 已判定无效并回退；`models/` 已完整重构为 DART-R 实现，仅保留 B0（clean baseline）与 C0（困难感知可靠教师路由与拒绝蒸馏）。**DART-R = Difficulty-Aware Reliable Teacher Routing with Rejection（困难感知的可靠教师路由与拒绝蒸馏）；学生模型仍叫 A2Net-LWGANet-L0。** 项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。不记录或继承其他旧实验、旧服务器结果表或历史完成状态。
+> 本文件是当前项目中 AI/Coding Agent 的工作约束。实验上下文覆盖 `train_scripts/SAM-HSD/` 中的 baseline、Run1、Run2(EIR-HSD)、Run3(Z2-SRD) 与 `train_scripts/DART-R/`（方向 C）。Run4(CR-SRD) 已判定无效并回退；`models/` 已完整重构为 DART-R 实现，主方法从 C0（梯度路由，已判无效）迭代为 **C1 DART-R-TS（Task-Space DART-R，任务空间困难感知教师路由与拒绝）**；学生模型仍叫 A2Net-LWGANet-L0，部署参数不变。 项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。不记录或继承其他旧实验、旧服务器结果表或历史完成状态。
 
 ## GitHub 提交流程
 
@@ -38,7 +38,7 @@ train_scripts/SAM-HSD/          # 历史（Run3 后已停止，仅作对照/归�
 ├── Run2(EIR-HSD)/
 └── Run3/
 
-train_scripts/DART-R/           # 方向 C：DART-R（B0 / C0）
+train_scripts/DART-R/           # 方向 C：DART-R（B0 / C0 历史 / C1 DART-R-TS 主方法）
 ```
 
 按以下优先级判断事实：
@@ -141,6 +141,8 @@ python -c "import torch, torchvision, cv2, numpy, scipy, sklearn, PIL, tqdm, ten
 | Run3 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/saved_models/SAM-HSD/Run3` |
 | DirectionC (DART-R) checkpoint | `/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/DirectionC` |
 | DirectionC (DART-R) 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/DirectionC` |
+| DART-R-TS (Run2) checkpoint | `/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/DART-R-TS` |
+| DART-R-TS (Run2) 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/DART-R-TS` |
 
 本地下载与汇总产物：
 
@@ -303,16 +305,23 @@ Run3 40k 正式矩阵（`steps_40000`，seed=2333，batch=64）已完成全部 1
 
 **因此：按现有正式结果，不得声称 SAM2 结构 teacher 有效。** 若要正面回答该问题，最小可证伪实验是同协议（同 batch/同 steps）的 `clean` vs `clean + joint-BN` vs `clean + joint-BN + teacher` 三臂对照；在完成该对照前，任何「teacher 提升」的表述都属未经验证。项目处于有效性探寻阶段，本节结论随时可能被新实验推翻。
 
-### 4.5 DART-R（方向 C）
+### 4.5 DART-R / DART-R-TS（方向 C）
 
-DART-R（Difficulty-Aware Reliable Teacher Routing with Rejection，困难感知的可靠教师路由与拒绝蒸馏）是当前主方法；学生模型仍叫 A2Net-LWGANet-L0，DART-R 只是训练方法名。`models/` 已重构为两个入口：
+方向 C 主方法经历一次迭代：Run1 的 C0（梯度路由 DART-R）已判无效（见下方 Run1 结果），现迭代为 **C1 DART-R-TS（Task-Space DART-R，任务空间困难感知教师路由与拒绝）**。学生模型仍叫 A2Net-LWGANet-L0，DART-R-TS 只是训练期机制，部署参数不变。`models/scripts/train.py` 注册以下入口：
 
-| ID | 名称 | auxiliary_mode | 说明 |
+| ID | 名称 | 机制 | 说明 |
 |---|---|---|---|
 | B0 | Baseline_A2Net_LWGANet_L0 | none | clean baseline，无教师 |
-| C0 | C0_Difficulty_Reliable_Routing_Reject | direction_c | DART-R 主方法 |
+| C0 | C0_Difficulty_Reliable_Routing_Reject | legacy 梯度路由 + legacy 重放 | Run1 旧主方法（已判无效，仅历史诊断） |
+| C0F | C0F_Legacy_AlignedReplay | legacy 梯度路由 + aligned 重放 | 只修复旧 C0 的重放，作归因对照 |
+| C1 | C1_DART_R_TaskSpace | task_space | **当前主方法**（DART-R-TS） |
+| C2 | C2_TaskSpace_QualityOnly | task_space / quality 路由 | 关掉 Brier 收益准入的负对照 |
+| C3/C4 | TaskSpace OV/SAM Only | task_space | 单教师消融（暂不跑） |
+| C5 | TaskSpace_NoDifficulty | task_space | 无困难加权消融（暂不跑） |
 
-C0 核心（详见 `docs/temporary/方向C_代码交付说明.md`）：六维困难画像 h（边界漏检 / 内部碎裂 / 小变化漏检 / 背景误报 / 预测熵 / 变化比）；教师可靠性 r=q·max(d,0)，q 为教师 quality，d 为教师损失与 GT 代理损失的梯度余弦；Router 为 `8→16→3` MLP 输出 SAM/OV/Reject softmax 权重；Reject 是硬动作（argmax），选中时所有教师损失归零、只保留 GT。两位教师为 SAMStruct（boundary + 同实例邻接关系）与 OVCDistill（soft_change + 空间 Gram 关系）。部署图只保留 A2Net-LWGANet-L0，参数 2,913,094。
+**C0 旧机制**（详见 `docs/temporary/方向C_代码交付说明.md`）：六维困难画像 h；教师可靠性 r=q·max(d,0)，d 为教师损失与 GT 代理损失在 decoder 特征的梯度余弦；Router 为 `8→16→3` MLP；Reject 是整图硬动作。因 d≈0（见下方失败诊断）已弃用。
+
+**C1 DART-R-TS 新机制**（`models/distill/task_space.py`，辅助参数 **0**，训练=部署=2,913,094）：不训练 MLP/辅助头；把 SAM 结构经 leave-one-out 实例传输转译为变化概率提案，OV 提供 soft_change 提案；用精确 Brier 相对收益 `u=(p−y)²−(s−y)²` 做**逐像素**准入（只接受 `u>0` 的教师），`L=L_GT+0.06·KL(soft-target‖p)`，困难诊断仅作空间加权。同时修复 Cache 重放的 P0 问题（`aligned` 重放：grid_sample 最近邻与 OpenCV 不一致、大实例 ID 浮点精度丢失）。
 
 教师 Cache 要求：C0 每个数据集需要 SAMStruct（`sam2_struct_v2`）与 OVCDistill（DINOv2 ViT-B/14）两套训练 Cache。四个数据集的 train Cache 现已全部齐备：SYSU/WHU 为历史生成，CDD/LEVIR 由 `train_scripts/DART-R/cache_gen/` 重建生成（config_hash 与历史不同、数值非严格一致）。Run1 消融设计见 `train_scripts/DART-R/Run1/README.md`；训练入口为 `models/scripts/train.py`（B0/C0），checkpoint/日志根见第 3 节。
 
@@ -333,6 +342,8 @@ C0 核心（详见 `docs/temporary/方向C_代码交付说明.md`）：六维困
 
 **失败诊断（C0 各数据集末 epoch）**：`reject_ratio` 0.84–0.90、`target_reject_ratio` 0.83–0.89、`router_accuracy` 0.994–0.998，但梯度余弦代理 `d_sam`/`d_ov` 均 ≈ 0（−0.08 ~ +0.001），导致 `r=q·max(d,0)` ≈ 0.002–0.008、`utility=q·d < margin(0.02)` 对几乎所有样本成立 → Router 学会「几乎全 Reject」。这是 **教师代理不适配**（d 与 GT 梯度在 decoder 特征处近乎正交，可靠性代理不可用），**不是 Router 没学会**（router_accuracy≈0.995）。教师质量 `q_sam`/`q_ov` 本身正常（0.36–0.85），问题出在 d 这一阶梯度代理无法预测教师收益。
 
+**Run2 消融计划**（`train_scripts/DART-R/Run2/README.md`）：验证 C1 相对 B0 的有效性。3 组（B0 / C1 / C2）× 4 数据集 = 12 run，batch **128**（翻倍）、40k、seed 2333；双卡并行——GPU 0 跑 SYSU+WHU、GPU 1 跑 CDD+LEVIR，各卡内 B0→C1→C2 串行（`run_gpu0_sysu_whu.sh` / `run_gpu1_cdd_levir.sh`）。判定：C1 vs B0 为整体有效性；C1 vs C2 为收益准入是否有用。单 seed 仅作筛选，论文级主比较 seed `2333/3407/5871`。
+
 ## 5. 模型与部署约束
 
 - 主学生模型是 A2Net-LWGANet-L0；SAM2 Teacher Cache 和 HSD 辅助结构只允许参与训练。
@@ -349,16 +360,20 @@ C0 核心（详见 `docs/temporary/方向C_代码交付说明.md`）：六维困
 models/a2net.py
 models/backbone/lwganet.py
 models/decoder/a2net_decoder.py
-models/datasets/
+models/datasets/cd_dataset.py
+models/datasets/cache_transforms.py
+models/distill/task_space.py
+models/distill/routing.py
+models/distill/losses.py
+models/distill/diagnostics.py
 models/distill/teacher_cache.py
-models/distill/sam_hsd/
 models/losses/combined_loss.py
 models/scripts/train.py
-models/tools/sam/validate_teacher_cache.py
-models/tools/smoke_sam_hsd.py
-models/tools/smoke_eir_hsd.py
-models/tools/smoke_z2_srd.py
-models/tools/dry_run_z2_srd.py
+models/tools/validate_teacher_cache.py
+models/tools/smoke_task_space.py
+models/tools/dry_run_task_space.py
+models/tools/integration_task_space.py
+models/tools/export_deploy.py
 ```
 
 ## 6. Teacher Cache 规则
@@ -411,7 +426,7 @@ models/tools/dry_run_z2_srd.py
 
 ```bash
 python -B analyse/extract_metrics.py
-python -B analyse/models_to_txt.py --run3
+python -B analyse/models_to_txt.py --dartr
 ```
 
 `extract_metrics.py` 递归读取 `saved_models/SAM-HSD/**/train_log.txt` 与 `outputs/SAM-HSD/Run3/**/train_log.txt`，忽略 launcher tee 日志，只接收最后一个字段完整且数值可解析的正式 test block；任一候选日志不完整时必须报错，不得静默混入结果。Run3 的 `Stage` 判定：`max_steps=12000` 为 `Stage1`（机制筛选），`max_steps=40000` 为 `Full`（正式）。指标以百分数保存并保留 4 位小数。`models_to_txt.py --run3` 收录当前 `models/` 下全部 Python 源码与统一 Excel 全部工作表，输出 `docs/temporary/models_and_metrics_SAM-HSD_Run3.txt`。
