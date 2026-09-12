@@ -1,7 +1,7 @@
 # AGENTS.md — LS-Rep_BCD_RSML_3 / SAM-HSD
 
-> Last updated: 2026-09-11
-> 本文件是当前项目中 AI/Coding Agent 的工作约束。实验上下文覆盖 `train_scripts/SAM-HSD/` 中的 baseline、Run1、Run2(EIR-HSD) 与 Run3(Z2-SRD)。Run4(CR-SRD) 已判定无效并回退，`models/` 已恢复为 Run3 版本；Run3 40k 正式矩阵已完成，主方法 N0 未胜过对照 N3，按 README 停止标准 Z2 主线已停止。**下一阶段方向为 CD-specific Difficulty-Aware Reliable Teacher Routing + Reject（方向 C），当前处于调研/设计阶段，尚未改动 `models/` 主代码。** 项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。不记录或继承其他旧实验、旧服务器结果表或历史完成状态。
+> Last updated: 2026-09-12
+> 本文件是当前项目中 AI/Coding Agent 的工作约束。实验上下文覆盖 `train_scripts/SAM-HSD/` 中的 baseline、Run1、Run2(EIR-HSD)、Run3(Z2-SRD) 与 `train_scripts/DART-R/`（方向 C）。Run4(CR-SRD) 已判定无效并回退；`models/` 已完整重构为 DART-R 实现，仅保留 B0（clean baseline）与 C0（困难感知可靠教师路由与拒绝蒸馏）。**DART-R = Difficulty-Aware Reliable Teacher Routing with Rejection（困难感知的可靠教师路由与拒绝蒸馏）；学生模型仍叫 A2Net-LWGANet-L0。** 项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。不记录或继承其他旧实验、旧服务器结果表或历史完成状态。
 
 ## GitHub 提交流程
 
@@ -32,21 +32,24 @@ git push
 当前唯一活动实验族：
 
 ```text
-train_scripts/SAM-HSD/
+train_scripts/SAM-HSD/          # 历史（Run3 后已停止，仅作对照/归档）
 ├── baseline/
 ├── Run1/
 ├── Run2(EIR-HSD)/
 └── Run3/
+
+train_scripts/DART-R/           # 方向 C：DART-R（B0 / C0）
 ```
 
 按以下优先级判断事实：
 
 1. 当前代码与 shell 参数；
-2. `train_scripts/SAM-HSD/Run1/README.md`；
-3. `train_scripts/SAM-HSD/Run2(EIR-HSD)/README.md`；
-4. `train_scripts/SAM-HSD/Run3/README.md`；
-5. `docs/RSML-3_服务器环境与变化检测数据统一说明.md`；
-6. 本文件中的摘要。
+2. `docs/temporary/方向C_代码交付说明.md`（DART-R 的权威实现说明）；
+3. `train_scripts/SAM-HSD/Run1/README.md`；
+4. `train_scripts/SAM-HSD/Run2(EIR-HSD)/README.md`；
+5. `train_scripts/SAM-HSD/Run3/README.md`；
+6. `docs/RSML-3_服务器环境与变化检测数据统一说明.md`；
+7. 本文件中的摘要。
 
 不得从旧项目复制实验结果、GPU/存储配置、完成状态或结论。需要报告指标时，必须重新读取当前服务器上对应运行的正式 test block。
 
@@ -136,6 +139,8 @@ python -c "import torch, torchvision, cv2, numpy, scipy, sklearn, PIL, tqdm, ten
 | Run2 launcher 日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/logs/SAM-HSD/Run2` |
 | Run3 checkpoint | `/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/saved_models/SAM-HSD/Run3` |
 | Run3 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/saved_models/SAM-HSD/Run3` |
+| DirectionC (DART-R) checkpoint | `/home/yqwang/checkpoints/LS-Rep_BCD_RSML_3/DirectionC` |
+| DirectionC (DART-R) 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/DirectionC` |
 
 本地下载与汇总产物：
 
@@ -297,6 +302,36 @@ Run3 40k 正式矩阵（`steps_40000`，seed=2333，batch=64）已完成全部 1
 3. Run3 内 5 个 variant 共享同一 teacher，最简单的 N3（R2 式 abs/product 不变量）在两个数据集均最优，说明 teacher 的**结构化用法**同样未带来收益。
 
 **因此：按现有正式结果，不得声称 SAM2 结构 teacher 有效。** 若要正面回答该问题，最小可证伪实验是同协议（同 batch/同 steps）的 `clean` vs `clean + joint-BN` vs `clean + joint-BN + teacher` 三臂对照；在完成该对照前，任何「teacher 提升」的表述都属未经验证。项目处于有效性探寻阶段，本节结论随时可能被新实验推翻。
+
+### 4.5 DART-R（方向 C）
+
+DART-R（Difficulty-Aware Reliable Teacher Routing with Rejection，困难感知的可靠教师路由与拒绝蒸馏）是当前主方法；学生模型仍叫 A2Net-LWGANet-L0，DART-R 只是训练方法名。`models/` 已重构为两个入口：
+
+| ID | 名称 | auxiliary_mode | 说明 |
+|---|---|---|---|
+| B0 | Baseline_A2Net_LWGANet_L0 | none | clean baseline，无教师 |
+| C0 | C0_Difficulty_Reliable_Routing_Reject | direction_c | DART-R 主方法 |
+
+C0 核心（详见 `docs/temporary/方向C_代码交付说明.md`）：六维困难画像 h（边界漏检 / 内部碎裂 / 小变化漏检 / 背景误报 / 预测熵 / 变化比）；教师可靠性 r=q·max(d,0)，q 为教师 quality，d 为教师损失与 GT 代理损失的梯度余弦；Router 为 `8→16→3` MLP 输出 SAM/OV/Reject softmax 权重；Reject 是硬动作（argmax），选中时所有教师损失归零、只保留 GT。两位教师为 SAMStruct（boundary + 同实例邻接关系）与 OVCDistill（soft_change + 空间 Gram 关系）。部署图只保留 A2Net-LWGANet-L0，参数 2,913,094。
+
+教师 Cache 要求：C0 每个数据集需要 SAMStruct（`sam2_struct_v2`）与 OVCDistill（DINOv2 ViT-B/14）两套训练 Cache。四个数据集的 train Cache 现已全部齐备：SYSU/WHU 为历史生成，CDD/LEVIR 由 `train_scripts/DART-R/cache_gen/` 重建生成（config_hash 与历史不同、数值非严格一致）。Run1 消融设计见 `train_scripts/DART-R/Run1/README.md`；训练入口为 `models/scripts/train.py`（B0/C0），checkpoint/日志根见第 3 节。
+
+**Run1 消融正式结果（40k / seed 2333 / batch 64，百分比，取自 `docs/experiment_metrics.xlsx` 正式 test block）**：
+
+| ID | 数据集 | F1 | IoU | Kappa |
+|---|---|---:|---:|---:|
+| B0 | SYSU | 82.2842 | 69.9007 | 77.0389 |
+| C0 | SYSU | 82.0132 | 69.5105 | 76.8818 |
+| B0 | WHU | 94.1946 | 89.0264 | 93.9586 |
+| C0 | WHU | 94.2714 | 89.1636 | 94.0399 |
+| B0 | CDD | 97.7927 | 95.6808 | 97.4822 |
+| C0 | CDD | 97.7805 | 95.6574 | 97.4683 |
+| B0 | LEVIR | 91.2885 | 83.9732 | 90.8243 |
+| C0 | LEVIR | 90.8639 | 83.2575 | 90.3820 |
+
+**C0 vs B0（DART-R 整体有效性）**：SYSU ΔF1 −0.2710、WHU +0.0768、CDD −0.0122、LEVIR −0.4246，平均 ΔF1 ≈ −0.16。四数据集中 3 降 1 平（WHU≈0），全部落在单 seed 噪声基线内（Run1 H0→Run2 R0 同配置重跑即 ±0.1 F1）。**单 seed 下 DART-R 无正信号**；README 要求的论文级主比较为 seed `2333/3407/5871`，当前不能据此否定或肯定 DART-R。
+
+**失败诊断（C0 各数据集末 epoch）**：`reject_ratio` 0.84–0.90、`target_reject_ratio` 0.83–0.89、`router_accuracy` 0.994–0.998，但梯度余弦代理 `d_sam`/`d_ov` 均 ≈ 0（−0.08 ~ +0.001），导致 `r=q·max(d,0)` ≈ 0.002–0.008、`utility=q·d < margin(0.02)` 对几乎所有样本成立 → Router 学会「几乎全 Reject」。这是 **教师代理不适配**（d 与 GT 梯度在 decoder 特征处近乎正交，可靠性代理不可用），**不是 Router 没学会**（router_accuracy≈0.995）。教师质量 `q_sam`/`q_ov` 本身正常（0.36–0.85），问题出在 d 这一阶梯度代理无法预测教师收益。
 
 ## 5. 模型与部署约束
 

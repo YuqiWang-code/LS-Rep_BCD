@@ -1,4 +1,4 @@
-"""Plain-text logger for auditable SAM-HSD training and test results."""
+"""Plain-text logger for auditable baseline / direction-C training and test results."""
 
 import os
 import time
@@ -12,7 +12,7 @@ class TrainingLogger:
         os.makedirs(os.path.dirname(log_file), exist_ok=True)
         mode = "a" if append else "w"
         with open(log_file, mode, encoding="utf-8") as handle:
-            handle.write("=" * 100 + "\nSAM-HSD Training Log\n" + "=" * 100 + "\n")
+            handle.write("=" * 100 + "\nA2Net Training Log\n" + "=" * 100 + "\n")
             for key, value in config.items():
                 handle.write(f"{key}: {value}\n")
             handle.write("-" * 100 + "\n")

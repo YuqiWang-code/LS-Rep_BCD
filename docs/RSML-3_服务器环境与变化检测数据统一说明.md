@@ -1697,10 +1697,10 @@ RSML-3
 
 ### 遥感变化检测数据集与 Teacher Cache 统一说明
 
-> **用途**：作为后续新项目编写 `Dataset / DataLoader`、配置数据路径、划分训练/验证/测试集、加载 Teacher Cache 的统一数据说明。\
-> **服务器数据根目录**：`/home/yqwang/datasets/`\
-> **本地审计日期**：2026-09-06\
-> **整理依据**：`DATASET_INVENTORY.md` + `DATASET_DATALOADER_DEEP_AUDIT.md` + 公开数据集/Teacher 模型资料。\
+> **用途**：作为后续新项目编写 `Dataset / DataLoader`、配置数据路径、划分训练/验证/测试集、加载 Teacher Cache 的统一数据说明。  
+> **服务器数据根目录**：`/home/yqwang/datasets/`  
+> **本地审计日期**：2026-09-06（2026-09-12 更新：CDD/LEVIR 两套 Teacher Cache 已由 `train_scripts/DART-R/cache_gen/` 重建生成）  
+> **整理依据**：`DATASET_INVENTORY.md` + `DATASET_DATALOADER_DEEP_AUDIT.md` + 公开数据集/Teacher 模型资料。  
 > **适用项目**：CNN、Transformer、Mamba、普通监督变化检测、半监督变化检测、知识蒸馏/Teacher-guided 变化检测。
 >
 > **重要优先级**：写代码时，本文中的“服务器本地审计结果”优先级高于论文、官网或网络上对原始数据集的描述。公开资料描述的是**原始数据集**，服务器上使用的是已经裁剪、重命名并固定 split 的 **256×256 本地版本**。
@@ -1711,7 +1711,7 @@ RSML-3
 
 #### 1.1 当前数据根目录
 
-``` text
+```text
 /home/yqwang/datasets/
 ├── CD/
 │   ├── CDD-CD-256/
@@ -1722,12 +1722,16 @@ RSML-3
 └── CD_teacher_cache/
     ├── OVCDistill/
     │   ├── dinov2_vitb14/
+    │   │   ├── CDD-CD-256/
+    │   │   ├── LEVIR-CD-256/
     │   │   ├── SYSU-CD-256/
     │   │   └── WHU-CD-256/
     │   └── preview/
     │
     └── SAMStruct/
         ├── sam2.1_hiera_large/
+        │   ├── CDD-CD-256/
+        │   ├── LEVIR-CD-256/
         │   ├── SYSU-CD-256/
         │   └── WHU-CD-256/
         └── preview/
@@ -1736,7 +1740,7 @@ RSML-3
 #### 1.2 四个变化检测数据集
 
 | 本地数据集 | 总样本 | Train | Val | Test | 图像 | Label | 主要特点 |
-|----|---:|---:|---:|---:|----|----|----|
+|---|---:|---:|---:|---:|---|---|---|
 | `CDD-CD-256` | 15,998 | 10,000 | 2,998 | 3,000 | JPG, RGB, 256² | JPG, L | 季节/外观伪变化明显，多种变化目标 |
 | `LEVIR-CD-256` | 10,192 | 7,120 | 1,024 | 2,048 | PNG, RGB, 256² | PNG, L | 高分辨率建筑变化，小目标、细边界 |
 | `SYSU-CD-256` | 20,000 | 12,000 | 4,000 | 4,000 | PNG, RGB, 256² | PNG, L | 通用地表变化，变化类型丰富 |
@@ -1744,7 +1748,7 @@ RSML-3
 
 四个数据集均已验证：
 
-``` text
+```text
 A 文件名集合 == B 文件名集合 == label 文件名集合
 train ∩ val  = 0
 train ∩ test = 0
@@ -1764,7 +1768,7 @@ train ∪ val ∪ test = 全部有效样本
 
 对于任意数据集：
 
-``` text
+```text
 /home/yqwang/datasets/CD/<dataset>/
 ├── A/
 ├── B/
@@ -1777,7 +1781,7 @@ train ∪ val ∪ test = 全部有效样本
 
 其中：
 
-``` text
+```text
 A/<filename>      = T1 / 时相 1
 B/<filename>      = T2 / 时相 2
 label/<filename>  = 二值变化标签
@@ -1785,7 +1789,7 @@ label/<filename>  = 二值变化标签
 
 默认 split：
 
-``` text
+```text
 list/train.txt
 list/val.txt
 list/test.txt
@@ -1795,14 +1799,14 @@ list/test.txt
 
 Dataset 应当：
 
-1.  先读取 split txt；
-2.  以 txt 中的文件名作为 sample ID；
-3.  用同一个文件名构造 A、B、label 路径；
-4.  初始化时验证三个文件都存在。
+1. 先读取 split txt；
+2. 以 txt 中的文件名作为 sample ID；
+3. 用同一个文件名构造 A、B、label 路径；
+4. 初始化时验证三个文件都存在。
 
 推荐：
 
-``` python
+```python
 name = self.names[index]
 
 path_a = root / "A" / name
@@ -1818,7 +1822,7 @@ path_y = root / "label" / name
 
 建议统一：
 
-``` python
+```python
 mask = Image.open(label_path).convert("L")
 mask = np.asarray(mask)
 
@@ -1834,7 +1838,7 @@ mask = (mask >= 128).astype(np.int64)
 
 因此：
 
-``` python
+```python
 mask == 255
 ```
 
@@ -1842,7 +1846,7 @@ mask == 255
 
 统一使用：
 
-``` python
+```python
 mask >= 128
 ```
 
@@ -1854,7 +1858,7 @@ mask >= 128
 
 A、B、label 必须共享同一个几何变换：
 
-``` text
+```text
 RandomCrop
 HorizontalFlip
 VerticalFlip
@@ -1865,7 +1869,7 @@ Resize
 
 即：
 
-``` text
+```text
 A ─┐
 B ─┼─ 同步空间增强
 Y ─┘
@@ -1873,7 +1877,7 @@ Y ─┘
 
 但：
 
-``` text
+```text
 Brightness
 Contrast
 ColorJitter
@@ -1905,7 +1909,7 @@ Normalize
 
 #### 3.1 `/home/yqwang/datasets/CD`
 
-``` text
+```text
 总目录数：22
 总文件数：160,927
 总大小：10.82 GiB
@@ -1913,7 +1917,7 @@ Normalize
 
 扩展名：
 
-``` text
+```text
 .png  112,893
 .jpg   47,994
 .txt       37
@@ -1922,39 +1926,39 @@ Normalize
 
 各数据集大小：
 
-| 数据集       | 本地大小 |
-|--------------|---------:|
-| CDD-CD-256   | 1.31 GiB |
+| 数据集 | 本地大小 |
+|---|---:|
+| CDD-CD-256 | 1.31 GiB |
 | LEVIR-CD-256 | 2.31 GiB |
-| SYSU-CD-256  | 5.42 GiB |
-| WHU-CD-256   | 1.78 GiB |
+| SYSU-CD-256 | 5.42 GiB |
+| WHU-CD-256 | 1.78 GiB |
 
 ------------------------------------------------------------------------
 
 #### 3.2 `/home/yqwang/datasets/CD_teacher_cache`
 
-``` text
-总目录数：19
-总文件数：36,132
-总大小：18.10 GiB
+```text
+总大小：约 36 GiB（四数据集 × 两套 teacher 全量 train cache，du 占用）
 ```
 
 扩展名：
 
-``` text
+```text
 .pt    35,894
 .jpg      232   # preview，可视化用，不参与训练读取
 .json       6   # manifest/config 元数据
 ```
 
-Teacher Cache 当前只覆盖：
+Teacher Cache 现已覆盖四个数据集的 canonical train：
 
-``` text
-SYSU-CD-256 train
-WHU-CD-256  train
+```text
+CDD-CD-256   train  10,000
+LEVIR-CD-256 train   7,120
+SYSU-CD-256  train  12,000
+WHU-CD-256   train   5,947
 ```
 
-CDD 和 LEVIR 当前**没有 Teacher Cache**。
+> CDD 与 LEVIR 的两套 Cache 由 `train_scripts/DART-R/cache_gen/` 重建生成，config_hash 与历史 SYSU/WHU 不同，数值与历史生成器**不保证严格一致**（详见 §9）。
 
 ------------------------------------------------------------------------
 
@@ -1962,7 +1966,7 @@ CDD 和 LEVIR 当前**没有 Teacher Cache**。
 
 #### 4.1 本地路径
 
-``` text
+```text
 /home/yqwang/datasets/CD/CDD-CD-256/
 ├── A/      15,998 JPG
 ├── B/      15,998 JPG
@@ -1975,7 +1979,7 @@ CDD 和 LEVIR 当前**没有 Teacher Cache**。
 
 图像：
 
-``` text
+```text
 A: RGB, 256×256
 B: RGB, 256×256
 label: L/grayscale, 256×256
@@ -1986,15 +1990,15 @@ label: L/grayscale, 256×256
 #### 4.2 Split
 
 | Split | 样本数 |
-|-------|-------:|
+|---|---:|
 | Train | 10,000 |
-| Val   |  2,998 |
-| Test  |  3,000 |
+| Val | 2,998 |
+| Test | 3,000 |
 | Total | 15,998 |
 
 完整性：
 
-``` text
+```text
 duplicates = 0
 missing A = 0
 missing B = 0
@@ -2009,11 +2013,11 @@ split union = 15,998
 
 > A+B 合并抽样统计；每个 split 抽样 256 对。
 
-| Split | Mean RGB                         | Std RGB                          |
-|-------|----------------------------------|----------------------------------|
+| Split | Mean RGB | Std RGB |
+|---|---|---|
 | Train | `[0.417276, 0.448822, 0.410310]` | `[0.232498, 0.248929, 0.238022]` |
-| Val   | `[0.412241, 0.442980, 0.405717]` | `[0.241070, 0.255401, 0.246631]` |
-| Test  | `[0.428764, 0.461439, 0.421374]` | `[0.242136, 0.256226, 0.247326]` |
+| Val | `[0.412241, 0.442980, 0.405717]` | `[0.241070, 0.255401, 0.246631]` |
+| Test | `[0.428764, 0.461439, 0.421374]` | `[0.242136, 0.256226, 0.247326]` |
 
 ------------------------------------------------------------------------
 
@@ -2024,14 +2028,14 @@ CDD 的 label 是 **JPEG**。
 对每个 split 抽样 512 张 mask 后：
 
 | Split | `mask >= 128` 变化像素比例 | 原始中间灰度 `(1..254)` |
-|-------|---------------------------:|------------------------:|
-| Train |                   11.9437% |                 1.0924% |
-| Val   |                   11.2160% |                 1.0690% |
-| Test  |                   13.1101% |                 1.1660% |
+|---|---:|---:|
+| Train | 11.9437% | 1.0924% |
+| Val | 11.2160% | 1.0690% |
+| Test | 13.1101% | 1.1660% |
 
 原始 mask 抽样出现：
 
-``` text
+```text
 0 ~ 255 共 256 个灰度值
 ```
 
@@ -2039,14 +2043,14 @@ CDD 的 label 是 **JPEG**。
 
 ##### CDD 强制建议
 
-``` python
+```python
 mask = np.asarray(Image.open(path).convert("L"))
 mask = (mask >= 128).astype(np.int64)
 ```
 
 不要：
 
-``` python
+```python
 mask = (mask == 255)
 ```
 
@@ -2058,7 +2062,7 @@ mask = (mask == 255)
 
 CDD 与 Lebedev 等人在 2018 年的 season-varying remote sensing change detection 工作相关。公开文献描述其包含来自 Google Earth 的跨季节双时相影像，重点挑战之一是：
 
-``` text
+```text
 真实变化
 +
 季节变化
@@ -2090,7 +2094,7 @@ CDD 与 Lebedev 等人在 2018 年的 season-varying remote sensing change detec
 
 **本服务器必须以本地审计为准：**
 
-``` text
+```text
 10,000 / 2,998 / 3,000
 Total = 15,998
 ```
@@ -2101,7 +2105,7 @@ Total = 15,998
 
 #### 5.1 本地路径
 
-``` text
+```text
 /home/yqwang/datasets/CD/LEVIR-CD-256/
 ├── A/      10,192 PNG
 ├── B/      10,192 PNG
@@ -2119,14 +2123,14 @@ Total = 15,998
 
 A/B：
 
-``` text
+```text
 RGB PNG
 256×256
 ```
 
 Label：
 
-``` text
+```text
 grayscale PNG
 256×256
 ```
@@ -2138,15 +2142,15 @@ grayscale PNG
 **默认只使用 `list/` 下这一套：**
 
 | Split | 样本数 |
-|-------|-------:|
-| Train |  7,120 |
-| Val   |  1,024 |
-| Test  |  2,048 |
+|---|---:|
+| Train | 7,120 |
+| Val | 1,024 |
+| Test | 2,048 |
 | Total | 10,192 |
 
 完整性：
 
-``` text
+```text
 duplicates = 0
 missing A/B/label = 0
 train/val/test 无重叠
@@ -2159,7 +2163,7 @@ train/val/test 无重叠
 
 根目录还存在：
 
-``` text
+```text
 list_train.txt
 list_val.txt
 list_test.txt
@@ -2169,7 +2173,7 @@ list_test.txt
 
 审计结果：
 
-``` text
+```text
 root list_test.txt vs canonical test:
 overlap = 0 / 2048
 
@@ -2186,7 +2190,7 @@ overlap = 5072 / 7120
 
 除非论文代码明确要求根目录：
 
-``` text
+```text
 list_train.txt
 list_val.txt
 list_test.txt
@@ -2194,7 +2198,7 @@ list_test.txt
 
 否则一律使用：
 
-``` text
+```text
 list/train.txt
 list/val.txt
 list/test.txt
@@ -2206,11 +2210,11 @@ list/test.txt
 
 #### 5.4 RGB 抽样统计
 
-| Split | Mean RGB                         | Std RGB                          |
-|-------|----------------------------------|----------------------------------|
+| Split | Mean RGB | Std RGB |
+|---|---|---|
 | Train | `[0.396484, 0.391759, 0.334584]` | `[0.198256, 0.190001, 0.175035]` |
-| Val   | `[0.380532, 0.374350, 0.319038]` | `[0.190607, 0.178245, 0.161980]` |
-| Test  | `[0.385375, 0.381398, 0.324319]` | `[0.198337, 0.187098, 0.170328]` |
+| Val | `[0.380532, 0.374350, 0.319038]` | `[0.190607, 0.178245, 0.161980]` |
+| Test | `[0.385375, 0.381398, 0.324319]` | `[0.198337, 0.187098, 0.170328]` |
 
 ------------------------------------------------------------------------
 
@@ -2218,29 +2222,29 @@ list/test.txt
 
 抽样 mask 出现：
 
-``` text
+```text
 0, 156, 254, 255
 ```
 
 其中中间值占比极低：
 
-``` text
+```text
 约 0.0000x
 ```
 
 变化像素比例：
 
 | Split | 变化像素比例 |
-|-------|-------------:|
-| Train |      4.1275% |
-| Val   |      4.2118% |
-| Test  |      4.8211% |
+|---|---:|
+| Train | 4.1275% |
+| Val | 4.2118% |
+| Test | 4.8211% |
 
 因此 LEVIR 具有明显前景/背景不平衡。
 
 推荐统一：
 
-``` python
+```python
 mask = (mask >= 128)
 ```
 
@@ -2252,7 +2256,7 @@ LEVIR-CD 是经典的**建筑变化检测** benchmark。
 
 公开项目说明：
 
-``` text
+```text
 637 对 VHR 双时相影像
 原始单图：1024×1024
 空间分辨率：0.5 m/pixel
@@ -2277,7 +2281,7 @@ LEVIR-CD 是经典的**建筑变化检测** benchmark。
 
 因此 LEVIR 很适合评价：
 
-``` text
+```text
 小目标变化
 建筑边界质量
 Attention / Transformer
@@ -2291,7 +2295,7 @@ Mamba 空间建模
 
 #### 6.1 本地路径
 
-``` text
+```text
 /home/yqwang/datasets/CD/SYSU-CD-256/
 ├── A/      20,000 PNG
 ├── B/      20,000 PNG
@@ -2304,7 +2308,7 @@ Mamba 空间建模
 
 全部：
 
-``` text
+```text
 A/B: RGB PNG 256×256
 label: grayscale PNG 256×256
 ```
@@ -2314,15 +2318,15 @@ label: grayscale PNG 256×256
 #### 6.2 Split
 
 | Split | 样本数 |
-|-------|-------:|
+|---|---:|
 | Train | 12,000 |
-| Val   |  4,000 |
-| Test  |  4,000 |
+| Val | 4,000 |
+| Test | 4,000 |
 | Total | 20,000 |
 
 完整性：
 
-``` text
+```text
 duplicates = 0
 missing A/B/label = 0
 split 无重叠
@@ -2333,11 +2337,11 @@ split 无重叠
 
 #### 6.3 RGB 抽样统计
 
-| Split | Mean RGB                         | Std RGB                          |
-|-------|----------------------------------|----------------------------------|
+| Split | Mean RGB | Std RGB |
+|---|---|---|
 | Train | `[0.400212, 0.504991, 0.428774]` | `[0.230152, 0.183968, 0.182145]` |
-| Val   | `[0.399955, 0.502252, 0.423679]` | `[0.229198, 0.184835, 0.184254]` |
-| Test  | `[0.394009, 0.501927, 0.424776]` | `[0.228178, 0.181773, 0.180695]` |
+| Val | `[0.399955, 0.502252, 0.423679]` | `[0.229198, 0.184835, 0.184254]` |
+| Test | `[0.394009, 0.501927, 0.424776]` | `[0.228178, 0.181773, 0.180695]` |
 
 ------------------------------------------------------------------------
 
@@ -2345,7 +2349,7 @@ split 无重叠
 
 标准：
 
-``` text
+```text
 0
 255
 ```
@@ -2353,10 +2357,10 @@ split 无重叠
 变化像素比例：
 
 | Split | 变化像素比例 |
-|-------|-------------:|
-| Train |     21.1368% |
-| Val   |     21.5150% |
-| Test  |     22.7476% |
+|---|---:|
+| Train | 21.1368% |
+| Val | 21.5150% |
+| Test | 22.7476% |
 
 四个本地数据集中，SYSU 的变化像素比例明显更高。
 
@@ -2366,7 +2370,7 @@ split 无重叠
 
 SYSU-CD 官方仓库描述：
 
-``` text
+```text
 20,000 对
 256×256
 0.5 m aerial images
@@ -2376,16 +2380,16 @@ Hong Kong
 
 主要变化类型包括：
 
-1.  新建城市建筑；
-2.  郊区扩张；
-3.  建设施工前土地平整；
-4.  植被变化；
-5.  道路扩建；
-6.  海岸/填海建设。
+1. 新建城市建筑；
+2. 郊区扩张；
+3. 建设施工前土地平整；
+4. 植被变化；
+5. 道路扩建；
+6. 海岸/填海建设。
 
 因此 SYSU 与 LEVIR/WHU 最大的实验意义区别是：
 
-``` text
+```text
 LEVIR / WHU → building-focused
 SYSU        → general land-cover change
 ```
@@ -2402,20 +2406,20 @@ SYSU        → general land-cover change
 
 SYSU 的整个 canonical train：
 
-``` text
+```text
 12,000 samples
 ```
 
 已经同时拥有：
 
-``` text
+```text
 12,000 OVCDistill caches
 12,000 SAMStruct caches
 ```
 
 覆盖率：
 
-``` text
+```text
 100%
 ```
 
@@ -2427,7 +2431,7 @@ SYSU 的整个 canonical train：
 
 #### 7.1 本地路径
 
-``` text
+```text
 /home/yqwang/datasets/CD/WHU-CD-256/
 ├── A/      7,434 PNG
 ├── B/      7,434 PNG
@@ -2450,7 +2454,7 @@ SYSU 的整个 canonical train：
 
 训练数据仍然只读取：
 
-``` text
+```text
 A/
 B/
 label/
@@ -2459,7 +2463,7 @@ list/
 
 以下内容**不是训练输入目录**：
 
-``` text
+```text
 WHU_CD/
 sample_*.png
 metrics.txt
@@ -2471,15 +2475,15 @@ preview 类图片
 #### 7.2 Canonical Split
 
 | Split | 样本数 |
-|-------|-------:|
-| Train |  5,947 |
-| Val   |    743 |
-| Test  |    744 |
-| Total |  7,434 |
+|---|---:|
+| Train | 5,947 |
+| Val | 743 |
+| Test | 744 |
+| Total | 7,434 |
 
 完整性：
 
-``` text
+```text
 duplicates = 0
 missing A/B/label = 0
 split 无重叠
@@ -2493,23 +2497,23 @@ split 无重叠
 WHU 已附带不同标注比例的 supervised / unsupervised 划分：
 
 | 标注比例 | Supervised | Unsupervised |
-|---------:|-----------:|-------------:|
-|       5% |        297 |        5,650 |
-|      10% |        594 |        5,353 |
-|      20% |      1,189 |        4,758 |
-|      30% |      1,784 |        4,163 |
-|      40% |      2,378 |        3,569 |
-|      50% |      2,973 |        2,974 |
-|      60% |      3,568 |        2,379 |
-|      70% |      4,162 |        1,785 |
-|      80% |      4,757 |        1,190 |
-|     100% |      5,947 |            0 |
+|---:|---:|---:|
+| 5% | 297 | 5,650 |
+| 10% | 594 | 5,353 |
+| 20% | 1,189 | 4,758 |
+| 30% | 1,784 | 4,163 |
+| 40% | 2,378 | 3,569 |
+| 50% | 2,973 | 2,974 |
+| 60% | 3,568 | 2,379 |
+| 70% | 4,162 | 1,785 |
+| 80% | 4,757 | 1,190 |
+| 100% | 5,947 | 0 |
 
 审计已确认每个列表中的样本都属于 canonical train。
 
 从数量上每组：
 
-``` text
+```text
 supervised + unsupervised = 5,947
 ```
 
@@ -2521,11 +2525,11 @@ supervised + unsupervised = 5,947
 
 #### 7.4 RGB 抽样统计
 
-| Split | Mean RGB                         | Std RGB                          |
-|-------|----------------------------------|----------------------------------|
+| Split | Mean RGB | Std RGB |
+|---|---|---|
 | Train | `[0.490911, 0.470216, 0.431042]` | `[0.198939, 0.193220, 0.205562]` |
-| Val   | `[0.489612, 0.469175, 0.430599]` | `[0.196319, 0.190595, 0.203615]` |
-| Test  | `[0.473949, 0.453885, 0.412760]` | `[0.190160, 0.182829, 0.195018]` |
+| Val | `[0.489612, 0.469175, 0.430599]` | `[0.196319, 0.190595, 0.203615]` |
+| Test | `[0.473949, 0.453885, 0.412760]` | `[0.190160, 0.182829, 0.195018]` |
 
 ------------------------------------------------------------------------
 
@@ -2533,7 +2537,7 @@ supervised + unsupervised = 5,947
 
 标准：
 
-``` text
+```text
 0
 255
 ```
@@ -2541,16 +2545,16 @@ supervised + unsupervised = 5,947
 变化像素比例：
 
 | Split | 变化像素比例 |
-|-------|-------------:|
-| Train |      3.4209% |
-| Val   |      4.5804% |
-| Test  |      4.1644% |
+|---|---:|
+| Train | 3.4209% |
+| Val | 4.5804% |
+| Test | 4.1644% |
 
 WHU 是四个本地数据集中**变化像素最稀疏**的之一。
 
 因此训练时常需要注意：
 
-``` text
+```text
 background >> change
 ```
 
@@ -2575,7 +2579,7 @@ WHU Building Change Detection 来源于 Christchurch, New Zealand。
 
 不同论文中会看到 WHU：
 
-``` text
+```text
 0.075 m
 0.2 m
 0.3 m
@@ -2603,26 +2607,26 @@ WHU Building Change Detection 来源于 Christchurch, New Zealand。
 
 WHU canonical train：
 
-``` text
+```text
 5,947
 ```
 
 Teacher：
 
-``` text
+```text
 5,947 OVCDistill
 5,947 SAMStruct
 ```
 
 覆盖率：
 
-``` text
+```text
 100%
 ```
 
 并且已经有半监督 split，因此 WHU 很适合：
 
-``` text
+```text
 Teacher-guided semi-supervised change detection
 knowledge distillation
 structure-aware change detection
@@ -2635,7 +2639,7 @@ structure-aware change detection
 可以把四个 benchmark 理解为四种不同“考题”。
 
 | 数据集 | 最主要考察点 | 变化类型 | 本地 Train 变化像素比例 |
-|----|----|----|---:|
+|---|---|---|---:|
 | CDD | 抗季节/外观伪变化、多尺度鲁棒性 | 通用、多种目标 | 11.94% |
 | LEVIR-CD | 建筑小目标、细边界 | 建筑 | 4.13% |
 | SYSU-CD | 通用变化语义、多目标类别 | 建筑/道路/植被/施工/海岸等 | 21.14% |
@@ -2643,7 +2647,7 @@ structure-aware change detection
 
 对模型结果的一个常用解释框架：
 
-``` text
+```text
 CDD 高
 → 对季节/外观伪变化更鲁棒
 
@@ -2663,13 +2667,13 @@ WHU 高
 
 当前 Teacher Cache：
 
-``` text
+```text
 /home/yqwang/datasets/CD_teacher_cache/
 ```
 
 存在两套 Teacher 信息：
 
-``` text
+```text
 OVCDistill
 └── DINOv2 ViT-B/14
 
@@ -2679,19 +2683,21 @@ SAMStruct
 
 覆盖：
 
-| 数据集       |  Train | OVCDistill | SAMStruct |
-|--------------|-------:|-----------:|----------:|
-| CDD-CD-256   | 10,000 |         ❌ |        ❌ |
-| LEVIR-CD-256 |  7,120 |         ❌ |        ❌ |
-| SYSU-CD-256  | 12,000 |     12,000 |    12,000 |
-| WHU-CD-256   |  5,947 |      5,947 |     5,947 |
+| 数据集 | Train | OVCDistill | SAMStruct |
+|---|---:|---:|---:|
+| CDD-CD-256 | 10,000 | 10,000 | 10,000 |
+| LEVIR-CD-256 | 7,120 | 7,120 | 7,120 |
+| SYSU-CD-256 | 12,000 | 12,000 | 12,000 |
+| WHU-CD-256 | 5,947 | 5,947 | 5,947 |
 
 只缓存 **train**：
 
-``` text
+```text
 没有 val cache
 没有 test cache
 ```
+
+> **CDD / LEVIR 为重建生成**：SYSU / WHU 的历史 Cache 由原生成器产生（config_hash 随数据集不同）；CDD / LEVIR 两套 Cache 由本项目 `train_scripts/DART-R/cache_gen/` 的 `generate_ov_cache.py` / `generate_sam_cache.py` 重建。重建脚本的 config_hash 与数据集无关，因此 OV 的 CDD 与 LEVIR 共享 `fcbbf4c993224cbf93bc42e660fd663ceba7c5689fbdb3f5ea0760587eaf492a`，SAM 的 CDD 与 LEVIR 共享 `a10b6e05dd118ebfd004cff5937a8eb221ce418edc242b7a1a15df3620324835`。重建是 best-effort 逆向（原始生成器不可用），与历史 SYSU/WHU 的数值**不保证严格一致**；跨数据集把「历史 Cache」与「重建 Cache」混用时需注意这一差异。
 
 ------------------------------------------------------------------------
 
@@ -2701,13 +2707,13 @@ SAMStruct
 
 每个 teacher dataset 目录都带：
 
-``` text
+```text
 manifest.json
 ```
 
 Manifest 中有：
 
-``` json
+```json
 {
   "entries": {
     "00000.png": "a73b9e5aff2420064b797f69f7d3449623af8d0a.pt",
@@ -2718,7 +2724,7 @@ Manifest 中有：
 
 ##### 正确做法
 
-``` python
+```python
 with open(manifest_path, "r") as f:
     manifest = json.load(f)
 
@@ -2734,13 +2740,13 @@ cache_path = cache_root / "train" / cache_filename
 
 审计对多个样本验证发现：
 
-``` text
+```text
 cache file stem = SHA1(sample_id)
 ```
 
 例如：
 
-``` text
+```text
 sample_id = whucd_02438.png
 
 SHA1(sample_id)
@@ -2752,7 +2758,7 @@ cache:
 
 但项目代码中依然推荐：
 
-``` text
+```text
 manifest["entries"][sample_id]
 ```
 
@@ -2770,14 +2776,14 @@ manifest["entries"][sample_id]
 
 Cache meta 中能看到类似：
 
-``` text
+```text
 /data/CD/SYSU-CD-256/A/07979.png
 /data/CD/SYSU-CD-256/B/07979.png
 ```
 
 或：
 
-``` text
+```text
 /data/CD/WHU-CD-256/A/whucd_02438.png
 ```
 
@@ -2785,7 +2791,7 @@ Cache meta 中能看到类似：
 
 当前服务器真实路径是：
 
-``` text
+```text
 /home/yqwang/datasets/CD/...
 ```
 
@@ -2795,7 +2801,7 @@ Cache meta 中能看到类似：
 
 正确做法：
 
-``` python
+```python
 sample_name = cache["sample_id"]
 
 A = current_root / "A" / sample_name
@@ -2812,7 +2818,7 @@ B = current_root / "B" / sample_name
 
 #### 12.1 路径
 
-``` text
+```text
 /home/yqwang/datasets/CD_teacher_cache/
 └── OVCDistill/
     └── dinov2_vitb14/
@@ -2828,10 +2834,12 @@ B = current_root / "B" / sample_name
 
 #### 12.2 数量与大小
 
-| 数据集     | Cache 数 |    单文件 |     总大小 |
-|------------|---------:|----------:|-----------:|
-| SYSU train |   12,000 | 28.17 KiB | 330.14 MiB |
-| WHU train  |    5,947 | 28.17 KiB | 163.61 MiB |
+| 数据集 | Cache 数 | 单文件 | 总大小（du） |
+|---|---:|---:|---:|
+| CDD train | 10,000 | 28.17 KiB | ~314 MiB |
+| LEVIR train | 7,120 | 28.17 KiB | ~224 MiB |
+| SYSU train | 12,000 | 28.17 KiB | ~377 MiB |
+| WHU train | 5,947 | 28.17 KiB | ~187 MiB |
 
 ------------------------------------------------------------------------
 
@@ -2839,13 +2847,13 @@ B = current_root / "B" / sample_name
 
 Teacher：
 
-``` text
+```text
 DINOv2 ViT-B/14
 ```
 
 Manifest：
 
-``` text
+```text
 teacher layers: [8, 11]
 teacher input size: 518
 cache sizes: [32, 16]
@@ -2868,7 +2876,7 @@ true
 
 Checkpoint：
 
-``` text
+```text
 dinov2_vitb14_pretrain.pth
 SHA256:
 0b8b82f85de91b424aded121c7e1dcc2b7bc6d0adeea651bf73a13307fad8c73
@@ -2876,7 +2884,7 @@ SHA256:
 
 本地 manifest 显示 Teacher 原 repo 路径：
 
-``` text
+```text
 /home/yqwang/project/LS-Rep_BCD/models/third_party/dinov2
 ```
 
@@ -2888,7 +2896,7 @@ SHA256:
 
 典型：
 
-``` python
+```python
 cache = {
     "sample_id": str,
 
@@ -2919,7 +2927,7 @@ cache = {
 
 `soft_change`
 
-``` text
+```text
 Teacher 提供的软变化响应
 ```
 
@@ -2931,7 +2939,7 @@ Teacher 提供的软变化响应
 
 `confidence`
 
-``` text
+```text
 Teacher 对 soft change 的置信信息
 ```
 
@@ -2943,7 +2951,7 @@ Teacher 对 soft change 的置信信息
 
 `relation`
 
-``` text
+```text
 8-channel multi-scale relation feature
 ```
 
@@ -2963,13 +2971,13 @@ DINOv2 是 Meta/FAIR 的自监督视觉特征模型。
 
 官方资料说明其模型学习：
 
-``` text
+```text
 robust visual features without labels
 ```
 
 ViT-B/14：
 
-``` text
+```text
 Patch size: 14
 Embedding dimension: 768
 12 attention heads
@@ -2978,7 +2986,7 @@ Embedding dimension: 768
 
 因此当前 OVCDistill cache 更偏：
 
-``` text
+```text
 语义/表征层 Teacher
 ```
 
@@ -2990,7 +2998,7 @@ Embedding dimension: 768
 
 SYSU：
 
-``` text
+```text
 source_train_list_sha256:
 3fd039fa22f1d0022551176f3da577521813b8c3b5dfaa1034de2d145ee63c7a
 
@@ -3000,7 +3008,7 @@ f9c2cfa9b0bbeab56e6cd8d11c908ef9da64510ee6faf62807bc8fe822a1a09c
 
 WHU：
 
-``` text
+```text
 source_train_list_sha256:
 3c79956757c6b37b4cfa7af89b025a827f89ac102779ad6e35a99f15e8217c27
 
@@ -3014,7 +3022,7 @@ b556412f6dd59d6f53983a61e3ce5b659b0fd2b0e890535981bbd5a07756ad11
 
 #### 13.1 路径
 
-``` text
+```text
 /home/yqwang/datasets/CD_teacher_cache/
 └── SAMStruct/
     └── sam2.1_hiera_large/
@@ -3030,10 +3038,12 @@ b556412f6dd59d6f53983a61e3ce5b659b0fd2b0e890535981bbd5a07756ad11
 
 #### 13.2 数量与大小
 
-| 数据集     | Cache 数 |   单文件 |    总大小 |
-|------------|---------:|---------:|----------:|
-| SYSU train |   12,000 | 1.00 MiB | 11.76 GiB |
-| WHU train  |    5,947 | 1.00 MiB |  5.83 GiB |
+| 数据集 | Cache 数 | 单文件 | 总大小（du） |
+|---|---:|---:|---:|
+| CDD train | 10,000 | 1.00 MiB | ~9.9 GiB |
+| LEVIR train | 7,120 | 1.00 MiB | ~7.0 GiB |
+| SYSU train | 12,000 | 1.00 MiB | ~12 GiB |
+| WHU train | 5,947 | 1.00 MiB | ~5.9 GiB |
 
 这也是为什么整个 `CD_teacher_cache` 的主要空间占用来自 SAMStruct。
 
@@ -3043,13 +3053,13 @@ b556412f6dd59d6f53983a61e3ce5b659b0fd2b0e890535981bbd5a07756ad11
 
 Teacher：
 
-``` text
+```text
 SAM 2.1 Hiera Large
 ```
 
 本地 manifest：
 
-``` text
+```text
 teacher_type: sam2_struct_v2
 
 points_per_side: 32
@@ -3071,7 +3081,7 @@ quality-independent-4-neighbor-gaussian-0.8
 
 Checkpoint：
 
-``` text
+```text
 sam2.1_hiera_large.pt
 SHA256:
 2647878d5dfa5098f2f8649825738a9345572bae2d4350a2468587ece47dd318
@@ -3079,7 +3089,7 @@ SHA256:
 
 Config：
 
-``` text
+```text
 configs/sam2.1/sam2.1_hiera_l.yaml
 ```
 
@@ -3089,7 +3099,7 @@ configs/sam2.1/sam2.1_hiera_l.yaml
 
 典型：
 
-``` python
+```python
 cache = {
     "sample_id": str,
 
@@ -3118,7 +3128,7 @@ cache = {
 
 `instance_id`
 
-``` text
+```text
 SAM 对图像内部实例/区域的结构化编号结果
 ```
 
@@ -3126,7 +3136,7 @@ SAM 对图像内部实例/区域的结构化编号结果
 
 `boundary`
 
-``` text
+```text
 结构边界响应
 ```
 
@@ -3138,7 +3148,7 @@ SAM 对图像内部实例/区域的结构化编号结果
 
 `quality`
 
-``` text
+```text
 对应结构结果的质量/可靠性信息
 ```
 
@@ -3149,7 +3159,7 @@ SAM 对图像内部实例/区域的结构化编号结果
 
 SAMStruct 同时保存 T1 和 T2，因此它更偏：
 
-``` text
+```text
 单时相结构 Teacher
 +
 双时相结构对比
@@ -3161,7 +3171,7 @@ SAMStruct 同时保存 T1 和 T2，因此它更偏：
 
 Meta 官方 SAM 2.1 checkpoint 表中：
 
-``` text
+```text
 sam2.1_hiera_large
 约 224.4M parameters
 ```
@@ -3170,7 +3180,7 @@ SAM 2 系列面向图像/视频可提示分割，擅长生成结构化 object ma
 
 因此与 DINOv2 cache 相比：
 
-``` text
+```text
 DINOv2 / OVCDistill
 → 更偏语义特征、软变化、关系蒸馏
 
@@ -3186,7 +3196,7 @@ SAM2.1 / SAMStruct
 
 SYSU：
 
-``` text
+```text
 source_train_list_sha256:
 3fd039fa22f1d0022551176f3da577521813b8c3b5dfaa1034de2d145ee63c7a
 
@@ -3196,7 +3206,7 @@ config_hash:
 
 WHU：
 
-``` text
+```text
 source_train_list_sha256:
 3c79956757c6b37b4cfa7af89b025a827f89ac102779ad6e35a99f15e8217c27
 
@@ -3212,7 +3222,7 @@ config_hash:
 
 #### SYSU
 
-``` text
+```text
 OVCDistill cache stem set
 ==
 SAMStruct cache stem set
@@ -3224,7 +3234,7 @@ only SAMStruct  = 0
 
 #### WHU
 
-``` text
+```text
 OVCDistill cache stem set
 ==
 SAMStruct cache stem set
@@ -3236,7 +3246,7 @@ only SAMStruct  = 0
 
 因此同一个训练样本可以安全地同时索引：
 
-``` python
+```python
 sample
 ├── image A
 ├── image B
@@ -3251,7 +3261,7 @@ sample
 
 ### 15. 推荐的 Cache-aware Dataset 读取方式
 
-``` python
+```python
 import json
 from pathlib import Path
 
@@ -3296,7 +3306,7 @@ class CacheIndex:
 
 读取：
 
-``` python
+```python
 ov = torch.load(ov_path, map_location="cpu", weights_only=True)
 sam = torch.load(sam_path, map_location="cpu", weights_only=True)
 ```
@@ -3313,7 +3323,7 @@ sam = torch.load(sam_path, map_location="cpu", weights_only=True)
 
 ### 16. Dataset 最小实现模板
 
-``` python
+```python
 from pathlib import Path
 from PIL import Image
 import numpy as np
@@ -3400,7 +3410,7 @@ class BitemporalCDDataset(Dataset):
 
 以后新项目可以先按下面理解：
 
-``` python
+```python
 DATASET_SPECS = {
     "CDD": {
         "root": "/home/yqwang/datasets/CD/CDD-CD-256",
@@ -3409,7 +3419,7 @@ DATASET_SPECS = {
         "test": 3000,
         "ext": ".jpg",
         "mask_threshold": 128,
-        "teacher_cache": False,
+        "teacher_cache": True,
     },
 
     "LEVIR": {
@@ -3419,7 +3429,7 @@ DATASET_SPECS = {
         "test": 2048,
         "ext": ".png",
         "mask_threshold": 128,
-        "teacher_cache": False,
+        "teacher_cache": True,
         "warning": "Use list/*.txt by default; root list_*.txt is an alternative split.",
     },
 
@@ -3452,7 +3462,7 @@ DATASET_SPECS = {
 
 本地抽样得到的 canonical train 变化像素比例：
 
-``` text
+```text
 CDD    11.94%
 LEVIR   4.13%
 SYSU   21.14%
@@ -3461,7 +3471,7 @@ WHU     3.42%
 
 大致背景/变化比例：
 
-``` text
+```text
 CDD    ≈ 7.4 : 1
 LEVIR  ≈ 23  : 1
 SYSU   ≈ 3.7 : 1
@@ -3476,7 +3486,7 @@ WHU    ≈ 28  : 1
 
 Loss 是否采用：
 
-``` text
+```text
 BCE
 Dice
 Focal
@@ -3494,7 +3504,7 @@ class weighting
 
 #### Step 1：确定数据集
 
-``` text
+```text
 CDD
 LEVIR
 SYSU
@@ -3505,7 +3515,7 @@ WHU
 
 确认它原来期望：
 
-``` text
+```text
 A/B/label
 还是
 A/B/OUT
@@ -3519,7 +3529,7 @@ T1/T2/label
 
 默认：
 
-``` text
+```text
 list/train.txt
 list/val.txt
 list/test.txt
@@ -3527,7 +3537,7 @@ list/test.txt
 
 特别注意：
 
-``` text
+```text
 LEVIR 根目录还有另一套 list_*.txt
 ```
 
@@ -3537,7 +3547,7 @@ LEVIR 根目录还有另一套 list_*.txt
 
 统一：
 
-``` python
+```python
 mask >= 128
 ```
 
@@ -3547,7 +3557,7 @@ mask >= 128
 
 如果有 pretrained backbone：
 
-``` text
+```text
 用 backbone 官方 normalization
 ```
 
@@ -3555,24 +3565,19 @@ mask >= 128
 
 #### Step 6：Teacher Cache
 
-只有：
+四个数据集（CDD / LEVIR / SYSU / WHU）的 train 现在都有两套 Cache。
 
-``` text
-SYSU
-WHU
-```
-
-有 cache。
+其中 CDD / LEVIR 为重建生成（见 §9），与历史 SYSU/WHU 数值不保证严格一致。
 
 普通监督项目：
 
-``` text
+```text
 完全不需要读取 CD_teacher_cache
 ```
 
 Teacher/distillation 项目：
 
-``` text
+```text
 使用 manifest["entries"][sample_name]
 ```
 
@@ -3580,7 +3585,7 @@ Teacher/distillation 项目：
 
 正式训练前：
 
-``` text
+```text
 打印 A shape
 打印 B shape
 打印 mask shape / dtype
@@ -3591,7 +3596,7 @@ Teacher/distillation 项目：
 
 推荐期待：
 
-``` text
+```text
 A: [B, 3, 256, 256]
 B: [B, 3, 256, 256]
 Y: [B, 256, 256] 或 [B,1,256,256]
@@ -3606,7 +3611,7 @@ Y unique: {0,1}
 
 默认不要误用：
 
-``` text
+```text
 root/list_train.txt
 root/list_val.txt
 root/list_test.txt
@@ -3620,7 +3625,7 @@ root/list_test.txt
 
 不要把下面这些加入 Dataset：
 
-``` text
+```text
 WHU-CD-256/sample_*.png
 WHU-CD-256/WHU_CD/sample_*.png
 WHU-CD-256/WHU_CD/metrics.txt
@@ -3635,7 +3640,7 @@ WHU-CD-256/list/*.py
 
 不要把：
 
-``` text
+```text
 OVCDistill/preview/
 SAMStruct/preview/
 ```
@@ -3644,7 +3649,7 @@ SAMStruct/preview/
 
 真正训练 cache 是：
 
-``` text
+```text
 .../<teacher>/<dataset>/train/*.pt
 ```
 
@@ -3654,7 +3659,7 @@ SAMStruct/preview/
 
 以后项目遇到信息冲突时，按这个优先级：
 
-``` text
+```text
 1. 当前服务器实际文件
 2. manifest.json
 3. list/train.txt / val.txt / test.txt
@@ -3668,7 +3673,7 @@ SAMStruct/preview/
 
 公开论文可能描述：
 
-``` text
+```text
 原图
 不同裁剪方式
 不同 split
@@ -3685,7 +3690,7 @@ SAMStruct/preview/
 
 可以理解为：
 
-``` text
+```text
 Ground Truth
 └── label/
     └── 真正监督目标
@@ -3723,21 +3728,21 @@ Meta/FAIR 的 DINOv2 是自监督视觉表示模型。
 
 官方项目：
 
-<https://github.com/facebookresearch/dinov2>
+https://github.com/facebookresearch/dinov2
 
 模型卡：
 
-<https://github.com/facebookresearch/dinov2/blob/main/MODEL_CARD.md>
+https://github.com/facebookresearch/dinov2/blob/main/MODEL_CARD.md
 
 当前 cache 使用：
 
-``` text
+```text
 DINOv2 ViT-B/14
 ```
 
 官方模型卡给出的 ViT-B/14 架构信息包括：
 
-``` text
+```text
 patch size 14
 embedding dimension 768
 12 heads
@@ -3750,24 +3755,24 @@ embedding dimension 768
 
 Meta Segment Anything Model 2：
 
-<https://github.com/facebookresearch/sam2>
+https://github.com/facebookresearch/sam2
 
 当前 cache 使用：
 
-``` text
+```text
 SAM 2.1 Hiera Large
 ```
 
 Meta 官方 checkpoint 表：
 
-``` text
+```text
 sam2.1_hiera_large
 约 224.4M parameters
 ```
 
 SAM 2 面向图像/视频分割，因此本地 SAMStruct 用它提取：
 
-``` text
+```text
 instance
 boundary
 quality
@@ -3785,11 +3790,11 @@ Lebedev et al., 2018:
 
 **Change Detection in Remote Sensing Images Using Conditional Adversarial Networks**
 
-<https://doi.org/10.5194/isprs-archives-XLII-2-565-2018>
+https://doi.org/10.5194/isprs-archives-XLII-2-565-2018
 
 原始论文明确包含：
 
-``` text
+```text
 real season-varying remote sensing images
 ```
 
@@ -3801,11 +3806,11 @@ real season-varying remote sensing images
 
 官方项目：
 
-<https://github.com/justchenhao/LEVIR>
+https://github.com/justchenhao/LEVIR
 
 公开描述：
 
-``` text
+```text
 637 pairs
 1024×1024
 0.5m/pixel
@@ -3819,11 +3824,11 @@ building-related change
 
 官方项目：
 
-<https://github.com/liumency/SYSU-CD>
+https://github.com/liumency/SYSU-CD
 
 官方描述：
 
-``` text
+```text
 20,000 pairs
 256×256
 0.5m
@@ -3833,7 +3838,7 @@ Hong Kong
 
 变化类型包括：
 
-``` text
+```text
 urban buildings
 suburban dilation
 groundwork
@@ -3848,11 +3853,11 @@ sea construction
 
 武汉大学官方：
 
-<https://gpcv.whu.edu.cn/data/building_dataset.html>
+https://gpcv.whu.edu.cn/data/building_dataset.html
 
 公开描述包括：
 
-``` text
+```text
 Christchurch, New Zealand
 2012 / 2016
 原始 aerial imagery 约 0.075m
@@ -3866,14 +3871,14 @@ GCP registration accuracy 约 1.6 pixels
 
 本文合并整理了：
 
-``` text
+```text
 DATASET_INVENTORY.md
 DATASET_DATALOADER_DEEP_AUDIT.md
 ```
 
 原始探查目标：
 
-``` text
+```text
 /home/yqwang/datasets/CD/
 /home/yqwang/datasets/CD_teacher_cache/
 ```
@@ -3911,7 +3916,7 @@ DATASET_DATALOADER_DEEP_AUDIT.md
 
 当前服务器的变化检测数据可以统一理解为：
 
-``` text
+```text
 /home/yqwang/datasets/
 │
 ├── CD/
@@ -3958,7 +3963,7 @@ DATASET_DATALOADER_DEEP_AUDIT.md
 
 以后给新项目适配 DataLoader 时，最核心的默认约定只有：
 
-``` text
+```text
 root = /home/yqwang/datasets/CD/<dataset>
 
 sample list:
@@ -3975,7 +3980,8 @@ binary mask:
 gray >= 128
 
 teacher cache:
-仅 SYSU / WHU train
+CDD / LEVIR / SYSU / WHU 四数据集 train 均齐备
+（CDD/LEVIR 为重建生成，数值与历史生成器不保证一致）
 通过 manifest.json entries 映射
 ```
 

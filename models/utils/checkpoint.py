@@ -1,4 +1,4 @@
-"""Atomic SAM-HSD checkpoints with optimizer and RNG state."""
+"""Atomic baseline / direction-C checkpoints with optimizer and RNG state."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def restore_rng_state(state):
         torch.cuda.set_rng_state_all(state["cuda"])
 
 
-def build_checkpoint(model, optimizer, epoch, global_step, best_val_f1, args):
+def build_checkpoint(model, optimizer, epoch, global_step, best_val_f1, args, router_optimizer=None):
     """
     Build checkpoint dict.
 
@@ -45,7 +45,9 @@ def build_checkpoint(model, optimizer, epoch, global_step, best_val_f1, args):
         Checkpoint dict
     """
     return {
+        "format_version": 2,
         "model": model.state_dict(),
+        "router_optimizer": router_optimizer.state_dict() if router_optimizer is not None else None,
         "optimizer": optimizer.state_dict(),
         "epoch": epoch,
         "global_step": global_step,

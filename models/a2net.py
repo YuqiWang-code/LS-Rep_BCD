@@ -1,4 +1,4 @@
-"""A2Net-LWGANet-L0 with detachable legacy SAMStruct or SAM-HSD losses."""
+"""Unchanged student with a removable, loss-only direction-C auxiliary."""
 
 from __future__ import annotations
 
@@ -8,20 +8,16 @@ import torch.nn.functional as F
 
 from .backbone.lwganet import LWGANet_L0_1242_e32_k11_GELU
 from .decoder.a2net_decoder import Decoder, NeighborFeatureAggregation, TemporalFusionModule
-from .distill import EIRHSDAdapter, SAMHSDAdapter, SAMStructureAdapter, Z2SRDAdapter
 
 
 class A2Net_LWGANet_L0(nn.Module):
     """The deploy graph is always backbone -> SWA -> TFM -> Decoder."""
 
     def __init__(self, pretrained=True, pretrained_path=None,
-                 auxiliary_mode="none", sam_hsd_cfg=None, eir_hsd_cfg=None,
-                 z2_srd_cfg=None, legacy_sam_cfg=None):
+                 auxiliary_mode="none", routing_cfg=None):
         super().__init__()
-        if auxiliary_mode not in {
-            "none", "legacy_sam", "sam_hsd", "eir_hsd", "z2_srd",
-        }:
-            raise ValueError(f"Unsupported auxiliary_mode: {auxiliary_mode}")
+        if auxiliary_mode not in {"none", "direction_c"}:
+            raise ValueError("Only none / direction_c are supported; old auxiliary modes were removed")
         self.backbone = LWGANet_L0_1242_e32_k11_GELU(
             pretrained=pretrained, pretrained_path=pretrained_path,
         )
@@ -30,49 +26,24 @@ class A2Net_LWGANet_L0(nn.Module):
         self.tfm = TemporalFusionModule(self.mid_d, self.mid_d)
         self.decoder = Decoder(self.mid_d)
         self.auxiliary_mode = auxiliary_mode
-        if auxiliary_mode == "legacy_sam":
-            self.training_auxiliary = SAMStructureAdapter(**(legacy_sam_cfg or {}))
-        elif auxiliary_mode == "sam_hsd":
-            self.training_auxiliary = SAMHSDAdapter(**(sam_hsd_cfg or {}))
-        elif auxiliary_mode == "eir_hsd":
-            self.training_auxiliary = EIRHSDAdapter(**(eir_hsd_cfg or {}))
-        elif auxiliary_mode == "z2_srd":
-            self.training_auxiliary = Z2SRDAdapter(**(z2_srd_cfg or {}))
+        if auxiliary_mode == "direction_c":
+            from .distill.routing import DirectionC
+            # Keep baseline and C identical under the same seed, including the
+            # next random input/augmentation. Auxiliary initialization is isolated.
+            with torch.random.fork_rng(devices=[]):
+                self.training_auxiliary = DirectionC(self.mid_d, **(routing_cfg or {}))
 
     @property
     def use_training_auxiliary(self):
         return self.auxiliary_mode != "none" and hasattr(self, "training_auxiliary")
 
     def extract_pair_features(self, x1, x2):
-        if self.training and self.auxiliary_mode == "z2_srd":
-            # One joint Siamese pass makes BN batch statistics independent of
-            # temporal ordering.  This is training-only; the deploy graph and
-            # its parameter/FLOP counts remain unchanged.
-            batch = x1.shape[0]
-            merged = tuple(self.backbone(torch.cat((x1, x2), dim=0)))
-            return (
-                tuple(feature[:batch] for feature in merged),
-                tuple(feature[batch:] for feature in merged),
-            )
         return tuple(self.backbone(x1)), tuple(self.backbone(x2))
 
     def _forward_main_path(self, features1, features2, output_size,
                            return_decoder_features=False):
-        if self.training and self.auxiliary_mode == "z2_srd":
-            # Keep every shared BN layer in the Siamese encoder path blind to
-            # the arbitrary T1/T2 ordering. A single 2B pass gives identical
-            # batch statistics after exchanging the two temporal inputs.
-            batch = features1[0].shape[0]
-            merged_features = tuple(
-                torch.cat((feature1, feature2), dim=0)
-                for feature1, feature2 in zip(features1, features2)
-            )
-            merged_aggregated = tuple(self.swa(*merged_features))
-            aggregated1 = tuple(feature[:batch] for feature in merged_aggregated)
-            aggregated2 = tuple(feature[batch:] for feature in merged_aggregated)
-        else:
-            aggregated1 = self.swa(*features1)
-            aggregated2 = self.swa(*features2)
+        aggregated1 = self.swa(*features1)
+        aggregated2 = self.swa(*features2)
         change = self.tfm(*aggregated1, *aggregated2)
         decoder_features_and_logits = self.decoder(*change)
         decoder_features = tuple(decoder_features_and_logits[:4])
@@ -87,45 +58,23 @@ class A2Net_LWGANet_L0(nn.Module):
             return predictions, decoder_features
         return predictions
 
-    def forward(self, x1, x2, target=None, teacher_pack=None, compute_auxiliary=True):
+    def forward(self, x1, x2, target=None, teacher_pack=None, compute_auxiliary=True,
+                force_action=None):
         features1, features2 = self.extract_pair_features(x1, x2)
-        need_decoder_features = (
-            self.training and compute_auxiliary
-            and self.auxiliary_mode in {"sam_hsd", "eir_hsd"}
-            and self.use_training_auxiliary
-        )
-        main_output = self._forward_main_path(
-            features1, features2, x1.shape[-2:],
-            return_decoder_features=need_decoder_features,
-        )
-        if need_decoder_features:
-            predictions, decoder_features = main_output
-        else:
-            predictions, decoder_features = main_output, None
+        need_aux = self.training and compute_auxiliary and self.use_training_auxiliary
+        output = self._forward_main_path(features1, features2, x1.shape[-2:],
+                                         return_decoder_features=need_aux)
+        predictions, decoder_features = output if need_aux else (output, None)
         if not self.training:
             return predictions
         auxiliary = {}
-        if compute_auxiliary and self.use_training_auxiliary:
+        if need_aux:
             if target is None or teacher_pack is None:
-                raise ValueError("target and teacher_pack are required by the training auxiliary")
-            if self.auxiliary_mode == "legacy_sam":
-                auxiliary["legacy_sam"] = self.training_auxiliary(
-                    predictions, target, teacher_pack,
-                )
-            elif self.auxiliary_mode == "sam_hsd":
-                auxiliary["sam_hsd"] = self.training_auxiliary(
-                    features1, features2, decoder_features,
-                    predictions, target, teacher_pack,
-                )
-            elif self.auxiliary_mode == "eir_hsd":
-                auxiliary["eir_hsd"] = self.training_auxiliary(
-                    features1, features2, decoder_features,
-                    predictions, target, teacher_pack,
-                )
-            elif self.auxiliary_mode == "z2_srd":
-                auxiliary["z2_srd"] = self.training_auxiliary(
-                    features1, features2, target, teacher_pack,
-                )
+                raise ValueError("Direction C requires training GT and both teacher caches")
+            auxiliary["direction_c"] = self.training_auxiliary(
+                decoder_features[0], predictions[0], target, teacher_pack,
+                force_action=force_action,
+            )
         return predictions, auxiliary
 
     def switch_to_deploy(self):

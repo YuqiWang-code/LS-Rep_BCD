@@ -1,103 +1,47 @@
-"""Replay student geometry on cached teacher spatial maps."""
+"""Replay the existing symmetric crop/resize/flip/exchange on cached maps.
 
+SAM uses the student raster resolution; OV retains its native multiscale grids.
+OV relations are opaque features for spatial Gram loss (permutation invariant).
+No guessed directional-channel permutation is applied.
+"""
 from __future__ import annotations
-
-from typing import Any, Dict
-
 import torch
 import torch.nn.functional as F
 
 
-def _replay_tensor(value: torch.Tensor, state: Dict[str, Any], key: str = None) -> torch.Tensor:
-    """
-    Replay geometric transformations on a cached teacher tensor.
-
-    Args:
-        value: Cached tensor [C, H, W] or [H, W]
-        state: Transform state dict
-        key: Optional key name to determine interpolation mode
-
-    Returns:
-        Transformed tensor
-    """
-    original_dtype = value.dtype
-    squeeze_batch = value.ndim == 3
-
-    if value.ndim == 2:
-        value = value.unsqueeze(0)
-        squeeze_batch = True
-    if value.ndim != 3:
-        raise ValueError(f"Teacher map must be [C,H,W] or [H,W], got {tuple(value.shape)}")
-
-    # Determine interpolation mode
-    # instance_id must use nearest to preserve integer IDs
-    nearest = (key == "instance_id")
-    mode = "nearest" if nearest else "bilinear"
-
-    x = value.float().unsqueeze(0)
-
-    scale = state.get("scale", {})
-    if scale:
-        target_size = (int(scale["height"]), int(scale["width"]))
-        if x.shape[-2:] != target_size:
-            if mode == "nearest":
-                x = F.interpolate(x, size=target_size, mode="nearest")
-            else:
-                x = F.interpolate(x, size=target_size, mode="bilinear", align_corners=False)
-
-    crop = state.get("crop_resize", {})
-    if crop.get("enabled", False):
-        h, w = x.shape[-2:]
-        source_h = int(crop["source_height"])
-        source_w = int(crop["source_width"])
-        top = int(round(int(crop["top"]) * h / source_h))
-        left = int(round(int(crop["left"]) * w / source_w))
-        x = x[..., top:h - top, left:w - left]
-
-        if mode == "nearest":
-            x = F.interpolate(x, size=(h, w), mode="nearest")
-        else:
-            x = F.interpolate(x, size=(h, w), mode="bilinear", align_corners=False)
-
-    if state.get("flip_v", False):
-        x = torch.flip(x, dims=(-2,))
-    if state.get("flip_h", False):
-        x = torch.flip(x, dims=(-1,))
-
-    x = x.squeeze(0)
-
-    # Round instance_id back to integers
-    if nearest:
-        x = x.round().to(original_dtype)
-    else:
-        x = x.to(original_dtype)
-
-    return x if not (squeeze_batch and x.shape[0] == 1) else x
+def _replay_tensor(value,state,key=None,native_resolution=False):
+    if value.ndim!=3:raise ValueError('Cache tensors must be [C,H,W]')
+    dtype=value.dtype
+    out_h,out_w=value.shape[-2:]
+    if not native_resolution and state.get('scale'):
+        out_h=int(state['scale']['height']);out_w=int(state['scale']['width'])
+    # Grid in normalized source coordinates: exact symmetric crop fractions,
+    # followed by flips. align_corners=False matches image pixel centres.
+    yy=2*(torch.arange(out_h,dtype=torch.float32)+.5)/out_h-1
+    xx=2*(torch.arange(out_w,dtype=torch.float32)+.5)/out_w-1
+    crop=state.get('crop_resize',{})
+    if crop.get('enabled',False):
+        yy=yy*(1-2*crop['top']/crop['source_height'])
+        xx=xx*(1-2*crop['left']/crop['source_width'])
+    if state.get('flip_v',False):yy=-yy
+    if state.get('flip_h',False):xx=-xx
+    gy,gx=torch.meshgrid(yy,xx,indexing='ij')
+    grid=torch.stack((gx,gy),dim=-1).unsqueeze(0)
+    x=value.float().unsqueeze(0)
+    if key=='instance_id' and value.max()>2**24:
+        x=x.double();grid=grid.double()
+    out=F.grid_sample(x,grid,mode='nearest' if key=='instance_id' else 'bilinear',
+                      padding_mode='border',align_corners=False).squeeze(0)
+    return out.to(dtype)
 
 
-def replay_teacher_pack(pack: Dict[str, Any], state: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Apply geometry recursively to teacher pack; metadata is intentionally not returned.
-
-    Handles T1/T2 exchange for RandomExchange transform.
-
-    Args:
-        pack: Teacher cache pack (may contain 't1', 't2' nested dicts)
-        state: Transform state dict
-
-    Returns:
-        Transformed teacher pack
-    """
-    result: Dict[str, Any] = {}
-
-    for key, value in pack.items():
-        if isinstance(value, dict):
-            result[key] = replay_teacher_pack(value, state)
-        elif torch.is_tensor(value):
-            result[key] = _replay_tensor(value, state, key)
-
-    # Handle RandomExchange: swap t1 and t2
-    if state.get("exchange", False) and "t1" in result and "t2" in result:
-        result["t1"], result["t2"] = result["t2"], result["t1"]
-
-    return result
+def replay_teacher_pack(pack,state):
+    def visit(data,is_ov=False,parent=None):
+        result={}
+        for key,value in data.items():
+            if isinstance(value,dict):result[key]=visit(value,is_ov or key=='ov',key)
+            elif torch.is_tensor(value):result[key]=_replay_tensor(value,state,key,is_ov)
+        if state.get('exchange',False) and 't1' in result and 't2' in result:
+            result['t1'],result['t2']=result['t2'],result['t1']
+        return result
+    return visit(pack)

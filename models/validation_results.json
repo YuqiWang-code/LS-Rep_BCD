@@ -1,0 +1,28 @@
+{
+  "status": "passed",
+  "device": "cpu",
+  "torch": "2.14.0+cpu",
+  "train_parameters": 2914459,
+  "deploy_parameters": 2913094,
+  "flops_256": 2767633600.0,
+  "deploy_max_error": 0.0,
+  "checks": [
+    "train BN/main path equality",
+    "Reject GT-only gradients",
+    "router-only gradients",
+    "both teacher gradients",
+    "fit sign",
+    "empty GT/coverage",
+    "fragmentation",
+    "relation Gram invariance",
+    "geometry replay",
+    "model and two optimizer checkpoint",
+    "identical next step after restore",
+    "RNG restore",
+    "legacy resume rejection",
+    "deployment"
+  ],
+  "base_commit": "c1d43561a35efedeefce6142d514f139d2238863",
+  "full_trainer": "B0/C0 synthetic train4/val2/test2; 2 optimizer steps; checkpoint reload; deployment export passed",
+  "real_server_tested": false
+}

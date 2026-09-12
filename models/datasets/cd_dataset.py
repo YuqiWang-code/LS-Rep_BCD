@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import random
 from pathlib import Path
 import cv2
 import numpy as np
@@ -29,7 +30,7 @@ class CDDataset(torch.utils.data.Dataset):
         dataset_name: str = "LEVIR",
         return_meta: bool = False,
         teacher_cache=None,
-        derive_sam_hsd: bool = False,
+        seed: int = 2333,
     ):
         self.split = dataset
         self.root = Path(file_root)
@@ -41,7 +42,8 @@ class CDDataset(torch.utils.data.Dataset):
         self.dataset_name = dataset_name
         self.return_meta = return_meta or teacher_cache is not None
         self.teacher_cache = teacher_cache
-        self.derive_sam_hsd = bool(derive_sam_hsd)
+        self.seed = int(seed)
+        self.epoch = 0
 
     def __len__(self):
         return len(self.file_list)
@@ -69,7 +71,20 @@ class CDDataset(torch.utils.data.Dataset):
             raise OSError(f"OpenCV failed to read {kind}: {path}")
         return value
 
+    def set_epoch(self, epoch):
+        self.epoch = int(epoch)
+
     def __getitem__(self, idx):
+        # Per-sample augmentation makes epoch-boundary resume independent of
+        # worker scheduling and auxiliary RNG consumption.
+        state = random.getstate()
+        random.seed(self.seed + self.epoch * 1_000_003 + idx)
+        try:
+            return self._get_sample(idx)
+        finally:
+            random.setstate(state)
+
+    def _get_sample(self, idx):
         sample_id = self.file_list[idx]
         pre_path = self._resolve_path("A", sample_id)
         post_path = self._resolve_path("B", sample_id)
@@ -95,11 +110,6 @@ class CDDataset(torch.utils.data.Dataset):
         if self.teacher_cache is not None:
             pack = self.teacher_cache.load(sample_id)
             pack = replay_teacher_pack(pack, aug_state)
-            if self.derive_sam_hsd:
-                # Import lazily in worker processes.  Derived fields must be
-                # constructed after crop/resize/flip/exchange replay.
-                from models.distill.sam_hsd import prepare_relational_pack
-                pack = prepare_relational_pack(pack)
             return image, label, sample_id, pack
         if self.return_meta:
             return image, label, sample_id
@@ -131,7 +141,7 @@ def get_loader(
     pin_memory=True,
     return_meta=False,
     teacher_cache=None,
-    derive_sam_hsd=False,
+    seed=2333,
 ):
     mean = [0.406, 0.456, 0.485, 0.406, 0.456, 0.485]
     std = [0.225, 0.224, 0.229, 0.225, 0.224, 0.229]
@@ -154,7 +164,7 @@ def get_loader(
         dataset_name=_dataset_name(file_root),
         return_meta=return_meta,
         teacher_cache=teacher_cache,
-        derive_sam_hsd=derive_sam_hsd,
+        seed=seed,
     )
     return torch.utils.data.DataLoader(
         dataset,
@@ -163,7 +173,8 @@ def get_loader(
         num_workers=num_workers,
         pin_memory=pin_memory,
         drop_last=split == "train",
-        persistent_workers=num_workers > 0,
+        generator=torch.Generator().manual_seed(seed),
+        persistent_workers=False,
     )
 
 
@@ -195,5 +206,5 @@ def get_test_loader(
         shuffle=False,
         num_workers=num_workers,
         pin_memory=pin_memory,
-        persistent_workers=num_workers > 0,
+        persistent_workers=False,
     )

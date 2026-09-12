@@ -1,4 +1,4 @@
-"""Unified trainer for baseline, SAM-HSD, EIR-HSD and Z2-SRD ablations."""
+"""Clean baseline / direction-C trainer; legacy logging and checkpoint conventions."""
 
 from __future__ import annotations
 
@@ -25,7 +25,8 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from models import A2Net_LWGANet_L0, build_loss
 from models.datasets.cd_dataset import get_loader, get_test_loader
-from models.distill import TeacherCache
+from models.distill import PairedTeacherCache
+from models.distill.diagnostics import H_NAMES
 from models.utils.checkpoint import build_checkpoint, restore_rng_state, save_checkpoint_atomic
 from models.utils.logger import TrainingLogger
 from models.utils.metrics import ConfuseMatrixMeter
@@ -41,77 +42,13 @@ DEPLOY_FLOPS_ATOL = 0.03e9
 
 EXPERIMENTS = {
     "B0": {"name": "Baseline_A2Net_LWGANet_L0", "auxiliary_mode": "none"},
-    "H0": {"name": "H0_Clean_Anchor", "auxiliary_mode": "none"},
-    "H1": {"name": "H1_Legacy_SAMStruct", "auxiliary_mode": "legacy_sam"},
-    "H2": {"name": "H2_Encoder_Directional", "auxiliary_mode": "sam_hsd",
-           "hsd_mode": "encoder", "evidence_mode": "directional", "use_scgr": False,
-           "robust_filter": True},
-    "H3": {"name": "H3_Decoder_SCGR", "auxiliary_mode": "sam_hsd",
-           "hsd_mode": "decoder", "evidence_mode": "directional", "use_scgr": True,
-           "robust_filter": True},
-    "H4": {"name": "H4_Full_SAM_HSD", "auxiliary_mode": "sam_hsd",
-           "hsd_mode": "full", "evidence_mode": "directional", "use_scgr": True,
-           "robust_filter": True},
-    "H5": {"name": "H5_Boundary_Scalar", "auxiliary_mode": "sam_hsd",
-           "hsd_mode": "full", "evidence_mode": "boundary_scalar", "use_scgr": True,
-           "robust_filter": True},
-    "H6": {"name": "H6_Unsigned_Evidence", "auxiliary_mode": "sam_hsd",
-           "hsd_mode": "full", "evidence_mode": "unsigned", "use_scgr": True,
-           "robust_filter": True},
-    "H7": {"name": "H7_No_SCGR", "auxiliary_mode": "sam_hsd",
-           "hsd_mode": "full", "evidence_mode": "directional", "use_scgr": False,
-           "robust_filter": True},
-    "H8": {"name": "H8_No_Robust_Filter", "auxiliary_mode": "sam_hsd",
-           "hsd_mode": "full", "evidence_mode": "directional", "use_scgr": True,
-           "robust_filter": False},
-    "R0": {"name": "R0_Clean_Anchor", "auxiliary_mode": "none"},
-    "R1": {"name": "R1_Run1_Unsigned_Reference", "auxiliary_mode": "sam_hsd",
-           "hsd_mode": "full", "evidence_mode": "unsigned", "use_scgr": True,
-           "robust_filter": True},
-    "R2": {"name": "R2_Exchange_Invariant_Code", "auxiliary_mode": "eir_hsd",
-           "hsd_mode": "encoder", "spatial_adapter": False,
-           "use_correction": False, "fixed_fusion": False,
-           "directional_restore": False},
-    "R3": {"name": "R3_Spatial_Residual_Encoder", "auxiliary_mode": "eir_hsd",
-           "hsd_mode": "encoder", "spatial_adapter": True,
-           "use_correction": False, "fixed_fusion": False,
-           "directional_restore": False},
-    "R4": {"name": "R4_Residual_Decoder_Head", "auxiliary_mode": "eir_hsd",
-           "hsd_mode": "decoder", "spatial_adapter": False,
-           "use_correction": True, "fixed_fusion": False,
-           "directional_restore": False},
-    "R5": {"name": "R5_Full_EIR_HSD", "auxiliary_mode": "eir_hsd",
-           "hsd_mode": "full", "spatial_adapter": True,
-           "use_correction": True, "fixed_fusion": False,
-           "directional_restore": False},
-    "R6": {"name": "R6_Fixed_Fusion", "auxiliary_mode": "eir_hsd",
-           "hsd_mode": "full", "spatial_adapter": True,
-           "use_correction": True, "fixed_fusion": True,
-           "directional_restore": False},
-    "R7": {"name": "R7_No_Residual_Correction", "auxiliary_mode": "eir_hsd",
-           "hsd_mode": "full", "spatial_adapter": True,
-           "use_correction": False, "fixed_fusion": False,
-           "directional_restore": False},
-    "R8": {"name": "R8_Directional_Restore", "auxiliary_mode": "eir_hsd",
-           "hsd_mode": "full", "spatial_adapter": True,
-           "use_correction": True, "fixed_fusion": False,
-           "directional_restore": True},
-    "N0": {"name": "N0_Z2_SRD_Full", "auxiliary_mode": "z2_srd",
-           "pair_mode": "group", "use_even": True, "use_odd": True},
-    "N1": {"name": "N1_Z2_Even_Only", "auxiliary_mode": "z2_srd",
-           "pair_mode": "group", "use_even": True, "use_odd": False},
-    "N2": {"name": "N2_Mixed_Signed_Control", "auxiliary_mode": "z2_srd",
-           "pair_mode": "mixed", "use_even": True, "use_odd": False},
-    "N3": {"name": "N3_No_Group_Projection", "auxiliary_mode": "z2_srd",
-           "pair_mode": "invariant", "use_even": True, "use_odd": False},
-    "N4": {"name": "N4_Z2_Odd_Only", "auxiliary_mode": "z2_srd",
-           "pair_mode": "group", "use_even": False, "use_odd": True},
+    "C0": {"name": "C0_Difficulty_Reliable_Routing_Reject", "auxiliary_mode": "direction_c"},
 }
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="A2Net baseline / SAM-HSD / EIR-HSD / Z2-SRD training"
+        description="A2Net clean baseline / direction C"
     )
     parser.add_argument("--experiment", required=True, choices=sorted(EXPERIMENTS))
     parser.add_argument(
@@ -120,9 +57,16 @@ def parse_args():
         choices=["CDD", "LEVIR", "SYSU", "WHU"],
     )
     parser.add_argument("--data_root", required=True)
-    parser.add_argument("--teacher_cache_root", default=None)
+    parser.add_argument("--sam_cache_root", default=None)
+    parser.add_argument("--ov_cache_root", default=None)
+    parser.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    parser.add_argument("--router_lr", type=float, default=1e-3)
+    parser.add_argument("--router_hidden", type=int, default=16)
+    parser.add_argument("--utility_margin", type=float, default=.02)
+    parser.add_argument("--boundary_radius", type=int, default=2)
+    parser.add_argument("--small_area", type=int, default=64)
     parser.add_argument("--pretrained", action=argparse.BooleanOptionalAction, default=True)
-    parser.add_argument("--pretrained_path", required=True)
+    parser.add_argument("--pretrained_path", default=None)
     parser.add_argument("--inWidth", type=int, default=256)
     parser.add_argument("--inHeight", type=int, default=256)
     parser.add_argument("--batch_size", type=int, default=64)
@@ -135,8 +79,7 @@ def parse_args():
     parser.add_argument("--dice_reduction", default="batch", choices=["sample", "batch"])
     parser.add_argument("--main_loss_weights", default="1,1,1,1")
     parser.add_argument("--num_workers", type=int, default=4)
-    parser.add_argument("--hsd_lambda", type=float, default=0.06)
-    parser.add_argument("--hsd_max_ratio", type=float, default=0.12)
+    parser.add_argument("--kd_lambda", type=float, default=0.06)
     parser.add_argument("--save_dir", required=True)
     parser.add_argument("--log_file", default="train_log.txt")
     parser.add_argument("--resume", default=None)
@@ -148,13 +91,24 @@ def parse_args():
         raise ValueError("main_loss_weights must contain four comma-separated values")
     if args.batch_size <= 0 or args.max_steps <= 0 or args.num_workers < 0:
         raise ValueError("batch_size/max_steps must be positive and num_workers non-negative")
-    if not 0.0 <= args.hsd_max_ratio <= 1.0 or args.hsd_lambda < 0:
-        raise ValueError("Invalid SAM-HSD weight or cap")
+    if args.kd_lambda < 0 or args.router_lr <= 0 or args.lr <= 0:
+        raise ValueError("Loss weight must be nonnegative and learning rates positive")
+    if args.inWidth != args.inHeight or args.inWidth != 256:
+        raise ValueError("Formal trainer preserves the existing 256x256 protocol")
+    if args.pretrained and not args.pretrained_path:
+        raise ValueError("--pretrained_path is required unless --no-pretrained is given")
+    if args.router_hidden < 1 or args.boundary_radius < 1 or args.small_area < 1:
+        raise ValueError("Invalid direction-C dimensions/thresholds")
+    if not 0 <= args.utility_margin < 1:
+        raise ValueError("utility_margin must be in [0,1)")
+    if any(not math.isfinite(v) or v < 0 for v in args.main_loss_weights):
+        raise ValueError("Invalid main loss weights")
     recipe = EXPERIMENTS[args.experiment]
     args.experiment_name = recipe["name"]
     args.auxiliary_mode = recipe["auxiliary_mode"]
-    if args.auxiliary_mode != "none" and not args.teacher_cache_root:
-        raise ValueError("Every non-anchor SAM-HSD/EIR-HSD run requires --teacher_cache_root")
+    args.implementation_version = "direction_c_v1"
+    if args.auxiliary_mode == "direction_c" and not (args.sam_cache_root and args.ov_cache_root):
+        raise ValueError("C0 requires --sam_cache_root AND --ov_cache_root")
     return args
 
 
@@ -202,7 +156,7 @@ def multiscale_loss(predictions, target, criterion, weights):
 def build_optimizer(args, model):
     grouped = {}
     for name, parameter in model.named_parameters():
-        if not parameter.requires_grad:
+        if not parameter.requires_grad or name.startswith("training_auxiliary.router."):
             continue
         scale = args.backbone_lr_mult if name.startswith("backbone.") else 1.0
         grouped.setdefault(scale, []).append(parameter)
@@ -214,234 +168,93 @@ def build_optimizer(args, model):
     return torch.optim.Adam(groups, lr=args.lr, betas=(0.9, 0.99), eps=1e-8)
 
 
-def capped_auxiliary(raw_loss, main_loss, max_ratio):
-    cap = max_ratio * main_loss.detach()
-    scale = torch.clamp(cap / (raw_loss.detach() + 1e-8), max=1.0)
-    weighted = raw_loss * scale.detach()
-    return weighted, weighted.detach() / main_loss.detach().clamp_min(1e-8)
-
-
-def legacy_multiplier(step, total):
-    progress = step / max(total, 1)
-    if progress < 0.10:
-        return 0.0
-    if progress < 0.20:
-        return (progress - 0.10) / 0.10
-    if progress >= 0.80:
-        return max(0.0, (1.0 - progress) / 0.20)
-    return 1.0
-
-
-def hsd_multiplier(step, total):
-    """OFF 0-5%, warmup 5-15%, plateau 15-80%, cosine to 0.3."""
-    progress = min(max(step / max(total, 1), 0.0), 1.0)
-    if progress < 0.05:
-        return 0.0
-    if progress < 0.15:
-        return (progress - 0.05) / 0.10
-    if progress <= 0.80:
-        return 1.0
-    phase = (progress - 0.80) / 0.20
-    return 0.30 + 0.70 * 0.5 * (1.0 + math.cos(math.pi * phase))
+def build_router_optimizer(args, model):
+    if not model.use_training_auxiliary:
+        return None
+    return torch.optim.Adam(model.training_auxiliary.router.parameters(), lr=args.router_lr)
 
 
 def build_model(args):
-    recipe = EXPERIMENTS[args.experiment]
-    hsd_cfg = None
-    eir_cfg = None
-    z2_cfg = None
-    legacy_cfg = None
-    if args.auxiliary_mode == "sam_hsd":
-        hsd_cfg = {
-            "mode": recipe["hsd_mode"],
-            "evidence_mode": recipe["evidence_mode"],
-            "use_scgr": recipe["use_scgr"],
-            "robust_filter": recipe["robust_filter"],
-            "boundary_band": 7,
-        }
-    elif args.auxiliary_mode == "eir_hsd":
-        eir_cfg = {
-            "mode": recipe["hsd_mode"],
-            "spatial_adapter": recipe["spatial_adapter"],
-            "use_correction": recipe["use_correction"],
-            "fixed_fusion": recipe["fixed_fusion"],
-            "directional_restore": recipe["directional_restore"],
-            "boundary_tolerance": 2,
-            "trust_gamma": 1.0,
-        }
-    elif args.auxiliary_mode == "z2_srd":
-        z2_cfg = {
-            "pair_mode": recipe["pair_mode"],
-            "use_even": recipe["use_even"],
-            "use_odd": recipe["use_odd"],
-            "spatial_adapter": False,
-            "odd_weight": 1.0,
-            "boundary_tolerance": 2,
-            "trust_gamma": 1.0,
-        }
-    elif args.auxiliary_mode == "legacy_sam":
-        legacy_cfg = {"boundary_weight": 0.7, "affinity_weight": 0.3, "boundary_band": 7}
-    return A2Net_LWGANet_L0(
-        pretrained=args.pretrained,
-        pretrained_path=args.pretrained_path,
-        auxiliary_mode=args.auxiliary_mode,
-        sam_hsd_cfg=hsd_cfg,
-        eir_hsd_cfg=eir_cfg,
-        z2_srd_cfg=z2_cfg,
-        legacy_sam_cfg=legacy_cfg,
-    )
+    cfg = dict(hidden=args.router_hidden, utility_margin=args.utility_margin,
+               boundary_radius=args.boundary_radius, small_area=args.small_area)
+    return A2Net_LWGANet_L0(pretrained=args.pretrained, pretrained_path=args.pretrained_path,
+                            auxiliary_mode=args.auxiliary_mode, routing_cfg=cfg)
 
 
-def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, device):
+def train_epoch(args, loader, model, criterion, optimizer, epoch, global_step, device,
+                router_optimizer=None):
     model.train()
+    loader.dataset.set_epoch(epoch)
+    loader.generator.manual_seed(args.seed + epoch)
     meter = ConfuseMatrixMeter(n_class=2)
-    metric_keys = (
-        "total", "main", "aux_raw", "aux_weighted", "aux_ratio", "aux_factor",
-        "encoder", "decoder", "scgr", "boundary", "relation", "affinity",
-        "boundary_positive", "boundary_negative", "relation_changed",
-        "stable_suppression", "prediction_contrast", "feature_relation",
-        "e_plus", "e_minus", "e_stable", "e_uncertain",
-        "plus_conf", "minus_conf", "stable_conf", "change_conf",
-        "reliable_positive", "reliable_negative", "hard_negative", "hard_positive",
-        "decoder_structure", "relation_same", "relation_contrast",
-        "correction", "correction_fn", "correction_fp",
-        "code_boundary", "code_local", "code_geometry", "code_stable",
-        "trust_change", "trust_stable", "coverage_change", "coverage_stable",
-        "structural_uncertainty", "fn_correction", "fp_correction",
-        "z2_even", "z2_odd", "z2_even_feature", "z2_odd_feature",
-        "z2_even_odd_cosine", "teacher_odd_abs", "teacher_odd_signed",
-        "data_time", "step_time",
-    )
-    totals = {key: 0.0 for key in metric_keys}
+    keys = ("total", "main", "aux_raw", "aux_weighted", "aux_ratio", "router_loss",
+            "reject_ratio", "target_reject_ratio", "router_accuracy", "sam_boundary", "sam_relation",
+            "ov_response", "ov_relation", "data_time", "step_time")
+    keys += tuple("h_"+name for name in H_NAMES)
+    keys += tuple(prefix+name for prefix in ("q_", "d_", "r_", "w_", "effective_") for name in ("sam", "ov"))
+    keys += ("w_reject",)
+    totals = dict.fromkeys(keys, 0.)
     batches, last_lr = 0, args.lr
     data_started = time.perf_counter()
     for batch in loader:
-        data_elapsed = time.perf_counter() - data_started
+        data_elapsed = time.perf_counter()-data_started
         step_started = time.perf_counter()
         if global_step >= args.max_steps:
             break
-        image, target, _, teacher_pack = unpack_batch(batch)
-        pre = image[:, :3].to(device, non_blocking=True)
-        post = image[:, 3:6].to(device, non_blocking=True)
-        target = target.to(device, non_blocking=True).float()
-        teacher_pack = nested_to(teacher_pack, device) if teacher_pack is not None else None
-        last_lr = adjust_learning_rate(args, optimizer, epoch, global_step, len(loader))
+        image,target,_,pack = unpack_batch(batch)
+        pre,post=image[:,:3].to(device),image[:,3:6].to(device)
+        target=target.to(device).float()
+        pack=nested_to(pack,device) if pack is not None else None
+        last_lr=adjust_learning_rate(args,optimizer,epoch,global_step,len(loader))
         optimizer.zero_grad(set_to_none=True)
-        predictions, auxiliary = model(
-            pre, post, target=target, teacher_pack=teacher_pack,
-            compute_auxiliary=args.auxiliary_mode != "none",
-        )
-        main_loss = multiscale_loss(
-            predictions, target, criterion, args.main_loss_weights,
-        )
-        zero = main_loss.new_zeros(())
-        aux_raw = aux_weighted = aux_ratio = zero
-        factor = 0.0
-        details = {}
-        if "legacy_sam" in auxiliary:
-            details = auxiliary["legacy_sam"]
-            aux_raw = details["total"]
-            factor = legacy_multiplier(global_step, args.max_steps)
-            aux_weighted, aux_ratio = capped_auxiliary(
-                0.05 * factor * aux_raw, main_loss, 0.08,
-            )
-        elif "sam_hsd" in auxiliary:
-            details = auxiliary["sam_hsd"]
-            aux_raw = details["total"]
-            factor = hsd_multiplier(global_step, args.max_steps)
-            aux_weighted, aux_ratio = capped_auxiliary(
-                args.hsd_lambda * factor * aux_raw, main_loss, args.hsd_max_ratio,
-            )
-        elif "eir_hsd" in auxiliary:
-            details = auxiliary["eir_hsd"]
-            aux_raw = details["total"]
-            factor = hsd_multiplier(global_step, args.max_steps)
-            aux_weighted, aux_ratio = capped_auxiliary(
-                args.hsd_lambda * factor * aux_raw, main_loss, args.hsd_max_ratio,
-            )
-        elif "z2_srd" in auxiliary:
-            details = auxiliary["z2_srd"]
-            aux_raw = details["total"]
-            factor = hsd_multiplier(global_step, args.max_steps)
-            aux_weighted, aux_ratio = capped_auxiliary(
-                args.hsd_lambda * factor * aux_raw, main_loss, args.hsd_max_ratio,
-            )
-        loss = main_loss + aux_weighted
+        if router_optimizer is not None:router_optimizer.zero_grad(set_to_none=True)
+        predictions,auxiliary=model(pre,post,target=target,teacher_pack=pack,
+                                    compute_auxiliary=args.auxiliary_mode!="none")
+        main_loss=multiscale_loss(predictions,target,criterion,args.main_loss_weights)
+        zero=main_loss.new_zeros(())
+        detail=auxiliary.get("direction_c",{})
+        aux_raw=detail.get("total",zero)
+        aux_weighted=args.kd_lambda*aux_raw
+        router_loss=detail.get("router_loss",zero)
+        loss=main_loss+aux_weighted
+        if not torch.isfinite(loss) or not torch.isfinite(router_loss):
+            raise FloatingPointError("Non-finite training loss; checkpoint not overwritten")
         loss.backward()
+        if router_optimizer is not None:
+            # Router sees only detached features/statistics; this has no student gradient.
+            router_loss.backward()
         optimizer.step()
-
-        prediction = (predictions[0].detach() > 0.5).long()
-        current_f1 = meter.update_cm(prediction.cpu().numpy(), target.cpu().numpy())
-        values = {
-            "total": loss, "main": main_loss, "aux_raw": aux_raw,
-            "aux_weighted": aux_weighted, "aux_ratio": aux_ratio,
-            "aux_factor": loss.new_tensor(factor),
-            "encoder": details.get("encoder", zero), "decoder": details.get("decoder", zero),
-            "scgr": details.get("scgr", zero), "boundary": details.get("boundary", zero),
-            "relation": details.get("relation", zero), "affinity": details.get("affinity", zero),
-            "boundary_positive": details.get("boundary_positive", zero),
-            "boundary_negative": details.get("boundary_negative", zero),
-            "relation_changed": details.get("relation_changed", zero),
-            "stable_suppression": details.get("stable_suppression", zero),
-            "prediction_contrast": details.get("prediction_contrast", zero),
-            "feature_relation": details.get("feature_relation", zero),
-            "e_plus": details.get("e_plus_mean", zero),
-            "e_minus": details.get("e_minus_mean", zero),
-            "e_stable": details.get("e_stable_mean", zero),
-            "e_uncertain": details.get("e_uncertain_mean", zero),
-            "plus_conf": details.get("plus_conf_mean", zero),
-            "minus_conf": details.get("minus_conf_mean", zero),
-            "stable_conf": details.get("stable_conf_mean", zero),
-            "change_conf": details.get("change_conf_mean", zero),
-            "reliable_positive": details.get("reliable_positive_ratio", zero),
-            "reliable_negative": details.get("reliable_negative_ratio", zero),
-            "hard_negative": details.get("hard_negative_ratio", zero),
-            "hard_positive": details.get("hard_positive_ratio", zero),
-            "decoder_structure": details.get("decoder_structure", zero),
-            "relation_same": details.get("relation_same", zero),
-            "relation_contrast": details.get("relation_contrast", zero),
-            "correction": details.get("correction", zero),
-            "correction_fn": details.get("correction_fn", zero),
-            "correction_fp": details.get("correction_fp", zero),
-            "code_boundary": details.get("code_boundary_mean", zero),
-            "code_local": details.get("code_local_mean", zero),
-            "code_geometry": details.get("code_geometry_mean", zero),
-            "code_stable": details.get("code_stable_mean", zero),
-            "trust_change": details.get("trust_change_mean", zero),
-            "trust_stable": details.get("trust_stable_mean", zero),
-            "coverage_change": details.get("coverage_change_mean", zero),
-            "coverage_stable": details.get("coverage_stable_mean", zero),
-            "structural_uncertainty": details.get(
-                "structural_uncertainty_mean", zero,
-            ),
-            "fn_correction": details.get("fn_correction_ratio", zero),
-            "fp_correction": details.get("fp_correction_ratio", zero),
-            "z2_even": details.get("z2_even", zero),
-            "z2_odd": details.get("z2_odd", zero),
-            "z2_even_feature": details.get("z2_even_feature", zero),
-            "z2_odd_feature": details.get("z2_odd_feature", zero),
-            "z2_even_odd_cosine": details.get("z2_even_odd_cosine", zero),
-            "teacher_odd_abs": details.get("teacher_odd_abs_mean", zero),
-            "teacher_odd_signed": details.get("teacher_odd_signed_mean", zero),
-            "data_time": loss.new_tensor(data_elapsed),
-            "step_time": loss.new_tensor(time.perf_counter() - step_started),
-        }
-        for key, value in values.items():
-            totals[key] += float(value.detach())
-        batches += 1
-        global_step += 1
-        if global_step % 5 == 0:
-            print(
-                f"\rstep [{global_step}/{args.max_steps}] F1={current_f1:.3f} "
-                f"lr={last_lr:.7f} loss={float(loss.detach()):.3f} "
-                f"aux_ratio={float(aux_ratio):.3f} factor={factor:.3f} "
-                f"data={data_elapsed:.3f}s", end="",
-            )
-        data_started = time.perf_counter()
-    return (
-        {key: value / max(batches, 1) for key, value in totals.items()},
-        meter.get_scores(), last_lr, global_step,
-    )
+        if router_optimizer is not None:router_optimizer.step()
+        prediction=(predictions[0].detach()>.5).long()
+        current_f1=meter.update_cm(prediction.cpu().numpy(),target.cpu().numpy())
+        aux_ratio=aux_weighted.detach()/main_loss.detach().clamp_min(1e-8)
+        values={key:zero for key in keys}
+        values.update(total=loss,main=main_loss,aux_raw=aux_raw,aux_weighted=aux_weighted,
+                      aux_ratio=aux_ratio,router_loss=router_loss)
+        if detail:
+            action=detail["action"];target_action=detail["target_action"]
+            values.update(reject_ratio=(action==2).float().mean(),
+                          target_reject_ratio=(target_action==2).float().mean(),
+                          router_accuracy=(action==target_action).float().mean())
+            for j,name in enumerate(H_NAMES):values["h_"+name]=detail["h"][:,j].mean()
+            for key,prefix in (("q","q_"),("d","d_"),("r","r_"),
+                               ("weights","w_"),("effective_weights","effective_")):
+                for j,name in enumerate(("sam","ov")):values[prefix+name]=detail[key][:,j].mean()
+            values["w_reject"]=detail["weights"][:,2].mean()
+            for name in ("sam_boundary","sam_relation","ov_response","ov_relation"):
+                values[name]=detail[name]
+        values["data_time"]=zero.new_tensor(data_elapsed)
+        values["step_time"]=zero.new_tensor(time.perf_counter()-step_started)
+        for key,value in values.items():totals[key]+=float(value.detach())
+        batches+=1;global_step+=1
+        if global_step%5==0:
+            print(f"\rstep [{global_step}/{args.max_steps}] F1={current_f1:.3f} "
+                  f"lr={last_lr:.7f} loss={float(loss.detach()):.3f} "
+                  f"aux_ratio={float(aux_ratio):.3f} reject={float(values['reject_ratio']):.3f} "
+                  f"data={data_elapsed:.3f}s",end="")
+        data_started=time.perf_counter()
+    if not batches:raise RuntimeError("No training batches; check batch size and max_steps")
+    return ({key:value/batches for key,value in totals.items()},meter.get_scores(),last_lr,global_step)
 
 
 @torch.no_grad()
@@ -552,19 +365,25 @@ def append_test_results(logger, args, scores, train_params, infer_params, flops,
 
 
 def validate_resume(args, checkpoint):
+    if checkpoint.get("format_version") != 2:
+        raise ValueError("Legacy checkpoint cannot resume direction-C package; start a fresh run")
     saved = checkpoint.get("args", {})
-    for key in ("experiment", "dataset_name", "batch_size", "max_steps", "seed"):
-        if key in saved and saved[key] != getattr(args, key):
-            raise ValueError(
-                f"Resume configuration mismatch for {key}: checkpoint={saved[key]!r}, "
-                f"current={getattr(args, key)!r}"
-            )
+    keys=("implementation_version", "experiment", "dataset_name", "batch_size", "max_steps", "seed",
+          "lr", "lr_mode", "step_loss", "weight_decay", "backbone_lr_mult", "dice_reduction",
+          "main_loss_weights", "router_lr", "router_hidden", "utility_margin", "boundary_radius",
+          "small_area", "kd_lambda", "inWidth", "inHeight", "data_fingerprint", "cache_fingerprint")
+    for key in keys:
+        if saved.get(key) != getattr(args,key,None):
+            raise ValueError(f"Resume configuration mismatch for {key}: {saved.get(key)!r} vs {getattr(args,key,None)!r}")
 
 
 def main():
     args = parse_args()
-    torch.cuda.set_device(args.gpu_id)
-    device = torch.device(f"cuda:{args.gpu_id}")
+    if args.device == "cuda":
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA unavailable; use --device cpu only for local verification")
+        torch.cuda.set_device(args.gpu_id)
+    device = torch.device(f"cuda:{args.gpu_id}" if args.device=="cuda" else "cpu")
     set_seed(args.seed)
     save_dir = Path(args.save_dir)
     save_dir.mkdir(parents=True, exist_ok=True)
@@ -576,30 +395,31 @@ def main():
         if name.startswith("training_auxiliary.")
     )
     optimizer = build_optimizer(args, model)
+    router_optimizer = build_router_optimizer(args, model)
     criterion = build_loss(args.dice_reduction)
 
-    teacher_cache = TeacherCache(args.teacher_cache_root, require_validation=True) \
-        if args.auxiliary_mode != "none" else None
-    if teacher_cache is not None:
-        manifest = teacher_cache.manifest
-        if manifest.get("source_dataset") != args.dataset_name:
-            raise ValueError(
-                f"Teacher cache dataset={manifest.get('source_dataset')} "
-                f"but training dataset={args.dataset_name}"
-            )
-        if manifest.get("teacher_type") != "sam2_struct_v2":
-            raise ValueError(
-                "SAM-HSD/EIR-HSD/Z2-SRD requires a sam2_struct_v2 cache"
-            )
-
+    import hashlib
+    args.data_fingerprint={split:hashlib.sha256((Path(args.data_root)/"list"/(split+".txt")).read_bytes()).hexdigest()
+                           for split in ("train","val","test")}
+    split_ids={split:[v.strip() for v in (Path(args.data_root)/"list"/(split+".txt")).read_text().splitlines() if v.strip()]
+               for split in ("train","val","test")}
+    for split,ids in split_ids.items():
+        if not ids or len(ids)!=len(set(ids)):
+            raise ValueError(f"Empty split or duplicate IDs in {split}")
+    if any(set(split_ids[a]) & set(split_ids[b]) for a,b in
+           (("train","val"),("train","test"),("val","test"))):
+        raise ValueError("Sample IDs overlap between train/val/test")
+    train_list=[v.strip() for v in (Path(args.data_root)/"list/train.txt").read_text().splitlines() if v.strip()]
+    teacher_cache = PairedTeacherCache(args.sam_cache_root,args.ov_cache_root,args.dataset_name,train_list) \
+        if args.auxiliary_mode == "direction_c" else None
+    args.cache_fingerprint=teacher_cache.fingerprint if teacher_cache else None
     train_loader = get_loader(
         args.data_root, os.path.join(args.data_root, "list", "train.txt"),
         batchsize=args.batch_size, trainsize=args.inWidth,
-        num_workers=args.num_workers, teacher_cache=teacher_cache,
-        derive_sam_hsd=args.auxiliary_mode in {"sam_hsd", "eir_hsd", "z2_srd"},
+        num_workers=args.num_workers, teacher_cache=teacher_cache, seed=args.seed,
     )
-    if teacher_cache is not None and set(teacher_cache.entries) != set(train_loader.dataset.file_list):
-        raise ValueError("Teacher cache coverage does not exactly match the training list")
+    if len(train_loader)==0:
+        raise ValueError("Training dataset smaller than batch_size with drop_last=True")
     val_loader = get_test_loader(
         args.data_root, os.path.join(args.data_root, "list", "val.txt"),
         batchsize=args.batch_size, testsize=args.inWidth,
@@ -618,6 +438,9 @@ def main():
         validate_resume(args, checkpoint)
         model.load_state_dict(checkpoint["model"])
         optimizer.load_state_dict(checkpoint["optimizer"])
+        if router_optimizer is not None:
+            if checkpoint.get("router_optimizer") is None:raise ValueError("Missing router optimizer state")
+            router_optimizer.load_state_dict(checkpoint["router_optimizer"])
         start_epoch = checkpoint["epoch"] + 1
         global_step = checkpoint["global_step"]
         best_val_f1 = checkpoint["best_val_f1"]
@@ -626,6 +449,8 @@ def main():
     log_path = Path(args.log_file)
     if not log_path.is_absolute():
         log_path = save_dir / log_path
+    if not args.resume and (log_path.exists() or (save_dir/"last_checkpoint.pth").exists()):
+        raise FileExistsError("Existing run found: use --resume or a fresh save/log directory")
     logger = TrainingLogger(
         str(log_path),
         {
@@ -646,9 +471,10 @@ def main():
     started = datetime.datetime.now()
 
     for epoch in range(start_epoch, args.max_epochs):
+        if global_step >= args.max_steps:break
         losses, _, lr, global_step = train_epoch(
             args, train_loader, model, criterion, optimizer,
-            epoch, global_step, device,
+            epoch, global_step, device, router_optimizer,
         )
         val_loss, val_scores = evaluate(
             val_loader, model, criterion, args.main_loss_weights, device,
@@ -657,7 +483,7 @@ def main():
         if is_best:
             best_val_f1 = val_scores["F1"]
         checkpoint = build_checkpoint(
-            model, optimizer, epoch, global_step, best_val_f1, args,
+            model, optimizer, epoch, global_step, best_val_f1, args, router_optimizer,
         )
         save_checkpoint_atomic(checkpoint, last_path)
         if is_best:
@@ -671,7 +497,7 @@ def main():
             {"f1": val_scores["F1"], "iou": val_scores["IoU"],
              "kappa": val_scores["Kappa"], "recall": val_scores["recall"],
              "precision": val_scores["precision"], "oa": val_scores["OA"]},
-            lr, torch.cuda.max_memory_allocated(device) / 1e9, is_best,
+            lr, torch.cuda.max_memory_allocated(device) / 1e9 if device.type=="cuda" else 0., is_best,
         )
         logger.log_message(f"Val loss: {val_loss:.6f}; global_step: {global_step}")
         if global_step >= args.max_steps:
