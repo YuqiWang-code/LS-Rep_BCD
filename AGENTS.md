@@ -1,7 +1,7 @@
-# AGENTS.md — LS-Rep_BCD_RSML_3 / DART-R-TS
+# AGENTS.md — LS-Rep_BCD_RSML_3 / RDT-CD
 
 > Last updated: 2026-09-13
-> 本文件是当前项目中 AI/Coding Agent 的工作约束。当前唯一活动实验是 `train_scripts/DART-R/`（方向 C），主方法为 **C1 DART-R-TS（Task-Space DART-R，任务空间困难感知教师路由与拒绝）**；学生模型 A2Net-LWGANet-L0，部署参数 2,913,094 不变。项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。不记录或继承旧实验（SAM-HSD、旧方向 C 的 C0 梯度路由等已归档）、旧服务器结果表或历史完成状态。
+> 本文件是当前项目中 AI/Coding Agent 的工作约束。当前唯一活动实验是 `train_scripts/RDT-CD/`（方向 C），主方法为 **RDT-CD（Reciprocal Dynamic Teachers for Change Detection，互惠动态教师）**；学生模型 A2Net-LWGANet-L0，部署参数 2,913,094 不变。项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。不记录或继承旧实验（SAM-HSD、DART-R-TS 的固定教师、旧 C0 梯度路由等已归档）。
 
 ## GitHub 提交流程
 
@@ -30,15 +30,15 @@ git push
 当前唯一活动实验族：
 
 ```text
-train_scripts/DART-R/           # 方向 C：DART-R-TS（B0 / C1 / C2）
+train_scripts/RDT-CD/           # 方向 C：RDT-CD（B0 / D1 / D2）
 ```
 
-（`train_scripts/SAM-HSD/` 及旧方向 C 的 C0 梯度路由均为历史归档，不再活动。）
+（`train_scripts/SAM-HSD/`、`train_scripts/DART-R/` 的固定教师与旧 C0 梯度路由均为历史归档，不再活动。）
 
 按以下优先级判断事实：
 
 1. 当前代码与 shell 参数；
-2. `train_scripts/DART-R/Run2/README.md`（当前实验协议）；
+2. `train_scripts/RDT-CD/Run1/README.md`（当前实验协议）；
 3. `docs/RSML-3_服务器环境与变化检测数据统一说明.md`（环境/数据/路径）；
 4. 本文件中的摘要。
 
@@ -86,36 +86,32 @@ cd /home/yqwang/projects/LS-Rep_BCD_RSML_3
 | 项目代码 | `/home/yqwang/projects/LS-Rep_BCD_RSML_3` |
 | 数据集 | `/share_datasets/CD` |
 | Teacher Cache | `/share_datasets/CD_teacher_cache` |
-| DART-R-TS checkpoint | `/share_datasets/yqwang/checkpoints/LS-Rep_BCD_RSML_3/DART-R-TS` |
-| DART-R-TS 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/DART-R-TS` |
+| RDT-CD checkpoint | `/share_datasets/yqwang/checkpoints/LS-Rep_BCD_RSML_3/RDT-CD` |
+| RDT-CD 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/RDT-CD` |
 | 预训练权重 | `/home/yqwang/projects/LS-Rep_BCD_RSML_3/pre-trained_weights` |
 
-（旧 SAM-HSD / DirectionC 的 checkpoint 也在 `/share_datasets/yqwang/checkpoints/` 下，仅作归档，不再活动。）
+（旧 SAM-HSD / DART-R-TS 的 checkpoint 也在 `/share_datasets/yqwang/checkpoints/` 下，仅作归档，不再活动。）
 
 `.vscode/sftp.json` 用于手动上传代码，自动上传保持关闭；该配置忽略 `pre-trained_weights/` 和常见权重文件。
 
-## 4. DART-R-TS（方向 C）
+## 4. RDT-CD（方向 C）
 
-方向 C 主方法经历一次迭代：Run1 的 C0（梯度路由 DART-R）已判无效，现迭代为 **C1 DART-R-TS（Task-Space DART-R）**。学生模型仍叫 A2Net-LWGANet-L0，DART-R-TS 只是训练期机制。`models/scripts/train.py` 注册以下入口：
+方向 C 主方法经历迭代：C0（梯度路由）、C1（DART-R-TS 固定教师）均被判无效（固定教师很快被学生超越、教师有效贡献趋近于零），现迭代为 **RDT-CD（Reciprocal Dynamic Teachers，互惠动态教师）**。学生模型仍叫 A2Net-LWGANet-L0，RDT-CD 只是训练期机制。`models/scripts/train.py` 注册以下入口：
 
 | ID | 机制 | 说明 |
 |---|---|---|
 | B0 | none | clean baseline，无教师 |
-| C1 | task_space | **当前主方法**（DART-R-TS） |
-| C2 | task_space / quality 路由 | 关掉 Brier 收益准入的负对照 |
-| C0 / C0F | legacy 梯度路由 | 历史（已判无效）/ 旧重放修复对照 |
-| C3 / C4 / C5 | task_space | 单教师 / 无困难加权消融（暂不跑） |
+| D1 | dynamic_teacher | **当前主方法**（RDT-CD 完整 Cache 条件） |
+| D2 | dynamic_teacher / 无 Cache 条件 | 同结构在线教师、去掉 Cache 先验的负对照 |
 
-**C1 DART-R-TS 机制**（`models/distill/task_space.py`，辅助参数 **0**，训练=部署=2,913,094）：不训练 MLP/辅助头；把 SAM 结构经 leave-one-out 实例传输转译为变化概率提案，OV 提供 soft_change 提案；用精确 Brier 相对收益 `u=(p−y)²−(s−y)²` 做**逐像素**准入（只接受 `u>0` 的教师），`L=L_GT+0.06·KL(soft-target‖p)`，困难诊断仅作空间加权。同时修复 Cache 重放的 P0 问题（`aligned` 重放）。
+**RDT-CD 机制**（`models/distill/dynamic_teacher.py`）：SAMStruct / OVCDistill 的 Cache 不再是固定教师目标，而是**教师先验**；两个小型在线 `ResidualTeacherExpert`（fast，零初始化、输出有界 logit 修正）随训练优化，EMA 复制为 target teacher 生成学生看到的动态提案。学生与教师**互相更新**：教师→学生蒸馏（`total`，只更新学生）、学生误差→教师拟合（`teacher_total`，只更新 fast teacher），再用 GT 正收益准入逐像素挑选。部署图完全删除辅助，参数 2,913,094。
 
-**Run1（旧 C0）判定**：C0 相对 B0 平均 ΔF1 ≈ −0.16（4 数据集 3 降 1 平），失败诊断是梯度余弦代理 d≈0 → `r=q·max(d,0)`≈0 → Router 学会「几乎全 Reject」（reject_ratio 0.84–0.90，router_accuracy≈0.995）。是教师代理不适配，不是 Router 没学会。
-
-**Run2 消融计划**（`train_scripts/DART-R/Run2/README.md`）：验证 C1 相对 B0 的有效性。3 组（B0 / C1 / C2）× 4 数据集 = 12 run，batch **128**、40k、seed 2333；双卡并行——GPU 0 跑 SYSU+WHU、GPU 1 跑 CDD+LEVIR，各卡内 B0→C1→C2 串行（脚本自带「跳过已完成 + 自动 `--resume`」）。判定：C1 vs B0 为整体有效性；C1 vs C2 为收益准入是否有用。单 seed 仅作筛选，论文级主比较 seed `2333/3407/5871`。
+**Run1 消融**（`train_scripts/RDT-CD/Run1/README.md`）：3 组（B0 / D1 / D2）× 4 数据集 = 12 run，batch 64、40k、seed 2333；双卡并行——GPU 0 跑 SYSU+WHU、GPU 1 跑 CDD+LEVIR，各卡内 B0→D1→D2 串行。判定：D1 vs B0 为整体有效性；D1 vs D2 为 Cache 先验是否有增量。关键健康信号看 `effective_per_error_mass`（不应过早坍缩）、`teacher_ema_update_norm`/`teacher_target_gap`（教师是否持续演化）。单 seed 仅作筛选，论文级主比较 seed `2333/3407/5871`。
 
 ## 5. 模型与部署约束
 
 - 主学生模型是 A2Net-LWGANet-L0；SAM2 Teacher Cache 及所有训练辅助只允许训练期使用。
-- 推理参数量保持 `2,913,094`；256×256 FLOPs 实测约 `2.7676G`（`±0.03G` 容差，不能仅因这一级统计差异阻断最终测试）。
+- 推理参数量保持 `2,913,094`；256×256 FLOPs 实测约 `2.7676G`（`±0.03G` 容差）。
 - 打开或关闭训练辅助不得改变主预测；`switch_to_deploy()` 必须移除训练辅助参数，部署前后最大误差 `< 1e-6`。
 - 不得把 Teacher map 注入部署期主特征路径。
 - A/B/label 与 Teacher Cache 必须重放完全一致的 crop、resize、flip 和时相交换。
@@ -129,35 +125,33 @@ models/backbone/lwganet.py
 models/decoder/a2net_decoder.py
 models/datasets/cd_dataset.py
 models/datasets/cache_transforms.py
-models/distill/task_space.py
-models/distill/routing.py
-models/distill/losses.py
+models/distill/dynamic_teacher.py
 models/distill/diagnostics.py
+models/distill/task_space.py
+models/distill/losses.py
 models/distill/teacher_cache.py
 models/losses/combined_loss.py
 models/scripts/train.py
+models/tools/smoke_dynamic_teacher.py
 models/tools/validate_teacher_cache.py
-models/tools/smoke_task_space.py
-models/tools/dry_run_task_space.py
-models/tools/integration_task_space.py
 models/tools/export_deploy.py
 ```
 
 ## 6. Teacher Cache 规则
 
 - 根 `/share_datasets/CD_teacher_cache/`，两套 teacher：SAMStruct（`sam2_struct_v2`）与 OVCDistill（DINOv2 ViT-B/14），四数据集 train 全覆盖。
-- 先跑 `validate_teacher_cache` + `dry_run_task_space`；验证通过不重建缓存。
+- 先跑 `validate_teacher_cache`；验证通过不重建缓存。
 - 不得删除或覆盖数据集、Teacher Cache、checkpoint，除非用户明确授权并已核对绝对路径。
-- **有效性状态**：缓存文件本身可用，但「teacher 能否提升主模型」仍需 C1 vs B0 同协议对照验证；在得到证据前，不得把 teacher 描述为有效组件。
+- **有效性状态**：缓存文件本身可用，但「teacher 能否提升主模型」仍需 D1 vs B0 同协议对照验证；在得到证据前，不得把 teacher 描述为有效组件。
 
 ## 7. 启动、恢复与结果纪律
 
 推荐顺序：
 
 1. 激活 `lsrep` 并进入项目目录；
-2. 跑 `smoke_task_space`（CUDA 契约测试）；
-3. 四数据集各做 `validate_teacher_cache` + `dry_run_task_space`（真实 Cache 单批前后向 + 梯度诊断）；
-4. 启动 Run2 队列（双卡 tmux）；
+2. 跑 `smoke_dynamic_teacher`（CUDA 契约测试）；
+3. 四数据集各做 `validate_teacher_cache`（真实 Cache 校验）；
+4. 启动 Run1 队列（双卡 tmux）；
 5. 从 `train_log.txt` 收集正式 test 指标。
 
 每个实验目录使用：
@@ -176,11 +170,11 @@ models/tools/export_deploy.py
 
 ## 8. Agent 工作规则
 
-1. 修改前读取当前代码、Run2 README 与实际日志，不依赖旧项目记忆。
+1. 修改前读取当前代码、Run1 README 与实际日志，不依赖旧项目记忆。
 2. 方法创新优先，但每项主张必须对应明确机制、可证伪假设和最小消融。
 3. 保持推理图、Teacher Cache replay 顺序和部署约束不变。
 4. 修改 shell 后执行 `bash -n` 语法检查。
-5. 修改模型后至少跑 smoke test；涉及数据或缓存时再跑 real-cache dry run。
+5. 修改模型后至少跑 smoke test；涉及数据或缓存时再跑真实 Cache 校验。
 6. 不恢复已归档的旧实验模块、路径、指标或环境配置。
 7. 不在 `cd_base` 中安装项目专属依赖，不擅自更换 PyTorch/CUDA 栈。
 8. 任何删除数据、缓存或 checkpoint 的操作都需要用户明确授权和精确路径校验。

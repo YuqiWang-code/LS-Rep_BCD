@@ -1,4 +1,15 @@
-from .teacher_cache import PairedTeacherCache
-from .routing import DirectionC
+"""Knowledge-distillation and training-only teacher utilities."""
 
-__all__ = ["PairedTeacherCache", "DirectionC"]
+from .teacher_cache import PairedTeacherCache
+from .dynamic_teacher import (
+    DynamicTeacherDirectionC,
+    ReciprocalDynamicTeacher,
+    ResidualTeacherExpert,
+)
+
+__all__ = [
+    "PairedTeacherCache",
+    "DynamicTeacherDirectionC",
+    "ReciprocalDynamicTeacher",
+    "ResidualTeacherExpert",
+]
