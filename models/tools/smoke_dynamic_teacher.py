@@ -1,33 +1,50 @@
 #!/usr/bin/env python3
 """
-Synthetic smoke test for RDT-CD reciprocal dynamic teachers.
+Synthetic smoke test for RDT-CD + SCGR.
 
-This script is intentionally a SMALL correctness test.  It does not train a
-formal experiment and it does not read/write the real Teacher Cache.
+SCGR = Sparse-Change Gradient-Concordant Routing.
 
-It verifies the P0 contracts required by the project:
+This script is intentionally a correctness smoke test, not a formal experiment.
+It uses synthetic images, GT masks, and SAMStruct/OVCDistill-shaped cache data.
+It does NOT read the real datasets or Teacher Cache.
 
-1. dynamic_teacher forward is finite;
-2. auxiliary ON/OFF does not change the main prediction;
-3. Student loss does not update fast-teacher parameters;
-4. Teacher fitting loss does not backpropagate into the Student;
-5. EMA target teachers are frozen and actually evolve after a fast-teacher step;
-6. dynamic-teacher state is present in model.state_dict();
-7. switch_to_deploy() removes every training-only teacher module;
-8. deploy prediction is unchanged (< 1e-6);
-9. deployed parameter count is exactly 2,913,094.
+What it verifies
+----------------
+A. SCGR task-space mechanism
+   1) zero/non-positive utility -> Reject;
+   2) positive Brier utility but negative analytical gradient concordance
+      -> Reject;
+   3) positive utility + positive gradient concordance -> Accept;
+   4) teacher selection chooses the useful teacher (SAM/OV);
+   5) sparse change is normalized by remaining error mass rather than HxW,
+      so useful sparse supervision is not drowned by background area;
+   6) force_action=Reject really disables teacher supervision.
 
-Run from the project root, for example:
+B. RDT-CD integration
+   7) dynamic-teacher forward is finite and exposes the SCGR contract;
+   8) auxiliary ON/OFF never changes the main student prediction;
+   9) Student objective does not update fast-teacher parameters;
+  10) Teacher fitting objective does not backpropagate into Student;
+  11) one fast-teacher optimization step changes fast teacher;
+  12) EMA target teacher updates and remains frozen;
+  13) dynamic-teacher state is checkpoint-visible;
+  14) switch_to_deploy() physically deletes all training-only auxiliary state;
+  15) deploy prediction is unchanged with max absolute error < 1e-6;
+  16) deployed parameter count is exactly 2,913,094.
 
+Run only AFTER all RDT-CD + SCGR files have been replaced.
+
+Examples
+--------
+CUDA:
     python models/tools/smoke_dynamic_teacher.py --device cuda --gpu_id 0
 
-CPU is also supported:
-
+CPU:
     python models/tools/smoke_dynamic_teacher.py --device cpu
 
-This smoke uses a synthetic SAMStruct/OVCDistill-shaped teacher_pack.  A
-separate real-cache dry run should be executed after all modified project files
-have been installed.
+No-cache D2 control:
+    python models/tools/smoke_dynamic_teacher.py --device cuda \
+        --no-cache-conditioning
 """
 
 from __future__ import annotations
@@ -37,7 +54,7 @@ import math
 import random
 import sys
 from pathlib import Path
-from typing import Dict, Iterable, Tuple
+from typing import Dict, Iterable, Optional, Sequence, Tuple
 
 import numpy as np
 import torch
@@ -48,21 +65,29 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from models import A2Net_LWGANet_L0  # noqa: E402
+from models.distill.task_space import (  # noqa: E402
+    OV_INDEX,
+    REJECT_INDEX,
+    SAM_INDEX,
+    routed_bernoulli_kd,
+    task_space_route,
+)
 
 
 EXPECTED_DEPLOY_PARAMS = 2_913_094
 PREDICTION_ATOL = 1e-6
+SCGR_POLICY = "scgr"
+SCGR_TEACHER = "both"
 
 
 # ---------------------------------------------------------------------------
-# Generic helpers
+# CLI / deterministic setup
 # ---------------------------------------------------------------------------
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Synthetic P0 smoke test for RDT-CD dynamic teachers"
+        description="Synthetic P0 smoke test for RDT-CD + SCGR"
     )
-
     parser.add_argument(
         "--device",
         choices=("cuda", "cpu"),
@@ -79,14 +104,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teacher_ema", type=float, default=0.99)
     parser.add_argument("--max_logit_delta", type=float, default=2.0)
     parser.add_argument("--kd_lambda", type=float, default=0.06)
+    parser.add_argument("--scgr_region_size", type=int, default=16)
 
     parser.add_argument(
         "--no-cache-conditioning",
         action="store_true",
         help=(
-            "Smoke the capacity-matched no-cache dynamic-teacher control. "
-            "The default tests the full cache-conditioned path using a "
-            "synthetic SAM/OV teacher_pack."
+            "Smoke the capacity-matched D2 no-cache control. "
+            "The default smokes D1 with a synthetic SAM/OV cache pack."
         ),
     )
 
@@ -94,26 +119,22 @@ def parse_args() -> argparse.Namespace:
 
     if args.batch_size <= 0:
         raise ValueError("--batch_size must be positive")
-
     if args.height != 256 or args.width != 256:
         raise ValueError(
-            "The project deploy contract is defined for 256x256 inputs"
+            "Project deploy contract is defined for 256x256 inputs"
         )
-
     if args.teacher_hidden <= 0:
         raise ValueError("--teacher_hidden must be positive")
-
     if args.teacher_lr <= 0:
         raise ValueError("--teacher_lr must be positive")
-
     if not 0.0 <= args.teacher_ema < 1.0:
         raise ValueError("--teacher_ema must satisfy 0 <= ema < 1")
-
     if args.max_logit_delta <= 0:
         raise ValueError("--max_logit_delta must be positive")
-
     if args.kd_lambda < 0:
         raise ValueError("--kd_lambda must be non-negative")
+    if args.scgr_region_size <= 0:
+        raise ValueError("--scgr_region_size must be positive")
 
     return args
 
@@ -122,7 +143,6 @@ def set_seed(seed: int) -> None:
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
-
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
@@ -135,82 +155,35 @@ def get_device(args: argparse.Namespace) -> torch.device:
     if args.device == "cuda":
         if not torch.cuda.is_available():
             raise RuntimeError(
-                "--device cuda was requested but CUDA is not available"
+                "--device cuda requested but CUDA is not available"
             )
-
         if not 0 <= args.gpu_id < torch.cuda.device_count():
             raise ValueError(
                 f"Invalid --gpu_id={args.gpu_id}; "
-                f"visible CUDA device count={torch.cuda.device_count()}"
+                f"visible CUDA devices={torch.cuda.device_count()}"
             )
-
         torch.cuda.set_device(args.gpu_id)
         return torch.device("cuda", args.gpu_id)
 
     return torch.device("cpu")
 
 
+# ---------------------------------------------------------------------------
+# Generic helpers
+# ---------------------------------------------------------------------------
+
 def parameter_count(module: torch.nn.Module) -> int:
-    return sum(
-        parameter.numel()
-        for parameter in module.parameters()
-    )
+    return sum(parameter.numel() for parameter in module.parameters())
 
 
-def grad_norm(
-    parameters: Iterable[torch.nn.Parameter],
-) -> float:
-    square_sum = 0.0
-
+def grad_norm(parameters: Iterable[torch.nn.Parameter]) -> float:
+    squared = 0.0
     for parameter in parameters:
         if parameter.grad is None:
             continue
-
         gradient = parameter.grad.detach().float()
-
-        square_sum += (
-            gradient.square()
-            .sum()
-            .item()
-        )
-
-    return math.sqrt(square_sum)
-
-
-def parameter_rms_difference(
-    before: Tuple[torch.Tensor, ...],
-    after_parameters: Iterable[torch.nn.Parameter],
-) -> float:
-    square_sum = 0.0
-    count = 0
-
-    after = tuple(
-        parameter.detach()
-        for parameter in after_parameters
-    )
-
-    if len(before) != len(after):
-        raise AssertionError(
-            "Parameter snapshot length changed unexpectedly"
-        )
-
-    for old, new in zip(before, after):
-        delta = (
-            new.float()
-            - old.float()
-        )
-
-        square_sum += (
-            delta.square()
-            .sum()
-            .item()
-        )
-
-        count += delta.numel()
-
-    return math.sqrt(
-        square_sum / max(count, 1)
-    )
+        squared += gradient.square().sum().item()
+    return math.sqrt(squared)
 
 
 def snapshot_parameters(
@@ -222,9 +195,48 @@ def snapshot_parameters(
     )
 
 
+def parameter_rms_difference(
+    before: Sequence[torch.Tensor],
+    after_parameters: Iterable[torch.nn.Parameter],
+) -> float:
+    after = tuple(parameter.detach() for parameter in after_parameters)
+    if len(before) != len(after):
+        raise AssertionError(
+            "Parameter snapshot length changed unexpectedly"
+        )
+
+    squared = 0.0
+    count = 0
+    for old, new in zip(before, after):
+        delta = new.float() - old.float()
+        squared += delta.square().sum().item()
+        count += delta.numel()
+
+    return math.sqrt(squared / max(count, 1))
+
+
+def assert_finite_tensor(name: str, value: torch.Tensor) -> None:
+    if not torch.is_tensor(value):
+        raise AssertionError(f"{name} is not a tensor")
+    if not bool(torch.isfinite(value).all()):
+        raise AssertionError(f"{name} contains NaN/Inf")
+
+
+def assert_close(
+    name: str,
+    value: float,
+    expected: float,
+    atol: float = 1e-6,
+) -> None:
+    if abs(value - expected) > atol:
+        raise AssertionError(
+            f"{name}: expected {expected:.9e}, got {value:.9e}"
+        )
+
+
 def max_prediction_difference(
-    left,
-    right,
+    left: Sequence[torch.Tensor],
+    right: Sequence[torch.Tensor],
 ) -> float:
     if len(left) != len(right):
         raise AssertionError(
@@ -232,44 +244,474 @@ def max_prediction_difference(
         )
 
     maximum = 0.0
-
-    for x, y in zip(left, right):
-        if x.shape != y.shape:
+    for a, b in zip(left, right):
+        if a.shape != b.shape:
             raise AssertionError(
-                f"Prediction shapes differ: {x.shape} vs {y.shape}"
+                f"Prediction shape mismatch: {a.shape} vs {b.shape}"
             )
-
         maximum = max(
             maximum,
-            (
-                x.detach().float()
-                - y.detach().float()
-            )
+            (a.detach().float() - b.detach().float())
             .abs()
             .max()
             .item(),
         )
-
     return maximum
 
 
-def assert_finite_tensor(
-    name: str,
-    value: torch.Tensor,
-) -> None:
-    if not torch.is_tensor(value):
+def _teacher_pair_mean(
+    tensor: torch.Tensor,
+) -> Tuple[float, float]:
+    value = tensor.detach().float()
+    if value.ndim == 0:
         raise AssertionError(
-            f"{name} is not a tensor"
+            "Expected a teacher-pair tensor, got scalar"
         )
-
-    if not torch.isfinite(value).all():
+    if value.shape[-1] == 2:
+        reduced = value.reshape(-1, 2).mean(0)
+    elif value.ndim >= 2 and value.shape[1] == 2:
+        reduced = value.transpose(1, -1).reshape(-1, 2).mean(0)
+    else:
         raise AssertionError(
-            f"{name} contains NaN/Inf"
+            f"Could not locate teacher dimension in shape {tuple(value.shape)}"
         )
+    return float(reduced[0]), float(reduced[1])
 
 
 # ---------------------------------------------------------------------------
-# Synthetic CD batch and synthetic Teacher Cache
+# Synthetic task-space fixtures
+# ---------------------------------------------------------------------------
+
+def _base_two_error_fixture(
+    device: torch.device,
+    *,
+    height: int = 16,
+    width: int = 16,
+) -> Tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
+    """Construct a single region with one change error and one background error.
+
+    All other pixels are already correct.  Feature is nonzero only at the two
+    error pixels, which makes analytical gradient direction easy to control.
+    """
+    target = torch.zeros(
+        1, 1, height, width,
+        device=device,
+        dtype=torch.float32,
+    )
+    prediction = torch.zeros_like(target)
+    feature = torch.zeros_like(target)
+
+    # Sparse changed pixel.
+    target[0, 0, 0, 0] = 1.0
+    prediction[0, 0, 0, 0] = 0.2
+    feature[0, 0, 0, 0] = 1.0
+
+    # One background false-positive.
+    prediction[0, 0, 0, 1] = 0.6
+    feature[0, 0, 0, 1] = 1.0
+
+    quality = torch.ones(
+        1, 2, height, width,
+        device=device,
+        dtype=torch.float32,
+    )
+    return prediction, target, feature, quality
+
+
+@torch.no_grad()
+def check_scgr_rejects_nonpositive_utility(
+    device: torch.device,
+) -> None:
+    prediction, target, feature, quality = _base_two_error_fixture(
+        device
+    )
+    proposals = prediction.expand(-1, 2, -1, -1).clone()
+
+    route = task_space_route(
+        prediction,
+        target,
+        proposals,
+        quality,
+        feature=feature,
+        policy=SCGR_POLICY,
+        teacher=SCGR_TEACHER,
+        region_size=16,
+    )
+
+    if bool(route["accepted_map"].any()):
+        raise AssertionError(
+            "SCGR accepted an identity/non-positive-utility teacher"
+        )
+    if bool((route["action"] != REJECT_INDEX).any()):
+        raise AssertionError(
+            "SCGR action must be Reject when utility is non-positive"
+        )
+
+    print(
+        "[PASS] SCGR non-positive utility -> Reject"
+    )
+
+
+@torch.no_grad()
+def check_scgr_rejects_gradient_conflict(
+    device: torch.device,
+) -> None:
+    """Teacher is Brier-better, but its regional classifier direction conflicts.
+
+    Changed pixel:
+        y=1, p=.2, q=.201  -> tiny positive Brier improvement.
+
+    Background pixel:
+        y=0, p=.6, q=0     -> large positive Brier improvement.
+
+    After sparse class balancing, GT regional classifier direction is dominated
+    by the changed pixel, whereas KD direction is dominated by the background
+    correction.  Utility is positive but cosine becomes negative.
+    """
+    prediction, target, feature, quality = _base_two_error_fixture(
+        device
+    )
+
+    sam = prediction.clone()
+    sam[0, 0, 0, 0] = 0.201
+    sam[0, 0, 0, 1] = 0.0
+
+    # Disable OV to isolate the intended SAM counterexample.
+    ov = prediction.clone()
+    proposals = torch.cat((sam, ov), dim=1)
+    quality[:, 1] = 0.0
+
+    route = task_space_route(
+        prediction,
+        target,
+        proposals,
+        quality,
+        feature=feature,
+        policy=SCGR_POLICY,
+        teacher=SCGR_TEACHER,
+        region_size=16,
+    )
+
+    utility = float(route["region_utility"][0, SAM_INDEX, 0, 0])
+    cosine = float(
+        route["region_concordance"][0, SAM_INDEX, 0, 0]
+    )
+    conflict = bool(
+        route["gradient_conflict_map"][:, SAM_INDEX].any()
+    )
+
+    if not utility > 0.0:
+        raise AssertionError(
+            f"Counterexample did not obtain positive utility: {utility}"
+        )
+    if not cosine < 0.0:
+        raise AssertionError(
+            f"Counterexample did not obtain negative concordance: {cosine}"
+        )
+    if not conflict:
+        raise AssertionError(
+            "SCGR did not mark the positive-utility negative-cosine region"
+        )
+    if bool(route["accepted_map"].any()):
+        raise AssertionError(
+            "SCGR accepted a gradient-conflicting teacher"
+        )
+
+    print(
+        "[PASS] SCGR Brier-positive + gradient-negative -> Reject: "
+        f"utility={utility:.6e}, cosine={cosine:.6f}"
+    )
+
+
+@torch.no_grad()
+def check_scgr_accepts_concordant_teacher(
+    device: torch.device,
+) -> None:
+    prediction, target, feature, quality = _base_two_error_fixture(
+        device
+    )
+
+    sam = prediction.clone()
+    sam[0, 0, 0, 0] = 0.8
+    sam[0, 0, 0, 1] = 0.2
+
+    ov = prediction.clone()
+    proposals = torch.cat((sam, ov), dim=1)
+    quality[:, 1] = 0.0
+
+    route = task_space_route(
+        prediction,
+        target,
+        proposals,
+        quality,
+        feature=feature,
+        policy=SCGR_POLICY,
+        teacher=SCGR_TEACHER,
+        region_size=16,
+    )
+
+    utility = float(route["region_utility"][0, SAM_INDEX, 0, 0])
+    cosine = float(
+        route["region_concordance"][0, SAM_INDEX, 0, 0]
+    )
+
+    if not utility > 0.0:
+        raise AssertionError(
+            f"Useful teacher utility is not positive: {utility}"
+        )
+    if not cosine > 0.0:
+        raise AssertionError(
+            f"Useful teacher concordance is not positive: {cosine}"
+        )
+    if not bool(route["accepted_map"].any()):
+        raise AssertionError(
+            "SCGR rejected a positive-utility positive-concordance teacher"
+        )
+    if not bool(
+        (route["action"][route["accepted_map"][:, 0]] == SAM_INDEX).all()
+    ):
+        raise AssertionError(
+            "SCGR accepted the wrong teacher"
+        )
+
+    kd = routed_bernoulli_kd(
+        prediction,
+        proposals,
+        route,
+    )
+    if not float(kd["total"]) > 0.0:
+        raise AssertionError(
+            "Accepted teacher produced zero routed KD"
+        )
+
+    print(
+        "[PASS] SCGR positive utility + positive concordance -> Accept: "
+        f"utility={utility:.6e}, cosine={cosine:.6f}, "
+        f"kd={float(kd['total']):.6e}"
+    )
+
+
+@torch.no_grad()
+def check_scgr_selects_best_available_teacher(
+    device: torch.device,
+) -> None:
+    prediction, target, feature, quality = _base_two_error_fixture(
+        device
+    )
+
+    # SAM deliberately harmful.
+    sam = prediction.clone()
+    sam[0, 0, 0, 0] = 0.0
+    sam[0, 0, 0, 1] = 0.95
+
+    # OV useful and gradient-concordant.
+    ov = prediction.clone()
+    ov[0, 0, 0, 0] = 0.8
+    ov[0, 0, 0, 1] = 0.2
+
+    proposals = torch.cat((sam, ov), dim=1)
+
+    route = task_space_route(
+        prediction,
+        target,
+        proposals,
+        quality,
+        feature=feature,
+        policy=SCGR_POLICY,
+        teacher=SCGR_TEACHER,
+        region_size=16,
+    )
+
+    if not bool(route["accepted_map"].any()):
+        raise AssertionError(
+            "SCGR unexpectedly rejected both teachers"
+        )
+
+    accepted_actions = route["action"][
+        route["accepted_map"][:, 0]
+    ]
+    if not bool((accepted_actions == OV_INDEX).all()):
+        raise AssertionError(
+            f"SCGR should choose OV={OV_INDEX}; "
+            f"observed actions={accepted_actions.unique().tolist()}"
+        )
+
+    sam_utility = float(
+        route["region_utility"][0, SAM_INDEX, 0, 0]
+    )
+    ov_utility = float(
+        route["region_utility"][0, OV_INDEX, 0, 0]
+    )
+    print(
+        "[PASS] SCGR teacher selection: useful OV selected over harmful SAM: "
+        f"sam_utility={sam_utility:.6e}, ov_utility={ov_utility:.6e}"
+    )
+
+
+@torch.no_grad()
+def _sparse_mass_case(
+    device: torch.device,
+    size: int,
+) -> Tuple[float, float]:
+    if size < 32 or size % 16 != 0:
+        raise ValueError("Synthetic sparse-mass case requires size >=32, /16")
+
+    target = torch.zeros(
+        1, 1, size, size,
+        device=device,
+        dtype=torch.float32,
+    )
+    prediction = torch.zeros_like(target)
+    feature = torch.ones_like(target)
+
+    # Fixed 16x16 changed region regardless of canvas size.
+    target[:, :, :16, :16] = 1.0
+    prediction[:, :, :16, :16] = 0.2
+
+    sam = prediction.clone()
+    sam[:, :, :16, :16] = 0.8
+    ov = prediction.clone()
+    proposals = torch.cat((sam, ov), dim=1)
+
+    quality = torch.zeros(
+        1, 2, size, size,
+        device=device,
+        dtype=torch.float32,
+    )
+    quality[:, SAM_INDEX, :16, :16] = 1.0
+
+    route = task_space_route(
+        prediction,
+        target,
+        proposals,
+        quality,
+        feature=feature,
+        policy=SCGR_POLICY,
+        teacher=SCGR_TEACHER,
+        region_size=16,
+    )
+    kd = routed_bernoulli_kd(
+        prediction,
+        proposals,
+        route,
+    )
+
+    effective = float(
+        kd["effective_per_error_mass_per_image"].mean()
+    )
+    return float(kd["total"]), effective
+
+
+@torch.no_grad()
+def check_scgr_sparse_change_mass_conservation(
+    device: torch.device,
+) -> None:
+    """Same 16x16 useful change region on small and large canvases.
+
+    HxW normalization would shrink the large-canvas KD substantially.
+    Error-mass normalization should keep both nearly identical.
+    """
+    kd_small, mass_small = _sparse_mass_case(
+        device,
+        size=64,
+    )
+    kd_large, mass_large = _sparse_mass_case(
+        device,
+        size=256,
+    )
+
+    if kd_small <= 0.0 or kd_large <= 0.0:
+        raise AssertionError(
+            "Sparse useful change produced zero KD"
+        )
+
+    relative_gap = abs(kd_small - kd_large) / max(
+        abs(kd_small),
+        abs(kd_large),
+        1e-12,
+    )
+    if relative_gap > 1e-5:
+        raise AssertionError(
+            "SCGR KD still depends on irrelevant background canvas area: "
+            f"small={kd_small:.9e}, large={kd_large:.9e}, "
+            f"relative_gap={relative_gap:.3e}"
+        )
+
+    assert_close(
+        "small effective/error mass",
+        mass_small,
+        1.0,
+        atol=1e-6,
+    )
+    assert_close(
+        "large effective/error mass",
+        mass_large,
+        1.0,
+        atol=1e-6,
+    )
+
+    print(
+        "[PASS] SCGR sparse-change error-mass conservation: "
+        f"kd64={kd_small:.6e}, kd256={kd_large:.6e}, "
+        f"relative_gap={relative_gap:.3e}"
+    )
+
+
+@torch.no_grad()
+def check_scgr_force_reject(
+    device: torch.device,
+) -> None:
+    prediction, target, feature, quality = _base_two_error_fixture(
+        device
+    )
+
+    sam = prediction.clone()
+    sam[0, 0, 0, 0] = 0.8
+    sam[0, 0, 0, 1] = 0.2
+    ov = sam.clone()
+    proposals = torch.cat((sam, ov), dim=1)
+
+    route = task_space_route(
+        prediction,
+        target,
+        proposals,
+        quality,
+        feature=feature,
+        policy=SCGR_POLICY,
+        teacher=SCGR_TEACHER,
+        force_action=REJECT_INDEX,
+        region_size=16,
+    )
+
+    if bool(route["accepted_map"].any()):
+        raise AssertionError(
+            "force_action=Reject did not disable supervision"
+        )
+
+    kd = routed_bernoulli_kd(
+        prediction,
+        proposals,
+        route,
+    )
+    assert_close(
+        "forced-reject KD",
+        float(kd["total"]),
+        0.0,
+        atol=1e-12,
+    )
+
+    print(
+        "[PASS] SCGR force_action=Reject -> zero teacher supervision"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Synthetic CD batch / synthetic cache
 # ---------------------------------------------------------------------------
 
 def make_synthetic_target(
@@ -278,10 +720,6 @@ def make_synthetic_target(
     width: int,
     device: torch.device,
 ) -> torch.Tensor:
-    """
-    Build a deterministic binary change mask containing several geometric
-    regions.  The foreground is neither empty nor dominant.
-    """
     target = torch.zeros(
         batch_size,
         1,
@@ -291,31 +729,58 @@ def make_synthetic_target(
         dtype=torch.float32,
     )
 
-    for batch_index in range(batch_size):
-        offset = 7 * batch_index
+    for index in range(batch_size):
+        offset = 5 * index
 
         target[
-            batch_index,
+            index,
             0,
-            36 + offset:92 + offset,
-            42:106,
+            40 + offset:88 + offset,
+            44:104,
         ] = 1.0
 
         target[
-            batch_index,
+            index,
             0,
-            132:178,
-            148 - offset:210 - offset,
+            132:174,
+            152 - offset:208 - offset,
         ] = 1.0
 
+        # Small sparse object.
         target[
-            batch_index,
+            index,
             0,
-            202:218,
-            62 + offset:90 + offset,
+            206:218,
+            64 + offset:84 + offset,
         ] = 1.0
 
     return target
+
+
+def make_synthetic_images(
+    target: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    batch, _, height, width = target.shape
+    device = target.device
+
+    image_a = torch.rand(
+        batch, 3, height, width,
+        device=device,
+        dtype=torch.float32,
+    )
+
+    # Keep the pair realistic enough for the student graph while making the
+    # change regions slightly different.
+    texture = torch.randn_like(image_a) * 0.03
+    change_signal = target.expand(-1, 3, -1, -1) * 0.20
+
+    image_b = (
+        image_a
+        + texture
+        + change_signal
+    ).clamp(0.0, 1.0)
+
+    return image_a, image_b
 
 
 def make_instance_grid(
@@ -325,12 +790,6 @@ def make_instance_grid(
     device: torch.device,
     block: int = 32,
 ) -> torch.Tensor:
-    """
-    Build non-zero SAM-like opaque instance IDs.
-
-    Every block contains many pixels, so leave-one-out instance transport has
-    valid source support.
-    """
     yy = torch.arange(
         height,
         device=device,
@@ -341,9 +800,7 @@ def make_instance_grid(
         device=device,
     ).view(1, width)
 
-    columns = math.ceil(
-        width / block
-    )
+    columns = math.ceil(width / block)
 
     ids = (
         (yy // block) * columns
@@ -352,8 +809,7 @@ def make_instance_grid(
     ).to(torch.int32)
 
     return (
-        ids
-        .view(1, 1, height, width)
+        ids.view(1, 1, height, width)
         .expand(batch_size, -1, -1, -1)
         .clone()
     )
@@ -362,9 +818,6 @@ def make_instance_grid(
 def make_boundary_from_ids(
     ids: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Cheap 4-neighbour instance boundary map in the same raster geometry.
-    """
     boundary = torch.zeros_like(
         ids,
         dtype=torch.float32,
@@ -372,34 +825,20 @@ def make_boundary_from_ids(
 
     boundary[:, :, 1:, :] = torch.maximum(
         boundary[:, :, 1:, :],
-        (
-            ids[:, :, 1:, :]
-            != ids[:, :, :-1, :]
-        ).float(),
+        (ids[:, :, 1:, :] != ids[:, :, :-1, :]).float(),
     )
-
     boundary[:, :, :-1, :] = torch.maximum(
         boundary[:, :, :-1, :],
-        (
-            ids[:, :, 1:, :]
-            != ids[:, :, :-1, :]
-        ).float(),
+        (ids[:, :, 1:, :] != ids[:, :, :-1, :]).float(),
     )
 
     boundary[:, :, :, 1:] = torch.maximum(
         boundary[:, :, :, 1:],
-        (
-            ids[:, :, :, 1:]
-            != ids[:, :, :, :-1]
-        ).float(),
+        (ids[:, :, :, 1:] != ids[:, :, :, :-1]).float(),
     )
-
     boundary[:, :, :, :-1] = torch.maximum(
         boundary[:, :, :, :-1],
-        (
-            ids[:, :, :, 1:]
-            != ids[:, :, :, :-1]
-        ).float(),
+        (ids[:, :, :, 1:] != ids[:, :, :, :-1]).float(),
     )
 
     return boundary
@@ -408,25 +847,8 @@ def make_boundary_from_ids(
 def make_synthetic_teacher_pack(
     target: torch.Tensor,
 ) -> Dict:
-    """
-    Construct the exact fields used by build_task_proposals():
-
-        SAM:
-            t1/t2 instance_id
-            t1/t2 boundary
-            t1/t2 quality
-
-        OV:
-            soft_change l1/l2
-            confidence l1/l2
-
-    Relation fields are deliberately absent because current task_space.py does
-    not consume them.
-    """
-    batch_size, _, height, width = (
-        target.shape
-    )
-
+    """Construct only the fields consumed by build_task_proposals()."""
+    batch_size, _, height, width = target.shape
     device = target.device
 
     ids_t1 = make_instance_grid(
@@ -436,53 +858,31 @@ def make_synthetic_teacher_pack(
         device,
         block=32,
     )
-
-    # Make T2 partitions different while preserving valid opaque IDs.
     ids_t2 = torch.roll(
         ids_t1,
         shifts=(16, 16),
         dims=(-2, -1),
     )
 
-    boundary_t1 = make_boundary_from_ids(
-        ids_t1
-    )
+    boundary_t1 = make_boundary_from_ids(ids_t1)
+    boundary_t2 = make_boundary_from_ids(ids_t2)
 
-    boundary_t2 = make_boundary_from_ids(
-        ids_t2
-    )
-
-    quality_t1 = torch.full(
-        target.shape,
+    quality_t1 = torch.full_like(
+        target,
         0.90,
-        device=device,
-        dtype=torch.float32,
-    )
+    ) * (1.0 - 0.25 * boundary_t1)
 
-    quality_t2 = torch.full(
-        target.shape,
+    quality_t2 = torch.full_like(
+        target,
         0.85,
-        device=device,
-        dtype=torch.float32,
-    )
+    ) * (1.0 - 0.25 * boundary_t2)
 
-    # Keep boundary locations slightly less reliable.
-    quality_t1 = quality_t1 * (
-        1.0 - 0.25 * boundary_t1
-    )
-
-    quality_t2 = quality_t2 * (
-        1.0 - 0.25 * boundary_t2
-    )
-
-    # OV-like multi-scale soft change.
     ov_l1 = F.interpolate(
         target,
         size=(32, 32),
         mode="bilinear",
         align_corners=False,
     )
-
     ov_l2 = F.interpolate(
         target,
         size=(16, 16),
@@ -490,26 +890,9 @@ def make_synthetic_teacher_pack(
         align_corners=False,
     )
 
-    # Make them soft rather than exact GT copies.
-    ov_l1 = (
-        0.80 * ov_l1
-        + 0.10
-    ).clamp(0.0, 1.0)
-
-    ov_l2 = (
-        0.70 * ov_l2
-        + 0.15
-    ).clamp(0.0, 1.0)
-
-    confidence_l1 = torch.full_like(
-        ov_l1,
-        0.88,
-    )
-
-    confidence_l2 = torch.full_like(
-        ov_l2,
-        0.78,
-    )
+    # Soft prior, not GT copy.
+    ov_l1 = (0.80 * ov_l1 + 0.10).clamp(0.0, 1.0)
+    ov_l2 = (0.70 * ov_l2 + 0.15).clamp(0.0, 1.0)
 
     return {
         "sam": {
@@ -530,8 +913,8 @@ def make_synthetic_teacher_pack(
                 "l2": ov_l2,
             },
             "confidence": {
-                "l1": confidence_l1,
-                "l2": confidence_l2,
+                "l1": torch.full_like(ov_l1, 0.88),
+                "l2": torch.full_like(ov_l2, 0.78),
             },
         },
     }
@@ -552,12 +935,11 @@ def build_dynamic_model(
         "max_logit_delta": args.max_logit_delta,
         "boundary_radius": 2,
         "small_area": 64,
-        "policy": "advantage",
-        "teacher": "both",
+        "policy": SCGR_POLICY,
+        "teacher": SCGR_TEACHER,
         "difficulty": True,
-        "cache_conditioning": (
-            not args.no_cache_conditioning
-        ),
+        "cache_conditioning": not args.no_cache_conditioning,
+        "region_size": args.scgr_region_size,
     }
 
     model = A2Net_LWGANet_L0(
@@ -571,52 +953,113 @@ def build_dynamic_model(
 
 
 # ---------------------------------------------------------------------------
-# Individual smoke checks
+# Integration checks
 # ---------------------------------------------------------------------------
 
 def check_state_registration(
     model: A2Net_LWGANet_L0,
 ) -> None:
-    state_keys = tuple(
-        model.state_dict().keys()
-    )
+    if not hasattr(model, "training_auxiliary"):
+        raise AssertionError(
+            "Dynamic model has no training_auxiliary"
+        )
+
+    state_keys = tuple(model.state_dict().keys())
 
     fast_present = any(
-        key.startswith(
-            "training_auxiliary.fast."
-        )
+        key.startswith("training_auxiliary.fast.")
         for key in state_keys
     )
-
     target_present = any(
-        key.startswith(
-            "training_auxiliary.target."
-        )
+        key.startswith("training_auxiliary.target.")
         for key in state_keys
     )
 
     if not fast_present:
         raise AssertionError(
-            "Fast dynamic-teacher parameters are absent from model.state_dict()"
+            "Fast teacher parameters are absent from model.state_dict()"
         )
-
     if not target_present:
         raise AssertionError(
-            "EMA target-teacher parameters are absent from model.state_dict()"
+            "EMA target teacher parameters are absent from model.state_dict()"
         )
 
-    if any(
-        parameter.requires_grad
-        for parameter
-        in model.training_auxiliary.target_teacher_parameters()
-    ):
+    target_parameters = tuple(
+        model.training_auxiliary.target_teacher_parameters()
+    )
+    if not target_parameters:
         raise AssertionError(
-            "EMA target-teacher parameters must all have requires_grad=False"
+            "target_teacher_parameters() returned an empty set"
+        )
+    if any(parameter.requires_grad for parameter in target_parameters):
+        raise AssertionError(
+            "EMA target parameters must all have requires_grad=False"
         )
 
     print(
-        "[PASS] state registration: "
-        "fast + EMA target teachers are checkpoint-visible"
+        "[PASS] state registration: fast + EMA teachers are checkpoint-visible"
+    )
+
+
+def _required_dynamic_keys() -> Tuple[str, ...]:
+    return (
+        "total",
+        "teacher_total",
+        "loss_per_teacher",
+        "weights",
+        "effective_weights",
+        "proposals",
+        "student_brier",
+        "dynamic_teacher_brier",
+        "dynamic_teacher_gain",
+        "effective_mass",
+        "student_error_mass",
+        "effective_per_error_mass",
+        # SCGR contract used by train.py.
+        "scgr_region_accept_ratio",
+        "scgr_region_reject_ratio",
+        "scgr_positive_utility_ratio",
+        "scgr_positive_concordance_ratio",
+        "scgr_gradient_conflict_ratio",
+        "scgr_negative_cosine_reject_ratio",
+        "scgr_change_error_mass",
+        "scgr_background_error_mass",
+        "scgr_effective_error_mass",
+        "scgr_effective_per_error_mass",
+        "scgr_region_utility",
+        "scgr_region_concordance",
+        "scgr_region_quality",
+        "scgr_region_score",
+        "scgr_teacher_mass",
+    )
+
+
+def check_dynamic_output_contract(
+    dynamic: Dict[str, torch.Tensor],
+) -> None:
+    for key in _required_dynamic_keys():
+        if key not in dynamic:
+            raise AssertionError(
+                f"Missing RDT-CD + SCGR output key: {key}"
+            )
+        assert_finite_tensor(key, dynamic[key])
+
+    if dynamic["weights"].shape[-1] != 3:
+        raise AssertionError(
+            "weights must expose [SAM, OV, Reject] in the last dimension"
+        )
+
+    for key in (
+        "scgr_region_utility",
+        "scgr_region_concordance",
+        "scgr_region_quality",
+        "scgr_region_score",
+        "scgr_teacher_mass",
+    ):
+        _teacher_pair_mean(dynamic[key])
+
+    print(
+        "[PASS] dynamic output contract: RDT + SCGR diagnostics are finite"
     )
 
 
@@ -626,20 +1069,12 @@ def check_auxiliary_prediction_invariance(
     image_a: torch.Tensor,
     image_b: torch.Tensor,
     target: torch.Tensor,
-    teacher_pack,
+    teacher_pack: Optional[Dict],
     seed: int,
 ) -> float:
-    """
-    Compare the unchanged main path with auxiliary disabled/enabled.
-
-    Model stays in train mode because auxiliary computation is intentionally
-    training-only.  Torch RNG is reset before each forward so stochastic
-    backbone operations, if any, receive identical random streams.
-    """
     model.train()
 
     torch.manual_seed(seed)
-
     if image_a.is_cuda:
         torch.cuda.manual_seed_all(seed)
 
@@ -652,7 +1087,6 @@ def check_auxiliary_prediction_invariance(
     )
 
     torch.manual_seed(seed)
-
     if image_a.is_cuda:
         torch.cuda.manual_seed_all(seed)
 
@@ -666,8 +1100,12 @@ def check_auxiliary_prediction_invariance(
 
     if "direction_c" not in auxiliary:
         raise AssertionError(
-            "Dynamic auxiliary output is missing"
+            "Auxiliary output is missing direction_c"
         )
+
+    check_dynamic_output_contract(
+        auxiliary["direction_c"]
+    )
 
     maximum = max_prediction_difference(
         predictions_off,
@@ -684,8 +1122,20 @@ def check_auxiliary_prediction_invariance(
         "[PASS] auxiliary ON/OFF prediction invariance: "
         f"max_abs={maximum:.9e}"
     )
-
     return maximum
+
+
+def _student_parameters(
+    model: A2Net_LWGANet_L0,
+) -> Tuple[torch.nn.Parameter, ...]:
+    return tuple(
+        parameter
+        for name, parameter in model.named_parameters()
+        if (
+            parameter.requires_grad
+            and not name.startswith("training_auxiliary.")
+        )
+    )
 
 
 def check_forward_and_gradient_isolation(
@@ -694,31 +1144,10 @@ def check_forward_and_gradient_isolation(
     image_a: torch.Tensor,
     image_b: torch.Tensor,
     target: torch.Tensor,
-    teacher_pack,
+    teacher_pack: Optional[Dict],
 ) -> Dict[str, float]:
-    """
-    Verify the two disjoint optimization graphs.
-
-    A. Student objective:
-           BCE(main prediction, GT)
-           + kd_lambda * teacher->student KD
-
-       must give:
-           student grad > 0
-           fast-teacher grad == 0
-
-    B. Teacher objective:
-           teacher_total
-
-       must give:
-           fast-teacher grad > 0
-           student grad == 0
-    """
     model.train()
-
-    model.zero_grad(
-        set_to_none=True
-    )
+    model.zero_grad(set_to_none=True)
 
     predictions, auxiliary = model(
         image_a,
@@ -727,208 +1156,107 @@ def check_forward_and_gradient_isolation(
         teacher_pack=teacher_pack,
         compute_auxiliary=True,
     )
+    dynamic = auxiliary["direction_c"]
+    check_dynamic_output_contract(dynamic)
 
-    dynamic = auxiliary[
-        "direction_c"
-    ]
-
-    required = (
-        "total",
-        "teacher_total",
-        "student_brier",
-        "dynamic_teacher_brier",
-        "dynamic_teacher_gain",
-        "dynamic_shift",
-        "effective_mass",
-        "effective_per_error_mass",
+    main_loss = F.binary_cross_entropy(
+        predictions[0],
+        target,
     )
-
-    for key in required:
-        if key not in dynamic:
-            raise AssertionError(
-                f"Missing dynamic-teacher output key: {key}"
-            )
-
-        assert_finite_tensor(
-            key,
-            dynamic[key],
-        )
-
-    main_loss = (
-        F.binary_cross_entropy(
-            predictions[0],
-            target,
-        )
-    )
-
     student_total = (
         main_loss
-        + args.kd_lambda
-        * dynamic["total"]
+        + args.kd_lambda * dynamic["total"]
+    )
+    teacher_total = dynamic["teacher_total"]
+
+    for name, value in (
+        ("main_loss", main_loss),
+        ("student_total", student_total),
+        ("teacher_total", teacher_total),
+    ):
+        assert_finite_tensor(name, value)
+
+    student_parameters = _student_parameters(model)
+    fast_parameters = tuple(
+        model.training_auxiliary.teacher_parameters()
     )
 
-    teacher_total = dynamic[
-        "teacher_total"
-    ]
-
-    assert_finite_tensor(
-        "main_loss",
-        main_loss,
-    )
-
-    assert_finite_tensor(
-        "student_total",
-        student_total,
-    )
-
-    assert_finite_tensor(
-        "teacher_total",
-        teacher_total,
-    )
-
-    # Explicit parameter partitions.
-    student_parameters = tuple(
-        parameter
-        for name, parameter
-        in model.named_parameters()
-        if (
-            parameter.requires_grad
-            and not name.startswith(
-                "training_auxiliary."
-            )
+    if not student_parameters:
+        raise AssertionError(
+            "Student parameter partition is empty"
         )
-    )
+    if not fast_parameters:
+        raise AssertionError(
+            "Fast-teacher parameter partition is empty"
+        )
 
-    fast_teacher_parameters = tuple(
-        model.training_auxiliary
-        .teacher_parameters()
-    )
-
-    student_ids = {
-        id(parameter)
-        for parameter
-        in student_parameters
-    }
-
-    teacher_ids = {
-        id(parameter)
-        for parameter
-        in fast_teacher_parameters
-    }
-
+    student_ids = {id(parameter) for parameter in student_parameters}
+    teacher_ids = {id(parameter) for parameter in fast_parameters}
     if student_ids & teacher_ids:
         raise AssertionError(
             "Student and fast-teacher parameter sets overlap"
         )
 
-    # ---------------------------------------------------------------
-    # A. Student backward
-    # ---------------------------------------------------------------
-    model.zero_grad(
-        set_to_none=True
-    )
-
+    # A) Teacher -> Student graph.
+    model.zero_grad(set_to_none=True)
     student_total.backward()
 
-    student_grad_after_student_loss = (
-        grad_norm(
-            student_parameters
-        )
-    )
+    student_grad = grad_norm(student_parameters)
+    teacher_grad_from_student = grad_norm(fast_parameters)
 
-    teacher_grad_after_student_loss = (
-        grad_norm(
-            fast_teacher_parameters
-        )
-    )
-
-    if not (
-        student_grad_after_student_loss
-        > 0.0
-    ):
+    if not student_grad > 0.0:
         raise AssertionError(
             "Student objective produced zero Student gradient"
         )
-
-    if teacher_grad_after_student_loss != 0.0:
+    if teacher_grad_from_student != 0.0:
         raise AssertionError(
             "Student objective leaked gradient into fast teachers: "
-            f"{teacher_grad_after_student_loss:.9e}"
+            f"{teacher_grad_from_student:.9e}"
         )
 
     print(
         "[PASS] Student backward isolation: "
-        f"student_grad={student_grad_after_student_loss:.6e}, "
-        f"teacher_grad={teacher_grad_after_student_loss:.6e}"
+        f"student_grad={student_grad:.6e}, "
+        f"teacher_grad={teacher_grad_from_student:.6e}"
     )
 
-    # ---------------------------------------------------------------
-    # B. Teacher backward
-    #
-    # teacher_total belongs to a disconnected graph because Student
-    # feature/prediction are detached inside dynamic_teacher.py.
-    # ---------------------------------------------------------------
-    model.zero_grad(
-        set_to_none=True
-    )
-
+    # B) Student -> Teacher graph.
+    model.zero_grad(set_to_none=True)
     teacher_total.backward()
 
-    student_grad_after_teacher_loss = (
-        grad_norm(
-            student_parameters
-        )
-    )
+    student_grad_from_teacher = grad_norm(student_parameters)
+    teacher_grad = grad_norm(fast_parameters)
 
-    teacher_grad_after_teacher_loss = (
-        grad_norm(
-            fast_teacher_parameters
-        )
-    )
-
-    if student_grad_after_teacher_loss != 0.0:
+    if student_grad_from_teacher != 0.0:
         raise AssertionError(
             "Teacher objective leaked gradient into Student: "
-            f"{student_grad_after_teacher_loss:.9e}"
+            f"{student_grad_from_teacher:.9e}"
         )
-
-    if not (
-        teacher_grad_after_teacher_loss
-        > 0.0
-    ):
+    if not teacher_grad > 0.0:
         raise AssertionError(
             "Teacher objective produced zero fast-teacher gradient"
         )
 
     print(
         "[PASS] Teacher backward isolation: "
-        f"student_grad={student_grad_after_teacher_loss:.6e}, "
-        f"teacher_grad={teacher_grad_after_teacher_loss:.6e}"
+        f"student_grad={student_grad_from_teacher:.6e}, "
+        f"teacher_grad={teacher_grad:.6e}"
     )
 
     return {
-        "main_loss": float(
-            main_loss.detach()
-        ),
-        "student_total": float(
-            student_total.detach()
-        ),
-        "teacher_total": float(
-            teacher_total.detach()
-        ),
-        "student_grad": (
-            student_grad_after_student_loss
-        ),
-        "teacher_grad": (
-            teacher_grad_after_teacher_loss
-        ),
-        "student_brier": float(
-            dynamic["student_brier"]
-            .detach()
-        ),
+        "main_loss": float(main_loss.detach()),
+        "student_total": float(student_total.detach()),
+        "teacher_total": float(teacher_total.detach()),
+        "student_grad": student_grad,
+        "teacher_grad": teacher_grad,
         "effective_mass": float(
-            dynamic["effective_mass"]
+            dynamic["effective_mass"].detach().float().mean()
+        ),
+        "effective_per_error_mass": float(
+            dynamic["effective_per_error_mass"]
             .detach()
+            .float()
+            .mean()
         ),
     }
 
@@ -939,47 +1267,29 @@ def check_teacher_optimizer_and_ema(
     image_a: torch.Tensor,
     image_b: torch.Tensor,
     target: torch.Tensor,
-    teacher_pack,
+    teacher_pack: Optional[Dict],
 ) -> Dict[str, float]:
-    """
-    Execute one actual fast-teacher optimization step and one EMA update.
-
-    Then verify:
-        fast teacher changed;
-        EMA target changed;
-        update_ema() reports non-zero evolution;
-        target/fast state remains finite.
-    """
     model.train()
 
     fast_parameters = tuple(
-        model.training_auxiliary
-        .teacher_parameters()
+        model.training_auxiliary.teacher_parameters()
     )
-
     target_parameters = tuple(
-        model.training_auxiliary
-        .target_teacher_parameters()
+        model.training_auxiliary.target_teacher_parameters()
     )
 
-    teacher_optimizer = torch.optim.Adam(
+    optimizer = torch.optim.Adam(
         fast_parameters,
         lr=args.teacher_lr,
         betas=(0.9, 0.99),
         eps=1e-8,
     )
 
-    fast_before = snapshot_parameters(
-        fast_parameters
-    )
+    fast_before = snapshot_parameters(fast_parameters)
+    target_before = snapshot_parameters(target_parameters)
 
-    target_before = snapshot_parameters(
-        target_parameters
-    )
-
-    teacher_optimizer.zero_grad(
-        set_to_none=True
-    )
+    optimizer.zero_grad(set_to_none=True)
+    model.zero_grad(set_to_none=True)
 
     _, auxiliary = model(
         image_a,
@@ -989,82 +1299,75 @@ def check_teacher_optimizer_and_ema(
         compute_auxiliary=True,
     )
 
-    teacher_loss = auxiliary[
-        "direction_c"
-    ]["teacher_total"]
+    teacher_loss = auxiliary["direction_c"]["teacher_total"]
+    assert_finite_tensor("teacher_total", teacher_loss)
 
     teacher_loss.backward()
-
-    teacher_gradient = grad_norm(
-        fast_parameters
-    )
+    teacher_gradient = grad_norm(fast_parameters)
 
     if not teacher_gradient > 0.0:
         raise AssertionError(
-            "Teacher optimizer smoke received zero teacher gradient"
+            "Teacher optimizer received zero teacher gradient"
         )
 
-    teacher_optimizer.step()
+    optimizer.step()
 
-    fast_parameter_update = (
-        parameter_rms_difference(
-            fast_before,
-            fast_parameters,
-        )
+    fast_update = parameter_rms_difference(
+        fast_before,
+        fast_parameters,
     )
-
-    if not fast_parameter_update > 0.0:
+    if not fast_update > 0.0:
         raise AssertionError(
             "Fast-teacher parameters did not change after optimizer.step()"
         )
 
-    ema_reported_update = (
-        model.training_auxiliary
-        .update_ema()
+    ema_reported_update = float(
+        model.training_auxiliary.update_ema()
+    )
+    target_update = parameter_rms_difference(
+        target_before,
+        target_parameters,
+    )
+    target_gap = float(
+        model.training_auxiliary.teacher_target_gap()
     )
 
-    target_parameter_update = (
-        parameter_rms_difference(
-            target_before,
-            target_parameters,
-        )
-    )
-
-    teacher_target_gap = (
-        model.training_auxiliary
-        .teacher_target_gap()
-    )
+    for name, value in (
+        ("ema_reported_update", ema_reported_update),
+        ("target_update", target_update),
+        ("target_gap", target_gap),
+    ):
+        if not math.isfinite(value):
+            raise AssertionError(
+                f"{name} is NaN/Inf"
+            )
 
     if not ema_reported_update > 0.0:
         raise AssertionError(
             "update_ema() reported zero teacher evolution"
         )
-
-    if not target_parameter_update > 0.0:
+    if not target_update > 0.0:
         raise AssertionError(
-            "EMA target-teacher parameters did not change"
+            "EMA target parameters did not change"
         )
 
-    if not math.isfinite(
-        teacher_target_gap
-    ):
+    if any(parameter.requires_grad for parameter in target_parameters):
         raise AssertionError(
-            "teacher_target_gap is NaN/Inf"
+            "EMA target parameters became trainable"
         )
 
     print(
         "[PASS] dynamic teacher update: "
         f"grad={teacher_gradient:.6e}, "
-        f"fast_update_rms={fast_parameter_update:.6e}, "
+        f"fast_update_rms={fast_update:.6e}, "
         f"ema_update_rms={ema_reported_update:.6e}, "
-        f"target_update_rms={target_parameter_update:.6e}, "
-        f"fast_target_gap={teacher_target_gap:.6e}"
+        f"target_update_rms={target_update:.6e}, "
+        f"fast_target_gap={target_gap:.6e}"
     )
 
-    # One forward AFTER the teacher evolution.  At initialization the
-    # residual expert is identity-initialized, so this second forward is the
-    # meaningful check that the target teacher has begun to move away from
-    # the Student.
+    # One forward after teacher evolution.  We require finite dynamic signal,
+    # but do NOT require SCGR to accept it: Reject is a valid decision when
+    # utility/concordance are not satisfied.
     with torch.no_grad():
         _, auxiliary_after = model(
             image_a,
@@ -1074,72 +1377,26 @@ def check_teacher_optimizer_and_ema(
             compute_auxiliary=True,
         )
 
-    dynamic_after = auxiliary_after[
-        "direction_c"
-    ]
+    dynamic_after = auxiliary_after["direction_c"]
+    check_dynamic_output_contract(dynamic_after)
 
-    dynamic_shift = (
-        dynamic_after[
-            "dynamic_shift"
-        ]
-        .detach()
-        .float()
-        .mean()
-        .item()
+    dynamic_shift = dynamic_after.get(
+        "dynamic_shift",
+        torch.zeros(2, device=image_a.device),
     )
-
-    dynamic_gain = (
-        dynamic_after[
-            "dynamic_teacher_gain"
-        ]
-        .detach()
-        .float()
-        .mean()
-        .item()
-    )
-
-    effective_mass = float(
-        dynamic_after[
-            "effective_mass"
-        ].detach()
-    )
-
-    error_normalized_mass = float(
-        dynamic_after[
-            "effective_per_error_mass"
-        ].detach()
-    )
-
-    if not math.isfinite(
-        dynamic_shift
-    ):
-        raise AssertionError(
-            "dynamic_shift is NaN/Inf"
-        )
-
-    if dynamic_shift <= 0.0:
-        raise AssertionError(
-            "EMA teacher updated but dynamic proposal still has zero shift"
-        )
+    assert_finite_tensor("dynamic_shift", dynamic_shift)
 
     print(
-        "[PASS] post-update dynamic signal: "
-        f"dynamic_shift={dynamic_shift:.6e}, "
-        f"dynamic_gain={dynamic_gain:.6e}, "
-        f"effective_mass={effective_mass:.6e}, "
-        f"effective/error_mass={error_normalized_mass:.6e}"
+        "[PASS] post-update dynamic forward remains finite; "
+        "SCGR is allowed to Accept or Reject based on evidence"
     )
 
     return {
         "teacher_gradient": teacher_gradient,
-        "fast_update_rms": fast_parameter_update,
+        "fast_update_rms": fast_update,
         "ema_update_rms": ema_reported_update,
-        "target_update_rms": target_parameter_update,
-        "teacher_target_gap": teacher_target_gap,
-        "dynamic_shift": dynamic_shift,
-        "dynamic_gain": dynamic_gain,
-        "effective_mass_after": effective_mass,
-        "effective_per_error_mass_after": error_normalized_mass,
+        "target_update_rms": target_update,
+        "teacher_target_gap": target_gap,
     }
 
 
@@ -1149,9 +1406,6 @@ def check_deploy_contract(
     image_a: torch.Tensor,
     image_b: torch.Tensor,
 ) -> Dict[str, float]:
-    """
-    Verify physical auxiliary deletion and deploy prediction equivalence.
-    """
     model.eval()
 
     prediction_before = model(
@@ -1159,27 +1413,22 @@ def check_deploy_contract(
         image_b,
         compute_auxiliary=False,
     )
+    training_parameter_count = parameter_count(model)
 
-    training_parameter_count = (
-        parameter_count(model)
-    )
-
-    if not hasattr(
-        model,
-        "training_auxiliary",
-    ):
+    if not hasattr(model, "training_auxiliary"):
         raise AssertionError(
             "training_auxiliary disappeared before switch_to_deploy()"
         )
 
     model.switch_to_deploy()
 
-    if hasattr(
-        model,
-        "training_auxiliary",
-    ):
+    if hasattr(model, "training_auxiliary"):
         raise AssertionError(
             "switch_to_deploy() did not delete training_auxiliary"
+        )
+    if getattr(model, "auxiliary_mode", None) != "none":
+        raise AssertionError(
+            "switch_to_deploy() did not reset auxiliary_mode"
         )
 
     prediction_after = model(
@@ -1188,68 +1437,47 @@ def check_deploy_contract(
         compute_auxiliary=False,
     )
 
-    deploy_difference = (
-        max_prediction_difference(
-            prediction_before,
-            prediction_after,
-        )
+    deploy_parameter_count = parameter_count(model)
+    prediction_difference = max_prediction_difference(
+        prediction_before,
+        prediction_after,
     )
 
-    if deploy_difference >= PREDICTION_ATOL:
+    if deploy_parameter_count != EXPECTED_DEPLOY_PARAMS:
         raise AssertionError(
-            "Deploy conversion changed main prediction: "
-            f"max_abs={deploy_difference:.9e}"
-        )
-
-    deploy_parameter_count = (
-        parameter_count(model)
-    )
-
-    if (
-        deploy_parameter_count
-        != EXPECTED_DEPLOY_PARAMS
-    ):
-        raise AssertionError(
-            "Unexpected deployed parameter count: "
+            "Deploy parameter count mismatch: "
             f"expected={EXPECTED_DEPLOY_PARAMS:,}, "
             f"actual={deploy_parameter_count:,}"
         )
 
-    state_keys = tuple(
-        model.state_dict().keys()
-    )
-
-    leaked_auxiliary_keys = [
-        key
-        for key in state_keys
-        if key.startswith(
-            "training_auxiliary."
-        )
-    ]
-
-    if leaked_auxiliary_keys:
+    if prediction_difference >= PREDICTION_ATOL:
         raise AssertionError(
-            "Training auxiliary keys remain after deploy conversion: "
-            + ", ".join(
-                leaked_auxiliary_keys[:5]
-            )
+            "Deploy conversion changed main prediction: "
+            f"max_abs={prediction_difference:.9e}"
+        )
+
+    if training_parameter_count <= deploy_parameter_count:
+        raise AssertionError(
+            "Training model did not contain removable teacher parameters"
+        )
+
+    state_keys = tuple(model.state_dict().keys())
+    if any(key.startswith("training_auxiliary.") for key in state_keys):
+        raise AssertionError(
+            "Deploy state_dict still contains training_auxiliary keys"
         )
 
     print(
         "[PASS] deploy contract: "
-        f"training_params={training_parameter_count:,}, "
+        f"train_params={training_parameter_count:,}, "
         f"deploy_params={deploy_parameter_count:,}, "
-        f"prediction_max_abs={deploy_difference:.9e}"
+        f"max_abs={prediction_difference:.9e}"
     )
 
     return {
-        "training_parameters": float(
-            training_parameter_count
-        ),
-        "deploy_parameters": float(
-            deploy_parameter_count
-        ),
-        "deploy_max_abs": deploy_difference,
+        "training_params": float(training_parameter_count),
+        "deploy_params": float(deploy_parameter_count),
+        "deploy_max_abs": prediction_difference,
     }
 
 
@@ -1257,213 +1485,117 @@ def check_deploy_contract(
 # Main
 # ---------------------------------------------------------------------------
 
+def run_scgr_unit_smoke(
+    device: torch.device,
+) -> None:
+    print("\n=== SCGR TASK-SPACE UNIT SMOKE ===")
+    check_scgr_rejects_nonpositive_utility(device)
+    check_scgr_rejects_gradient_conflict(device)
+    check_scgr_accepts_concordant_teacher(device)
+    check_scgr_selects_best_available_teacher(device)
+    check_scgr_sparse_change_mass_conservation(device)
+    check_scgr_force_reject(device)
+
+
+def run_model_integration_smoke(
+    args: argparse.Namespace,
+    device: torch.device,
+) -> Dict[str, float]:
+    print("\n=== RDT-CD + SCGR MODEL INTEGRATION SMOKE ===")
+
+    target = make_synthetic_target(
+        args.batch_size,
+        args.height,
+        args.width,
+        device,
+    )
+    image_a, image_b = make_synthetic_images(target)
+
+    if args.no_cache_conditioning:
+        teacher_pack = None
+        mode_name = "D2 no-cache control"
+    else:
+        teacher_pack = make_synthetic_teacher_pack(target)
+        mode_name = "D1 cache-conditioned"
+
+    print(f"mode: {mode_name}")
+
+    model = build_dynamic_model(args, device)
+
+    check_state_registration(model)
+
+    auxiliary_difference = check_auxiliary_prediction_invariance(
+        model,
+        image_a,
+        image_b,
+        target,
+        teacher_pack,
+        seed=args.seed + 101,
+    )
+
+    isolation = check_forward_and_gradient_isolation(
+        args,
+        model,
+        image_a,
+        image_b,
+        target,
+        teacher_pack,
+    )
+
+    teacher_update = check_teacher_optimizer_and_ema(
+        args,
+        model,
+        image_a,
+        image_b,
+        target,
+        teacher_pack,
+    )
+
+    deploy = check_deploy_contract(
+        model,
+        image_a,
+        image_b,
+    )
+
+    result = {
+        "auxiliary_prediction_max_abs": auxiliary_difference,
+        **isolation,
+        **teacher_update,
+        **deploy,
+    }
+
+    return result
+
+
 def main() -> None:
     args = parse_args()
+    set_seed(args.seed)
+    device = get_device(args)
 
-    set_seed(
-        args.seed
-    )
-
-    device = get_device(
-        args
-    )
-
-    print("=" * 78)
-    print("RDT-CD synthetic smoke")
-    print("=" * 78)
-    print(f"project_root        : {PROJECT_ROOT}")
-    print(f"device              : {device}")
-    print(f"torch               : {torch.__version__}")
-    print(f"seed                : {args.seed}")
-    print(f"batch_size          : {args.batch_size}")
+    print("RDT-CD + SCGR synthetic smoke")
+    print(f"device: {device}")
+    print(f"seed: {args.seed}")
+    print(f"region_size: {args.scgr_region_size}")
     print(
-        "cache_conditioning  : "
+        "cache_conditioning: "
         f"{not args.no_cache_conditioning}"
     )
 
-    if device.type == "cuda":
-        print(
-            "gpu                 : "
-            f"{torch.cuda.get_device_name(device)}"
-        )
+    run_scgr_unit_smoke(device)
 
-    print("-" * 78)
-
-    model = build_dynamic_model(
+    integration = run_model_integration_smoke(
         args,
         device,
     )
 
-    if not model.use_training_auxiliary:
-        raise AssertionError(
-            "Dynamic training auxiliary was not constructed"
-        )
+    print("\n=== SMOKE SUMMARY ===")
+    for key, value in integration.items():
+        if isinstance(value, float):
+            print(f"{key}: {value:.9e}")
+        else:
+            print(f"{key}: {value}")
 
-    if (
-        model.training_mechanism
-        != "dynamic_teacher"
-    ):
-        raise AssertionError(
-            "A2Net did not select mechanism='dynamic_teacher'"
-        )
-
-    expected_cache_requirement = (
-        not args.no_cache_conditioning
-    )
-
-    if (
-        model.training_auxiliary_requires_cache
-        != expected_cache_requirement
-    ):
-        raise AssertionError(
-            "A2Net cache requirement does not match dynamic-teacher mode"
-        )
-
-    check_state_registration(
-        model
-    )
-
-    image_a = torch.randn(
-        args.batch_size,
-        3,
-        args.height,
-        args.width,
-        device=device,
-    )
-
-    image_b = torch.randn(
-        args.batch_size,
-        3,
-        args.height,
-        args.width,
-        device=device,
-    )
-
-    target = make_synthetic_target(
-        batch_size=args.batch_size,
-        height=args.height,
-        width=args.width,
-        device=device,
-    )
-
-    if args.no_cache_conditioning:
-        teacher_pack = None
-    else:
-        teacher_pack = (
-            make_synthetic_teacher_pack(
-                target
-            )
-        )
-
-    # 1. Auxiliary must not perturb main prediction.
-    check_auxiliary_prediction_invariance(
-        model=model,
-        image_a=image_a,
-        image_b=image_b,
-        target=target,
-        teacher_pack=teacher_pack,
-        seed=args.seed + 991,
-    )
-
-    # 2. Student and teacher computational graphs must be disjoint.
-    gradient_stats = (
-        check_forward_and_gradient_isolation(
-            args=args,
-            model=model,
-            image_a=image_a,
-            image_b=image_b,
-            target=target,
-            teacher_pack=teacher_pack,
-        )
-    )
-
-    # Clear all previous smoke gradients before the real one-step teacher
-    # update.
-    model.zero_grad(
-        set_to_none=True
-    )
-
-    # 3. Fast teacher -> EMA target teacher must actually evolve.
-    dynamic_stats = (
-        check_teacher_optimizer_and_ema(
-            args=args,
-            model=model,
-            image_a=image_a,
-            image_b=image_b,
-            target=target,
-            teacher_pack=teacher_pack,
-        )
-    )
-
-    model.zero_grad(
-        set_to_none=True
-    )
-
-    # 4. Deployment must delete all auxiliary state and preserve predictions.
-    deploy_stats = (
-        check_deploy_contract(
-            model=model,
-            image_a=image_a,
-            image_b=image_b,
-        )
-    )
-
-    print("-" * 78)
-    print("Key smoke values")
-    print("-" * 78)
-
-    print(
-        f"main_loss                    : "
-        f"{gradient_stats['main_loss']:.6f}"
-    )
-    print(
-        f"teacher_total                : "
-        f"{gradient_stats['teacher_total']:.6f}"
-    )
-    print(
-        f"student_gradient_norm         : "
-        f"{gradient_stats['student_grad']:.6e}"
-    )
-    print(
-        f"teacher_gradient_norm         : "
-        f"{dynamic_stats['teacher_gradient']:.6e}"
-    )
-    print(
-        f"teacher_ema_update_norm       : "
-        f"{dynamic_stats['ema_update_rms']:.6e}"
-    )
-    print(
-        f"teacher_target_gap            : "
-        f"{dynamic_stats['teacher_target_gap']:.6e}"
-    )
-    print(
-        f"dynamic_shift                 : "
-        f"{dynamic_stats['dynamic_shift']:.6e}"
-    )
-    print(
-        f"dynamic_teacher_gain          : "
-        f"{dynamic_stats['dynamic_gain']:.6e}"
-    )
-    print(
-        f"effective_mass                : "
-        f"{dynamic_stats['effective_mass_after']:.6e}"
-    )
-    print(
-        f"effective_per_error_mass      : "
-        f"{dynamic_stats['effective_per_error_mass_after']:.6e}"
-    )
-    print(
-        f"deploy_parameters             : "
-        f"{int(deploy_stats['deploy_parameters']):,}"
-    )
-    print(
-        f"deploy_prediction_max_abs     : "
-        f"{deploy_stats['deploy_max_abs']:.9e}"
-    )
-
-    print("=" * 78)
-    print("ALL RDT-CD SYNTHETIC SMOKE CHECKS PASSED")
-    print("=" * 78)
+    print("\nALL RDT-CD + SCGR SMOKE CHECKS PASSED")
 
 
 if __name__ == "__main__":

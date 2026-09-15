@@ -1,77 +1,40 @@
-"""
-RDT-CD: Reciprocal Dynamic Teachers for Remote-Sensing Change Detection.
+"""RDT-CD + SCGR training-only dynamic teacher for binary change detection.
 
-This module implements a TRAINING-ONLY reciprocal dynamic-teacher mechanism.
+RDT-CD
+------
+Two small online residual experts (fast teachers) learn from the current
+student error using GT.  EMA copies of those experts (target teachers) create
+the proposals distilled into the student.
 
-Core idea
----------
-Existing DART-R-TS uses cache-derived task-space proposals whose knowledge
-source is effectively static. Once the student becomes better than those
-proposals, GT-audited positive-gain routing correctly rejects them and their
-effective contribution collapses.
+SCGR
+----
+Sparse-Change Gradient-Concordant Routing audits the EMA proposals before
+student distillation.  A teacher is admitted only when its regional proposal:
 
-RDT-CD therefore does NOT treat SAMStruct / OVCDistill cache values as final
-teacher targets. Instead, the cache values are used as teacher priors, while
-small online residual teacher experts evolve during training.
+1) is supported by the configured prior/reliability;
+2) has positive GT-audited Brier utility;
+3) has positive analytical classifier-gradient concordance with GT.
 
-The reciprocal loop is:
+The admitted KD is normalized by the student's remaining balanced error mass
+rather than by HxW image area, so sparse useful change regions are not drowned
+by background pixels.
 
-    fixed cache priors
-           |
-           v
-    dynamic teacher experts <---- current detached student state
-           |
-           v
-    dynamic proposals
-           |
-           v
-    GT positive-gain audit
-           |
-           v
-    teacher -> student distillation
+Critical gradient contract
+--------------------------
+Student loss:
+    main_loss + lambda_kd * output["total"]
+    -> updates STUDENT only.
 
-Meanwhile:
+Teacher loss:
+    output["teacher_total"]
+    -> updates FAST TEACHERS only.
 
-    current student errors
-           |
-           v
-    train fast teacher experts
-           |
-           v
-    EMA update
-           |
-           v
-    next-step target teachers
+EMA:
+    update_ema() is called only after teacher_optimizer.step().
+    EMA target teachers always have requires_grad=False.
 
-Important gradient contract
----------------------------
-1. Student distillation loss:
-       updates STUDENT only.
-       Dynamic teacher proposals are produced by no-grad EMA teachers.
-
-2. Teacher fitting loss:
-       updates FAST TEACHERS only.
-       Student feature / prediction are explicitly detached.
-
-3. EMA target teachers:
-       requires_grad=False and are updated explicitly by update_ema().
-
-4. This module must never be inserted into the deploy feature path.
-   A2Net.switch_to_deploy() should delete the entire training auxiliary.
-
-5. No current-batch GT is used to construct the proposal seen by the student.
-   GT is used only for:
-       - positive-gain auditing;
-       - teacher fitting for future teacher states;
-       - difficulty/error weighting.
-
-The existing task-space SAM/OV proposals remain useful, but only as priors:
-    SAMStruct    -> structural seed
-    OVCDistill   -> semantic soft-change seed
-
-This file is intentionally self-contained on top of the existing:
-    diagnostics.py
-    task_space.py
+No teacher/cache/router tensor is ever injected into the deploy feature path.
+A2Net.switch_to_deploy() physically removes this complete auxiliary.
 """
 
 from __future__ import annotations
@@ -85,24 +48,30 @@ import torch.nn.functional as F
 
 from .diagnostics import build_cd_difficulty, masked_mean
 from .task_space import (
-    bernoulli_kl,
+    NUM_TEACHERS,
+    OV_INDEX,
+    REJECT_INDEX,
+    SAM_INDEX,
     build_task_proposals,
+    routed_bernoulli_kd,
     task_space_route,
 )
 
 
+EPS = 1e-8
+
+
 # ---------------------------------------------------------------------------
-# Utilities
+# Small utilities
 # ---------------------------------------------------------------------------
 
 def _resize(
     x: torch.Tensor,
     size: Tuple[int, int],
 ) -> torch.Tensor:
-    """FP32 bilinear resize used only inside the training auxiliary."""
-    if x.shape[-2:] == tuple(size):
+    """FP32 bilinear resize used only in the training auxiliary."""
+    if tuple(x.shape[-2:]) == tuple(size):
         return x.float()
-
     return F.interpolate(
         x.float(),
         size=size,
@@ -112,12 +81,67 @@ def _resize(
 
 
 def _safe_logit(
-    p: torch.Tensor,
+    probability: torch.Tensor,
     eps: float = 1e-5,
 ) -> torch.Tensor:
     """Stable logit for the probability-output A2Net student."""
     return torch.logit(
-        p.float().clamp(eps, 1.0 - eps)
+        probability.float().clamp(eps, 1.0 - eps)
+    )
+
+
+def _finite_or_raise(
+    name: str,
+    tensor: torch.Tensor,
+) -> None:
+    if not bool(torch.isfinite(tensor).all()):
+        raise FloatingPointError(
+            f"{name} contains non-finite values"
+        )
+
+
+def _pair_region_mean(
+    value: torch.Tensor,
+    mask: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Summarize [B,2,Rh,Rw] evidence to [B,2].
+
+    If ``mask`` is supplied, empty teacher/region support returns exactly zero.
+    """
+    if value.ndim != 4 or value.shape[1] != NUM_TEACHERS:
+        raise ValueError(
+            "Expected regional teacher tensor [B,2,Rh,Rw], got "
+            f"{tuple(value.shape)}"
+        )
+
+    x = value.detach().float()
+    if mask is None:
+        return x.mean((2, 3))
+
+    if mask.shape != value.shape:
+        raise ValueError(
+            "Regional summary mask must match value shape"
+        )
+
+    m = mask.detach().float()
+    numerator = (x * m).sum((2, 3))
+    denominator = m.sum((2, 3)).clamp_min(1.0)
+    return numerator / denominator
+
+
+def _masked_ratio(
+    event: torch.Tensor,
+    valid: torch.Tensor,
+) -> torch.Tensor:
+    """Global detached ratio with empty support defined as zero."""
+    event_f = event.detach().float()
+    valid_f = valid.detach().float()
+    numerator = (event_f * valid_f).sum()
+    denominator = valid_f.sum()
+    return torch.where(
+        denominator > 0,
+        numerator / denominator.clamp_min(1.0),
+        numerator.new_zeros(()),
     )
 
 
@@ -126,42 +150,33 @@ def _safe_logit(
 # ---------------------------------------------------------------------------
 
 class ResidualTeacherExpert(nn.Module):
-    """
-    Small TRAINING-ONLY residual teacher expert.
+    """Small TRAINING-ONLY residual teacher expert.
 
-    It does not predict an absolute change mask from scratch.
+    Inputs
+    ------
+    feature:
+        current detached student decoder feature [B,C,Hf,Wf].
+    probability:
+        current detached student probability [B,1,H,W].
+    seed:
+        SAM/OV cache prior, or student identity prior in D2.
+    reliability:
+        cache reliability, or one in D2.
 
-    Instead, given:
-        - current detached decoder feature;
-        - current detached student probability;
-        - cache-derived teacher residual (seed - student);
-        - cache reliability;
+    Output
+    ------
+    A low-resolution unconstrained residual.  The caller applies tanh and the
+    fixed ``max_logit_delta`` cap before constructing the dynamic proposal.
 
-    it predicts a bounded correction in student-logit space.
-
-    Input channels:
-        student feature:     C
-        student probability: 1
-        cache residual:      1
-        cache reliability:   1
-
-    Total:
-        C + 3
-
-    The final layer is zero initialized so that at initialization:
-
-        dynamic_teacher == current_student
-
-    This is deliberate. The new teacher must earn useful corrections through
-    online learning rather than injecting an arbitrary randomly initialized
-    target into the student.
+    The final convolution is exactly zero initialized so that at construction:
+        q_dynamic == p_student.
     """
 
     def __init__(
         self,
         channels: int = 64,
         hidden: int = 24,
-    ):
+    ) -> None:
         super().__init__()
 
         channels = int(channels)
@@ -183,7 +198,6 @@ class ResidualTeacherExpert(nn.Module):
                 bias=True,
             ),
             nn.GELU(),
-
             nn.Conv2d(
                 hidden,
                 hidden,
@@ -193,7 +207,6 @@ class ResidualTeacherExpert(nn.Module):
                 bias=True,
             ),
             nn.GELU(),
-
             nn.Conv2d(
                 hidden,
                 1,
@@ -202,8 +215,6 @@ class ResidualTeacherExpert(nn.Module):
             ),
         )
 
-        # Critical initialization:
-        # q_teacher == p_student at step 0.
         nn.init.zeros_(self.net[-1].weight)
         nn.init.zeros_(self.net[-1].bias)
 
@@ -214,38 +225,27 @@ class ResidualTeacherExpert(nn.Module):
         seed: torch.Tensor,
         reliability: torch.Tensor,
     ) -> torch.Tensor:
-        """
-        Return low-resolution logit correction.
-
-        All student/cache inputs are detached here as a second safety barrier,
-        even if the caller already detached them.
-        """
         if feature.ndim != 4:
             raise ValueError(
-                "feature must be a [B,C,H,W] tensor"
+                "feature must be [B,C,H,W]"
             )
-
         if feature.shape[1] != self.channels:
             raise ValueError(
-                f"Expected feature with {self.channels} channels, "
+                f"Expected feature channels={self.channels}, "
                 f"got {feature.shape[1]}"
             )
-
         if probability.ndim != 4 or probability.shape[1] != 1:
             raise ValueError(
                 "probability must be [B,1,H,W]"
             )
-
         if seed.ndim != 4 or seed.shape[1] != 1:
             raise ValueError(
                 "seed must be [B,1,H,W]"
             )
-
         if reliability.ndim != 4 or reliability.shape[1] != 1:
             raise ValueError(
                 "reliability must be [B,1,H,W]"
             )
-
         if not (
             feature.shape[0]
             == probability.shape[0]
@@ -256,84 +256,52 @@ class ResidualTeacherExpert(nn.Module):
                 "feature/probability/seed/reliability batch sizes must match"
             )
 
-        spatial_size = feature.shape[-2:]
+        spatial_size = tuple(feature.shape[-2:])
 
+        # Explicit detach is a second barrier against teacher-fitting gradients
+        # entering the Student.
         f = feature.detach().float()
-
         p = _resize(
             probability.detach(),
             spatial_size,
         ).clamp(0.0, 1.0)
-
         s = _resize(
             seed.detach(),
             spatial_size,
         ).clamp(0.0, 1.0)
-
         r = _resize(
             reliability.detach(),
             spatial_size,
         ).clamp(0.0, 1.0)
 
-        # Cache information is represented explicitly as what the static
-        # teacher thinks differently from the current student.
         cache_residual = s - p
-
-        x = torch.cat(
-            (
-                f,
-                p,
-                cache_residual,
-                r,
-            ),
+        teacher_input = torch.cat(
+            (f, p, cache_residual, r),
             dim=1,
         )
-
-        return self.net(x)
+        return self.net(teacher_input)
 
 
 # ---------------------------------------------------------------------------
-# Reciprocal dynamic-teacher mechanism
+# Reciprocal dynamic teacher + SCGR
 # ---------------------------------------------------------------------------
 
 class ReciprocalDynamicTeacher(nn.Module):
-    """
-    RDT-CD training auxiliary.
+    """RDT-CD auxiliary with parameter-free SCGR Student routing.
 
-    Teacher index:
-        0 -> SAM dynamic teacher
-        1 -> OV dynamic teacher
+    Teacher index
+    -------------
+    0 = SAMStruct structural prior/expert
+    1 = OVCDistill semantic prior/expert
 
-    Two versions of each teacher are maintained:
-
-        fast[k]
-            Optimized directly by teacher_total.
-
-        target[k]
-            EMA copy of fast[k].
-            Used to construct the proposal distilled into the student.
-
-    This separation prevents the current GT-supervised teacher fitting update
-    from being immediately exposed to the same current student step.
-
-    Expected external optimization
-    ------------------------------
-    Student optimizer:
-        main_loss + lambda * output["total"]
-
-    Teacher optimizer:
-        output["teacher_total"]
-
-    After teacher_optimizer.step():
-        module.update_ema()
-
-    Do NOT put parameters returned by teacher_parameters() into the student
-    optimizer.
+    Fast teachers are optimized by ``teacher_total``.
+    EMA target teachers create the proposals used by ``total``.
     """
 
-    NUM_TEACHERS = 2
-    SAM_INDEX = 0
-    OV_INDEX = 1
+    NUM_TEACHERS = NUM_TEACHERS
+    SAM_INDEX = SAM_INDEX
+    OV_INDEX = OV_INDEX
+    REJECT_INDEX = REJECT_INDEX
 
     def __init__(
         self,
@@ -343,118 +311,99 @@ class ReciprocalDynamicTeacher(nn.Module):
         max_logit_delta: float = 2.0,
         boundary_radius: int = 2,
         small_area: int = 64,
-        policy: str = "advantage",
+        policy: str = "scgr",
         teacher: str = "both",
         difficulty: bool = True,
         cache_conditioning: bool = True,
-    ):
+        region_size: int = 16,
+    ) -> None:
         super().__init__()
 
         channels = int(channels)
         hidden = int(hidden)
         ema = float(ema)
         max_logit_delta = float(max_logit_delta)
+        boundary_radius = int(boundary_radius)
+        small_area = int(small_area)
+        region_size = int(region_size)
 
         if channels <= 0:
             raise ValueError("channels must be positive")
-
         if hidden <= 0:
             raise ValueError("hidden must be positive")
-
         if not 0.0 <= ema < 1.0:
             raise ValueError(
                 "ema must satisfy 0 <= ema < 1"
             )
-
-        if max_logit_delta <= 0:
+        if max_logit_delta <= 0.0:
             raise ValueError(
                 "max_logit_delta must be positive"
             )
-
-        if policy not in {"advantage", "quality"}:
+        if boundary_radius < 0:
             raise ValueError(
-                "policy must be advantage/quality"
+                "boundary_radius must be nonnegative"
             )
-
+        if small_area <= 0:
+            raise ValueError(
+                "small_area must be positive"
+            )
+        if policy != "scgr":
+            raise ValueError(
+                "Current implementation supports only policy='scgr'"
+            )
         if teacher not in {"both", "sam", "ov"}:
             raise ValueError(
-                "teacher must be both/sam/ov"
+                "teacher must be one of: both/sam/ov"
+            )
+        if region_size <= 0:
+            raise ValueError(
+                "region_size must be positive"
             )
 
         self.channels = channels
         self.hidden = hidden
-
         self.ema = ema
         self.max_logit_delta = max_logit_delta
-
-        self.boundary_radius = int(boundary_radius)
-        self.small_area = int(small_area)
-
-        self.policy = str(policy)
+        self.boundary_radius = boundary_radius
+        self.small_area = small_area
+        self.policy = policy
         self.teacher = str(teacher)
         self.difficulty = bool(difficulty)
-
-        # Main ablation switch:
-        #
-        # True:
-        #   SAM/OV cache priors condition the dynamic teachers.
-        #
-        # False:
-        #   teacher seed = student prediction
-        #   reliability = 1
-        #
-        # This produces a capacity-matched online auxiliary teacher control
-        # without foundation-cache knowledge.
         self.cache_conditioning = bool(cache_conditioning)
+        self.region_size = region_size
 
-        # Fast online teachers.
         self.fast = nn.ModuleList(
             [
                 ResidualTeacherExpert(
                     channels=channels,
                     hidden=hidden,
-                ),
-                ResidualTeacherExpert(
-                    channels=channels,
-                    hidden=hidden,
-                ),
+                )
+                for _ in range(self.NUM_TEACHERS)
             ]
         )
 
-        # EMA teachers used for Student supervision.
         self.target = copy.deepcopy(self.fast)
-
         for parameter in self.target.parameters():
             parameter.requires_grad_(False)
-
         self.target.eval()
 
-    # ---------------------------------------------------------------------
-    # Parameter / state API
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Parameter / EMA API used by train.py and checkpointing.
+    # ------------------------------------------------------------------
 
     def teacher_parameters(self) -> Iterator[nn.Parameter]:
-        """
-        Parameters that MUST belong only to the teacher optimizer.
-        """
+        """Parameters owned exclusively by the teacher optimizer."""
         return self.fast.parameters()
 
     def fast_teacher_parameters(self) -> Iterator[nn.Parameter]:
-        """Alias for explicit external use."""
         return self.fast.parameters()
 
     def target_teacher_parameters(self) -> Iterator[nn.Parameter]:
-        """EMA teacher parameters; all should have requires_grad=False."""
         return self.target.parameters()
 
     @torch.no_grad()
     def copy_fast_to_target(self) -> None:
-        """
-        Hard-sync EMA target teachers from fast teachers.
-
-        Normally needed only for explicit reinitialization/debugging.
-        Initial construction is already synchronized.
-        """
+        """Hard synchronization for explicit initialization/debug use."""
         for target_teacher, fast_teacher in zip(
             self.target,
             self.fast,
@@ -464,7 +413,6 @@ class ReciprocalDynamicTeacher(nn.Module):
             )
 
         self.target.eval()
-
         for parameter in self.target.parameters():
             parameter.requires_grad_(False)
 
@@ -473,23 +421,8 @@ class ReciprocalDynamicTeacher(nn.Module):
         self,
         decay: Optional[float] = None,
     ) -> float:
-        """
-        Update target teachers from fast teachers.
-
-            target =
-                decay * target
-                + (1 - decay) * fast
-
-        Returns
-        -------
-        float
-            RMS magnitude of the actual EMA parameter update.
-
-        This value is useful as a direct log signal proving that teacher state
-        is evolving over training.
-        """
+        """EMA-update target teachers and return RMS update magnitude."""
         decay = self.ema if decay is None else float(decay)
-
         if not 0.0 <= decay < 1.0:
             raise ValueError(
                 "EMA decay must satisfy 0 <= decay < 1"
@@ -519,12 +452,10 @@ class ReciprocalDynamicTeacher(nn.Module):
                     .sum()
                     .item()
                 )
-
                 parameter_count += update.numel()
 
-            # The current experts contain no running-stat buffers, but copying
-            # buffers keeps this function correct if a future non-trainable
-            # buffer is introduced.
+            # Current experts have no running statistics, but keep future
+            # non-trainable buffers synchronized safely.
             for target_buffer, fast_buffer in zip(
                 target_teacher.buffers(),
                 fast_teacher.buffers(),
@@ -532,6 +463,8 @@ class ReciprocalDynamicTeacher(nn.Module):
                 target_buffer.copy_(fast_buffer)
 
         self.target.eval()
+        for parameter in self.target.parameters():
+            parameter.requires_grad_(False)
 
         return (
             square_update / max(parameter_count, 1)
@@ -539,12 +472,7 @@ class ReciprocalDynamicTeacher(nn.Module):
 
     @torch.no_grad()
     def teacher_target_gap(self) -> float:
-        """
-        RMS parameter distance between fast and EMA teachers.
-
-        A persistent exact zero after teacher optimization begins indicates
-        that the dynamic teacher is not actually evolving.
-        """
+        """RMS parameter distance between fast and EMA target teachers."""
         square_gap = 0.0
         parameter_count = 0
 
@@ -560,43 +488,31 @@ class ReciprocalDynamicTeacher(nn.Module):
                     fast_parameter.detach().float()
                     - target_parameter.detach().float()
                 )
-
-                square_gap += (
-                    gap.square()
-                    .sum()
-                    .item()
-                )
-
+                square_gap += gap.square().sum().item()
                 parameter_count += gap.numel()
 
         return (
             square_gap / max(parameter_count, 1)
         ) ** 0.5
 
-    # ---------------------------------------------------------------------
-    # Internal teacher construction
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Teacher construction.
+    # ------------------------------------------------------------------
 
     def _active_teacher_vector(
         self,
         device: torch.device,
         dtype: torch.dtype,
     ) -> torch.Tensor:
-        """
-        Return [2] activation vector for teacher-training ablations.
-        """
         if self.teacher == "both":
             values = (1.0, 1.0)
-
         elif self.teacher == "sam":
             values = (1.0, 0.0)
-
         elif self.teacher == "ov":
             values = (0.0, 1.0)
-
         else:
             raise RuntimeError(
-                f"Unexpected teacher setting: {self.teacher}"
+                f"Unexpected teacher mode: {self.teacher!r}"
             )
 
         return torch.tensor(
@@ -611,16 +527,15 @@ class ReciprocalDynamicTeacher(nn.Module):
         prediction: torch.Tensor,
         teacher_pack: Optional[Dict],
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Build [B,2,H,W] seed proposals and reliability maps.
+        """Build detached [SAM,OV] seeds and reliability.
 
-        cache_conditioning=True:
-            reuse existing DART-R-TS SAM/OV proposal construction.
+        D1:
+            real SAMStruct + OVCDistill cache priors.
 
-        cache_conditioning=False:
-            capacity-matched no-cache control:
-                seed = current student
-                reliability = 1
+        D2:
+            seed = current student, reliability = 1.
+            This preserves the same online-teacher capacity while removing
+            foundation-cache information.
         """
         p = prediction.detach().float()
 
@@ -632,22 +547,19 @@ class ReciprocalDynamicTeacher(nn.Module):
                 )
 
             seeds, reliability = build_task_proposals(
-                prediction,
+                p,
                 teacher_pack,
             )
-
             seeds = (
                 seeds.detach()
                 .float()
                 .clamp(0.0, 1.0)
             )
-
             reliability = (
                 reliability.detach()
                 .float()
                 .clamp(0.0, 1.0)
             )
-
         else:
             seeds = (
                 p.expand(
@@ -658,27 +570,28 @@ class ReciprocalDynamicTeacher(nn.Module):
                 )
                 .clone()
             )
-
             reliability = torch.ones_like(seeds)
 
         expected = (
-            prediction.shape[0],
+            p.shape[0],
             self.NUM_TEACHERS,
-            prediction.shape[-2],
-            prediction.shape[-1],
+            p.shape[-2],
+            p.shape[-1],
         )
 
         if tuple(seeds.shape) != expected:
             raise ValueError(
-                "Teacher seeds must have shape "
-                f"{expected}, got {tuple(seeds.shape)}"
+                f"Teacher seeds must be {expected}, "
+                f"got {tuple(seeds.shape)}"
             )
-
         if tuple(reliability.shape) != expected:
             raise ValueError(
-                "Teacher reliability must have shape "
-                f"{expected}, got {tuple(reliability.shape)}"
+                f"Teacher reliability must be {expected}, "
+                f"got {tuple(reliability.shape)}"
             )
+
+        _finite_or_raise("teacher seeds", seeds)
+        _finite_or_raise("teacher reliability", reliability)
 
         return seeds, reliability
 
@@ -690,40 +603,19 @@ class ReciprocalDynamicTeacher(nn.Module):
         seed: torch.Tensor,
         reliability: torch.Tensor,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """
-        Construct one dynamic teacher proposal.
+        """Construct one online/EMA dynamic proposal.
 
-        Mathematical form:
-
-            delta = G(
-                stopgrad(F_s),
-                stopgrad(p_s),
-                cache_prior
+        q = sigmoid(
+                logit(stopgrad(p))
+                + reliability * max_logit_delta * tanh(delta)
             )
-
-            q =
-                sigmoid(
-                    logit(stopgrad(p_s))
-                    +
-                    reliability
-                    * Delta_max
-                    * tanh(delta)
-                )
-
-        The correction therefore remains:
-            - student-conditioned;
-            - cache-conditioned;
-            - bounded;
-            - identity initialized.
 
         Returns
         -------
         proposal:
             [B,1,H,W]
-
-        full_residual:
+        bounded_residual:
             bounded pre-reliability logit correction [B,1,H,W]
-            for diagnostics.
         """
         p = prediction.detach().float()
 
@@ -736,10 +628,9 @@ class ReciprocalDynamicTeacher(nn.Module):
 
         full_residual = _resize(
             low_residual,
-            p.shape[-2:],
+            tuple(p.shape[-2:]),
         )
 
-        # Bound the expert correction before reliability modulation.
         bounded_residual = (
             self.max_logit_delta
             * torch.tanh(full_residual)
@@ -761,9 +652,9 @@ class ReciprocalDynamicTeacher(nn.Module):
             bounded_residual,
         )
 
-    # ---------------------------------------------------------------------
-    # Forward
-    # ---------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Main forward.
+    # ------------------------------------------------------------------
 
     def forward(
         self,
@@ -773,76 +664,36 @@ class ReciprocalDynamicTeacher(nn.Module):
         teacher_pack: Optional[Dict],
         force_action: Optional[int] = None,
     ) -> Dict[str, torch.Tensor]:
-        """
-        Execute one reciprocal dynamic-teacher training forward.
-
-        Parameters
-        ----------
-        feature:
-            Decoder feature from the unchanged student main path.
-            Expected [B,C,Hf,Wf].
-
-        prediction:
-            Main student probability.
-            Expected [B,1,H,W].
-
-        target:
-            Binary GT.
-            Expected [B,1,H,W].
-
-        teacher_pack:
-            Synchronously replayed SAMStruct + OVCDistill cache pack.
-            May be None only when cache_conditioning=False.
-
-        force_action:
-            Existing debug override:
-                0 -> SAM
-                1 -> OV
-                2 -> Reject
-
-            It affects Student routing through task_space_route().
-            It does NOT alter teacher fitting; teacher fitting follows the
-            configured teacher={"both","sam","ov"} setting.
-
-        Returns
-        -------
-        dict
-
-        Student-side differentiable key:
-            "total"
-
-        Teacher-side differentiable key:
-            "teacher_total"
-
-        These two losses intentionally belong to disjoint parameter graphs.
-        """
+        """Execute one RDT-CD + SCGR training forward."""
         if feature.ndim != 4:
             raise ValueError(
-                "feature must be [B,C,H,W]"
+                "feature must be [B,C,Hf,Wf]"
             )
-
         if feature.shape[1] != self.channels:
             raise ValueError(
                 f"Expected feature channels={self.channels}, "
                 f"got {feature.shape[1]}"
             )
-
         if prediction.ndim != 4 or prediction.shape[1] != 1:
             raise ValueError(
                 "prediction must be [B,1,H,W]"
             )
-
         if target.shape != prediction.shape:
             raise ValueError(
                 "target and prediction must have identical shapes"
             )
-
         if feature.shape[0] != prediction.shape[0]:
             raise ValueError(
                 "feature and prediction batch sizes must match"
             )
+        if not bool(torch.all((target == 0) | (target == 1))):
+            raise ValueError(
+                "target must be binary 0/1"
+            )
 
-        # Difficulty diagnostics are detached inside build_cd_difficulty().
+        # Detached diagnostic/difficulty builder.  This is retained from the
+        # previous RDT implementation so that this experiment changes routing,
+        # not the teacher-fitting curriculum.
         diagnosis = build_cd_difficulty(
             prediction,
             target,
@@ -850,88 +701,19 @@ class ReciprocalDynamicTeacher(nn.Module):
             self.small_area,
         )
 
-        # Keep the entire auxiliary numerically in FP32.
-        # The student main path itself is untouched.
         device_type = prediction.device.type
 
+        # Keep the auxiliary numerically in FP32.  The deploy path is outside
+        # this context and remains untouched.
         with torch.autocast(
             device_type=device_type,
             enabled=False,
         ):
+            # Student probability retains its graph here: only routed KD below
+            # should use that graph.  Every teacher/SCGR evidence constructor
+            # explicitly detaches its observations.
             p = prediction.float()
             y = target.detach().float()
-
-            # -------------------------------------------------------------
-            # 1. Static cache information becomes PRIOR, not final target.
-            # -------------------------------------------------------------
-            seeds, reliability = self._build_seeds(
-                prediction=p,
-                teacher_pack=teacher_pack,
-            )
-
-            # -------------------------------------------------------------
-            # 2. EMA target teachers create CURRENT dynamic proposals.
-            #
-            # No current GT is available to these proposal generators.
-            # -------------------------------------------------------------
-            dynamic_proposals = []
-            target_residuals = []
-
-            with torch.no_grad():
-                for teacher_index in range(
-                    self.NUM_TEACHERS
-                ):
-                    proposal, residual = (
-                        self._dynamic_proposal(
-                            expert=self.target[
-                                teacher_index
-                            ],
-                            feature=feature,
-                            prediction=p,
-                            seed=seeds[
-                                :,
-                                teacher_index:
-                                teacher_index + 1,
-                            ],
-                            reliability=reliability[
-                                :,
-                                teacher_index:
-                                teacher_index + 1,
-                            ],
-                        )
-                    )
-
-                    dynamic_proposals.append(
-                        proposal
-                    )
-
-                    target_residuals.append(
-                        residual
-                    )
-
-            dynamic_proposals = torch.cat(
-                dynamic_proposals,
-                dim=1,
-            )
-
-            target_residuals = torch.cat(
-                target_residuals,
-                dim=1,
-            )
-
-            # -------------------------------------------------------------
-            # 3. Student chooses useful teachers through existing exact
-            #    task-space positive-gain auditing.
-            # -------------------------------------------------------------
-            route = task_space_route(
-                prediction=p,
-                target=y,
-                proposals=dynamic_proposals,
-                quality=reliability,
-                policy=self.policy,
-                teacher=self.teacher,
-                force_action=force_action,
-            )
 
             if self.difficulty:
                 importance = (
@@ -942,108 +724,136 @@ class ReciprocalDynamicTeacher(nn.Module):
             else:
                 importance = torch.ones_like(p)
 
-            # -------------------------------------------------------------
-            # 4. Teacher -> Student.
-            #
-            # dynamic_proposals are detached EMA outputs.
-            # Therefore this path updates STUDENT only.
-            # -------------------------------------------------------------
-            kd_map = bernoulli_kl(
+            # --------------------------------------------------------------
+            # 1. Fixed cache values are PRIORS, not student targets.
+            # --------------------------------------------------------------
+            seeds, reliability = self._build_seeds(
                 prediction=p,
-                target=dynamic_proposals,
+                teacher_pack=teacher_pack,
             )
 
-            effective = (
-                route["effective_map"]
-                .detach()
-                .float()
-            )
+            # --------------------------------------------------------------
+            # 2. EMA target teachers make current Student-facing proposals.
+            #    No current-batch GT enters this proposal generation.
+            # --------------------------------------------------------------
+            dynamic_proposals = []
+            target_residuals = []
 
-            denominator = (
-                importance
-                .sum((2, 3))
-                .clamp_min(1.0)
-            )
-
-            per_teacher = (
-                kd_map
-                * effective
-                * importance
-            ).sum((2, 3)) / denominator
-
-            student_kd = (
-                per_teacher
-                .sum(dim=1)
-                .mean()
-            )
-
-            # -------------------------------------------------------------
-            # 5. Fast teachers predict corrections from the SAME PRE-UPDATE
-            #    student state.
-            #
-            # Student inputs are detached explicitly, therefore this graph
-            # updates FAST TEACHERS only.
-            # -------------------------------------------------------------
-            fast_proposals = []
-            fast_residuals = []
-
-            for teacher_index in range(
-                self.NUM_TEACHERS
-            ):
-                proposal, residual = (
-                    self._dynamic_proposal(
-                        expert=self.fast[
-                            teacher_index
-                        ],
-                        feature=feature.detach(),
-                        prediction=p.detach(),
+            with torch.no_grad():
+                for teacher_index in range(self.NUM_TEACHERS):
+                    proposal, residual = self._dynamic_proposal(
+                        expert=self.target[teacher_index],
+                        feature=feature,
+                        prediction=p,
                         seed=seeds[
                             :,
-                            teacher_index:
-                            teacher_index + 1,
+                            teacher_index:teacher_index + 1,
                         ],
                         reliability=reliability[
                             :,
-                            teacher_index:
-                            teacher_index + 1,
+                            teacher_index:teacher_index + 1,
                         ],
                     )
-                )
+                    dynamic_proposals.append(proposal)
+                    target_residuals.append(residual)
 
-                fast_proposals.append(
-                    proposal
-                )
+            dynamic_proposals = torch.cat(
+                dynamic_proposals,
+                dim=1,
+            )
+            target_residuals = torch.cat(
+                target_residuals,
+                dim=1,
+            )
 
-                fast_residuals.append(
-                    residual
+            # --------------------------------------------------------------
+            # 3. SCGR audits dynamic proposals.
+            #
+            # This is the ONLY method-level change relative to the preceding
+            # RDT formulation:
+            #   old: pixel-only positive Brier route + image-area-like KD
+            #   new: regional utility + gradient concordance + error-mass KD
+            # --------------------------------------------------------------
+            route = task_space_route(
+                prediction=p,
+                target=y,
+                proposals=dynamic_proposals,
+                quality=reliability,
+                feature=feature,
+                importance=importance,
+                policy=self.policy,
+                teacher=self.teacher,
+                force_action=force_action,
+                region_size=self.region_size,
+            )
+
+            # --------------------------------------------------------------
+            # 4. Teacher -> Student.
+            #
+            # EMA proposals and SCGR evidence are detached.  The differentiable
+            # path is only from routed Bernoulli KD back to `p`, hence Student.
+            # --------------------------------------------------------------
+            kd = routed_bernoulli_kd(
+                prediction=p,
+                proposals=dynamic_proposals,
+                route=route,
+            )
+
+            student_kd = kd["total"]
+            per_teacher = kd["loss_per_teacher"]
+
+            # --------------------------------------------------------------
+            # 5. Fast teachers use the same PRE-UPDATE student state.
+            #    Student/cache observations are detached inside the expert.
+            # --------------------------------------------------------------
+            fast_proposals = []
+            fast_residuals = []
+
+            for teacher_index in range(self.NUM_TEACHERS):
+                proposal, residual = self._dynamic_proposal(
+                    expert=self.fast[teacher_index],
+                    feature=feature,
+                    prediction=p,
+                    seed=seeds[
+                        :,
+                        teacher_index:teacher_index + 1,
+                    ],
+                    reliability=reliability[
+                        :,
+                        teacher_index:teacher_index + 1,
+                    ],
                 )
+                fast_proposals.append(proposal)
+                fast_residuals.append(residual)
 
             fast_proposals = torch.cat(
                 fast_proposals,
                 dim=1,
             )
-
             fast_residuals = torch.cat(
                 fast_residuals,
                 dim=1,
             )
 
-            # -------------------------------------------------------------
-            # 6. Student -> Teacher.
+            # --------------------------------------------------------------
+            # 6. Student -> Fast Teacher fitting.
             #
-            # Teachers focus on where the CURRENT student still has error.
+            # Intentionally preserved from previous RDT:
+            # - focus on current student error;
+            # - preserve existing difficulty importance;
+            # - cache reliability already bounds the residual, therefore only
+            #   binary cache support is used here to avoid confidence^2.
             #
-            # reliability is already used to bound the teacher correction.
-            # Here we use binary cache support instead of multiplying
-            # reliability a second time, avoiding accidental confidence^2
-            # suppression.
-            # -------------------------------------------------------------
+            # SCGR does NOT gate teacher fitting.  Otherwise the routing change
+            # would also alter the online teacher curriculum, confounding the
+            # first experiment.
+            # --------------------------------------------------------------
             student_abs_error = (
                 p.detach() - y
             ).abs()
 
             cache_support = (
-                reliability > 0
+                reliability > 0.0
             ).float()
 
             teacher_active = (
@@ -1051,10 +861,14 @@ class ReciprocalDynamicTeacher(nn.Module):
                     device=p.device,
                     dtype=p.dtype,
                 )
-                .view(1, self.NUM_TEACHERS, 1, 1)
+                .view(
+                    1,
+                    self.NUM_TEACHERS,
+                    1,
+                    1,
+                )
             )
 
-            # [B,1,H,W] -> broadcast to [B,2,H,W]
             fit_weight = (
                 student_abs_error
                 * importance
@@ -1062,16 +876,12 @@ class ReciprocalDynamicTeacher(nn.Module):
                 * teacher_active
             )
 
-            y_two = y.expand_as(
-                fast_proposals
-            )
+            y_two = y.expand_as(fast_proposals)
 
-            teacher_bce_map = (
-                F.binary_cross_entropy(
-                    fast_proposals,
-                    y_two,
-                    reduction="none",
-                )
+            teacher_bce_map = F.binary_cross_entropy(
+                fast_proposals,
+                y_two,
+                reduction="none",
             )
 
             fit_denominator = (
@@ -1085,11 +895,8 @@ class ReciprocalDynamicTeacher(nn.Module):
                 * fit_weight
             ).sum((2, 3)) / fit_denominator
 
-            # Do not average an inactive teacher as an artificial zero-loss
-            # third party.
-            active_vector = (
-                teacher_active
-                .view(self.NUM_TEACHERS)
+            active_vector = teacher_active.view(
+                self.NUM_TEACHERS
             )
 
             teacher_total = (
@@ -1098,9 +905,9 @@ class ReciprocalDynamicTeacher(nn.Module):
                 * active_vector
             ).sum() / active_vector.sum().clamp_min(1.0)
 
-            # -------------------------------------------------------------
+            # --------------------------------------------------------------
             # 7. Diagnostics.
-            # -------------------------------------------------------------
+            # --------------------------------------------------------------
             base_error = (
                 p.detach() - y
             ).square()
@@ -1130,108 +937,84 @@ class ReciprocalDynamicTeacher(nn.Module):
                 - static_brier_map
             )
 
-            support = (
+            accepted = (
                 route["accepted_map"]
                 .detach()
                 .float()
             )
 
-            def summary(
+            mixture = (
+                route["mixture_map"]
+                .detach()
+                .float()
+            )
+
+            error_mass_map = (
+                route["error_mass_map"]
+                .detach()
+                .float()
+            )
+
+            kd_weight_map = (
+                route["kd_weight_map"]
+                .detach()
+                .float()
+            )
+
+            def image_summary(
                 x: torch.Tensor,
             ) -> torch.Tensor:
-                """
-                Difficulty-weighted full-image summary.
-
-                Supports x shaped:
-                    [B,1,H,W]
-                    [B,2,H,W]
-
-                Returns:
-                    [B,1] or [B,2]
-                """
+                """Difficulty-weighted [B,C,H,W] -> [B,C] summary."""
                 x = x.detach().float()
-
-                num = (
+                numerator = (
                     x * importance
                 ).sum((2, 3))
 
-                den = (
+                denominator = (
                     importance
                     .sum((2, 3))
                     .clamp_min(1.0)
                 )
+                return numerator / denominator
 
-                return num / den
-
-            q_summary = summary(
-                reliability
-            )
+            q_summary = image_summary(reliability)
 
             changed_support = masked_mean(
-                support,
+                accepted,
                 y,
             ).mean()
 
             background_support = masked_mean(
-                support,
+                accepted,
                 1.0 - y,
             ).mean()
 
-            student_error_mass = (
-                student_abs_error
-                * importance
-            ).mean()
-
-            effective_mass = (
-                effective
-                .sum(dim=1)
-                .mean()
-            )
-
-            # Important dynamic-health statistic:
-            # absolute teacher mass is expected to decrease as the student
-            # becomes good. What should NOT collapse prematurely is the
-            # effective mass relative to the student's remaining error mass.
-            effective_per_error_mass = (
-                effective_mass
-                / student_error_mass.clamp_min(1e-8)
-            )
-
-            dynamic_shift = summary(
+            dynamic_shift = image_summary(
                 (
                     dynamic_proposals.detach()
                     - p.detach()
                 ).abs()
             )
 
-            static_shift = summary(
+            static_shift = image_summary(
                 (
                     seeds.detach()
                     - p.detach()
                 ).abs()
             )
 
-            target_residual_magnitude = summary(
+            target_residual_magnitude = image_summary(
                 target_residuals.abs()
             )
 
-            fast_residual_magnitude = summary(
+            fast_residual_magnitude = image_summary(
                 fast_residuals.detach().abs()
             )
 
-            # Same external layout as TaskSpaceDirectionC:
-            #
-            # first two columns:
-            #     SAM / OV mixture
-            #
-            # third column:
-            #     reject
-            mixture_summary = summary(
-                route["mixture_map"]
-            )
+            mixture_summary = image_summary(mixture)
 
-            reject_summary = summary(
-                1.0 - support
+            reject_summary = image_summary(
+                1.0 - accepted
             )
 
             weights = torch.cat(
@@ -1242,52 +1025,184 @@ class ReciprocalDynamicTeacher(nn.Module):
                 dim=1,
             )
 
-            return {
-                # =========================================================
-                # Differentiable optimization outputs
-                # =========================================================
+            # -------------------------
+            # SCGR region diagnostics.
+            # -------------------------
+            region_available = (
+                route["region_available"]
+                .detach()
+                .bool()
+            )
+            region_positive_utility = (
+                route["region_positive_utility"]
+                .detach()
+                .bool()
+            )
+            region_positive_concordance = (
+                route["region_positive_concordance"]
+                .detach()
+                .bool()
+            )
+            region_eligible = (
+                route["region_eligible"]
+                .detach()
+                .bool()
+            )
+            region_accepted = (
+                route["region_accepted"]
+                .detach()
+                .bool()
+            )
 
-                # Teacher -> Student:
-                # include ONLY in the student optimization objective.
+            gradient_conflict_region = (
+                region_available
+                & region_positive_utility
+                & (~region_positive_concordance)
+            )
+
+            positive_utility_available = (
+                region_available
+                & region_positive_utility
+            )
+
+            scgr_region_accept_ratio = (
+                region_accepted.float().mean()
+            )
+            scgr_region_reject_ratio = (
+                1.0 - scgr_region_accept_ratio
+            )
+
+            scgr_positive_utility_ratio = _masked_ratio(
+                region_positive_utility,
+                region_available,
+            )
+
+            scgr_positive_concordance_ratio = _masked_ratio(
+                region_positive_concordance,
+                region_available,
+            )
+
+            scgr_gradient_conflict_ratio = _masked_ratio(
+                gradient_conflict_region,
+                region_available,
+            )
+
+            # Of regions that are output-space beneficial, how many are
+            # explicitly rejected by the gradient-concordance safety gate?
+            scgr_negative_cosine_reject_ratio = _masked_ratio(
+                gradient_conflict_region,
+                positive_utility_available,
+            )
+
+            scgr_region_utility = _pair_region_mean(
+                route["region_utility"],
+                region_available,
+            )
+
+            scgr_region_concordance = _pair_region_mean(
+                route["region_concordance"],
+                region_available,
+            )
+
+            scgr_region_quality = _pair_region_mean(
+                route["region_quality"],
+                region_available,
+            )
+
+            scgr_region_score = _pair_region_mean(
+                route["region_score"],
+                region_available,
+            )
+
+            # Per-image teacher share of the student's remaining error mass.
+            total_error_mass_per_image = (
+                error_mass_map
+                .sum((1, 2, 3))
+                .clamp_min(EPS)
+            )
+
+            teacher_error_mass_per_image = (
+                kd_weight_map
+                .sum((2, 3))
+            )
+
+            scgr_teacher_mass = (
+                teacher_error_mass_per_image
+                / total_error_mass_per_image.unsqueeze(1)
+            )
+
+            change_error_mass_map = (
+                error_mass_map * y
+            )
+            background_error_mass_map = (
+                error_mass_map * (1.0 - y)
+            )
+
+            scgr_change_error_mass = (
+                change_error_mass_map.mean()
+            )
+            scgr_background_error_mass = (
+                background_error_mass_map.mean()
+            )
+
+            scgr_effective_error_mass = (
+                kd["accepted_error_mass"]
+                / float(
+                    p.shape[-2] * p.shape[-1]
+                )
+            ).mean()
+
+            scgr_effective_per_error_mass = (
+                kd[
+                    "effective_per_error_mass_per_image"
+                ]
+                .mean()
+            )
+
+            # Historical names retained for before/after analysis.  They now
+            # use the SCGR error-mass semantics rather than image-area mass.
+            student_error_mass = (
+                error_mass_map.mean()
+            )
+            effective_mass = (
+                kd_weight_map
+                .sum(dim=1)
+                .mean()
+            )
+            effective_per_error_mass = (
+                scgr_effective_per_error_mass
+            )
+
+            result = {
+                # ==========================================================
+                # Differentiable optimization outputs.
+                # ==========================================================
                 "total": student_kd,
-
-                # Student -> Teacher:
-                # optimize ONLY through a separate teacher optimizer.
                 "teacher_total": teacher_total,
-
-                # Per-sample/per-teacher forms.
                 "loss_per_teacher": per_teacher,
-
                 "teacher_loss_per_teacher":
                     teacher_loss_per_sample,
 
-                # =========================================================
-                # Existing Direction-C compatible diagnostics
-                # =========================================================
+                # ==========================================================
+                # Existing Direction-C/RDT-compatible outputs.
+                # ==========================================================
                 "h": diagnosis["h"],
                 "h_valid": diagnosis["valid"],
-
                 "q": q_summary,
 
                 "effective_weights":
-                    summary(effective),
-
+                    image_summary(mixture),
                 "weights": weights,
-
                 "action":
                     route["action"].detach(),
 
-                # IMPORTANT:
-                # proposals now means the DYNAMIC EMA teacher proposals.
                 "proposals":
                     dynamic_proposals.detach(),
-
-                # Static cache-derived priors are exposed separately.
                 "static_proposals":
                     seeds.detach(),
 
                 "pixel_reject_ratio":
-                    (1.0 - support).mean(),
+                    (1.0 - accepted).mean(),
 
                 "image_reject_ratio":
                     (
@@ -1300,17 +1215,16 @@ class ReciprocalDynamicTeacher(nn.Module):
 
                 "accepted_change_ratio":
                     changed_support,
-
                 "accepted_bg_ratio":
                     background_support,
 
                 "proposal_gain":
-                    summary(
+                    image_summary(
                         route["gain_map"]
                     ),
 
                 "relative_gain":
-                    summary(
+                    image_summary(
                         route["relative_map"]
                     ),
 
@@ -1330,15 +1244,13 @@ class ReciprocalDynamicTeacher(nn.Module):
                     base_error.mean(),
 
                 "proposal_brier":
-                    summary(
+                    image_summary(
                         dynamic_brier_map
                     ),
 
                 "effective_mass":
                     effective_mass,
 
-                # Preserve historical names so existing logger code can be
-                # adapted incrementally.
                 "sam_transport":
                     per_teacher[:, self.SAM_INDEX]
                     .mean(),
@@ -1347,43 +1259,34 @@ class ReciprocalDynamicTeacher(nn.Module):
                     per_teacher[:, self.OV_INDEX]
                     .mean(),
 
-                # =========================================================
-                # Dynamic-teacher-specific diagnostics
-                # =========================================================
-
-                # Dynamic EMA teacher error.
+                # ==========================================================
+                # Dynamic-teacher diagnostics.
+                # ==========================================================
                 "dynamic_teacher_brier":
-                    summary(
+                    image_summary(
                         dynamic_brier_map
                     ),
 
-                # Fast teacher error before the optimizer step.
                 "fast_teacher_brier":
-                    summary(
+                    image_summary(
                         fast_brier_map
                     ),
 
-                # Original static cache-prior error.
                 "static_teacher_brier":
-                    summary(
+                    image_summary(
                         static_brier_map
                     ),
 
-                # Positive means the dynamic teacher is better than the
-                # current student in Brier space.
                 "dynamic_teacher_gain":
-                    summary(
+                    image_summary(
                         dynamic_gain_map
                     ),
 
-                # Direct comparison against the unadapted static prior.
                 "static_teacher_gain":
-                    summary(
+                    image_summary(
                         static_gain_map
                     ),
 
-                # How far the evolved EMA teacher moved away from the
-                # current student prediction.
                 "dynamic_shift":
                     dynamic_shift,
 
@@ -1397,18 +1300,15 @@ class ReciprocalDynamicTeacher(nn.Module):
                         :, self.OV_INDEX
                     ].mean(),
 
-                # How far the original fixed cache prior is from the student.
                 "static_shift":
                     static_shift,
 
-                # Magnitude of learned logit correction.
                 "target_residual_magnitude":
                     target_residual_magnitude,
 
                 "fast_residual_magnitude":
                     fast_residual_magnitude,
 
-                # Teacher fitting diagnostics.
                 "teacher_fit_sam":
                     teacher_loss_per_sample[
                         :, self.SAM_INDEX
@@ -1419,48 +1319,132 @@ class ReciprocalDynamicTeacher(nn.Module):
                         :, self.OV_INDEX
                     ].mean(),
 
-                # Remaining student difficulty.
                 "student_abs_error":
                     student_abs_error.mean(),
 
                 "student_error_mass":
                     student_error_mass,
 
-                # Key health statistic:
-                # teacher contribution relative to remaining student error.
                 "effective_per_error_mass":
                     effective_per_error_mass,
 
-                # Cache-support diagnostics.
                 "cache_support_ratio":
                     cache_support.mean(
                         (0, 2, 3)
                     ),
 
-                # Explicitly expose mode for checkpoint/log audit.
                 "cache_conditioning":
                     p.new_tensor(
                         float(
                             self.cache_conditioning
                         )
                     ),
+
+                # ==========================================================
+                # SCGR-specific scalar diagnostics.
+                # ==========================================================
+                "scgr_region_accept_ratio":
+                    scgr_region_accept_ratio,
+
+                "scgr_region_reject_ratio":
+                    scgr_region_reject_ratio,
+
+                "scgr_change_accept_ratio":
+                    changed_support,
+
+                "scgr_background_accept_ratio":
+                    background_support,
+
+                "scgr_positive_utility_ratio":
+                    scgr_positive_utility_ratio,
+
+                "scgr_positive_concordance_ratio":
+                    scgr_positive_concordance_ratio,
+
+                "scgr_gradient_conflict_ratio":
+                    scgr_gradient_conflict_ratio,
+
+                "scgr_negative_cosine_reject_ratio":
+                    scgr_negative_cosine_reject_ratio,
+
+                "scgr_change_error_mass":
+                    scgr_change_error_mass,
+
+                "scgr_background_error_mass":
+                    scgr_background_error_mass,
+
+                "scgr_effective_error_mass":
+                    scgr_effective_error_mass,
+
+                "scgr_effective_per_error_mass":
+                    scgr_effective_per_error_mass,
+
+                # ==========================================================
+                # SCGR teacher-pair summaries, [B,2].
+                # Trainer converts these to *_sam / *_ov.
+                # ==========================================================
+                "scgr_region_utility":
+                    scgr_region_utility,
+
+                "scgr_region_concordance":
+                    scgr_region_concordance,
+
+                "scgr_region_quality":
+                    scgr_region_quality,
+
+                "scgr_region_score":
+                    scgr_region_score,
+
+                "scgr_teacher_mass":
+                    scgr_teacher_mass,
+
+                # Useful full maps for smoke/debug; trainer ignores them.
+                "scgr_error_mass_map":
+                    error_mass_map,
+
+                "scgr_kd_weight_map":
+                    kd_weight_map,
+
+                "scgr_gradient_conflict_map":
+                    route[
+                        "gradient_conflict_map"
+                    ].detach(),
+
+                "scgr_region_eligible":
+                    region_eligible,
+
+                "scgr_region_action":
+                    route[
+                        "region_action"
+                    ].detach(),
             }
 
-    # ---------------------------------------------------------------------
-    # Module behavior
-    # ---------------------------------------------------------------------
+            # Fail here rather than silently logging/training corrupt values.
+            for name in (
+                "total",
+                "teacher_total",
+                "scgr_region_accept_ratio",
+                "scgr_positive_utility_ratio",
+                "scgr_positive_concordance_ratio",
+                "scgr_gradient_conflict_ratio",
+                "scgr_effective_per_error_mass",
+            ):
+                _finite_or_raise(
+                    name,
+                    result[name],
+                )
+
+            return result
+
+    # ------------------------------------------------------------------
+    # Module behavior.
+    # ------------------------------------------------------------------
 
     def train(
         self,
         mode: bool = True,
     ):
-        """
-        Fast teachers follow module train/eval mode.
-
-        EMA target teachers are ALWAYS kept in eval mode. They currently have
-        no dropout/batchnorm, but enforcing this invariant avoids accidental
-        behavior changes if their architecture is extended later.
-        """
+        """Fast teachers follow mode; EMA targets always stay in eval mode."""
         super().train(mode)
 
         self.fast.train(mode)
@@ -1480,22 +1464,12 @@ class ReciprocalDynamicTeacher(nn.Module):
             f"policy={self.policy!r}, "
             f"teacher={self.teacher!r}, "
             f"difficulty={self.difficulty}, "
-            f"cache_conditioning={self.cache_conditioning}"
+            f"cache_conditioning={self.cache_conditioning}, "
+            f"region_size={self.region_size}"
         )
 
 
-# ---------------------------------------------------------------------------
-# Alias used by the A2Net auxiliary selector.
-#
-# The later a2net.py modification can simply do:
-#
-#     from .distill.dynamic_teacher import (
-#         DynamicTeacherDirectionC as DirectionC
-#     )
-#
-# This preserves the current Direction-C construction/call contract.
-# ---------------------------------------------------------------------------
-
+# Construction alias used by models/a2net.py.
 DynamicTeacherDirectionC = ReciprocalDynamicTeacher
 
 
