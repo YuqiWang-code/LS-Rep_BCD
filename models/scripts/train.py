@@ -90,7 +90,6 @@ DYNAMIC_EXPERIMENTS = {"D1", "D2"}
 # Pair-valued diagnostics emitted as [B,2] or [2].
 PAIR_DETAIL_KEYS = {
     "q": "q_",
-    "weights": "w_",
     "effective_weights": "effective_",
     "proposal_brier": "proposal_brier_",
     "dynamic_teacher_brier": "dynamic_teacher_brier_",
@@ -511,8 +510,9 @@ def _training_metric_keys() -> Tuple[str, ...]:
         for name in ("sam", "ov"):
             keys.append(prefix + name)
 
-    # Explicit reject mass is useful beside the two teacher masses.
-    keys.append("w_reject")
+    # Routing action masses are emitted together as [SAM, OV, Reject].
+    # Keep them explicit instead of treating `weights` as a teacher pair.
+    keys.extend(("w_sam", "w_ov", "w_reject"))
     keys.extend(SCALAR_DETAIL_KEYS)
     return tuple(dict.fromkeys(keys))
 
@@ -555,7 +555,13 @@ def _populate_detail_metrics(values, detail):
 
     if "weights" in detail:
         weights = detail["weights"]
-        if torch.is_tensor(weights) and weights.ndim > 0 and weights.shape[-1] == 3:
+        if (
+            torch.is_tensor(weights)
+            and weights.ndim > 0
+            and weights.shape[-1] == 3
+        ):
+            values["w_sam"] = weights[..., 0].float().mean()
+            values["w_ov"] = weights[..., 1].float().mean()
             values["w_reject"] = weights[..., 2].float().mean()
 
     for name in SCALAR_DETAIL_KEYS:
@@ -846,6 +852,8 @@ def train_epoch(
             "teacher_target_gap",
             "probe_cls_kd_gt_ratio",
             "probe_cls_kd_gt_cosine",
+            "w_sam",
+            "w_ov",
             "w_reject",
             *PAIR_DETAIL_KEYS.values(),
             *SCALAR_DETAIL_KEYS,
