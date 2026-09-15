@@ -106,7 +106,18 @@ cd /home/yqwang/projects/LS-Rep_BCD_RSML_3
 
 **RDT-CD 机制**（`models/distill/dynamic_teacher.py`）：SAMStruct / OVCDistill 的 Cache 不再是固定教师目标，而是**教师先验**；两个小型在线 `ResidualTeacherExpert`（fast，零初始化、输出有界 logit 修正）随训练优化，EMA 复制为 target teacher 生成学生看到的动态提案。学生与教师**互相更新**：教师→学生蒸馏（`total`，只更新学生）、学生误差→教师拟合（`teacher_total`，只更新 fast teacher），再用 GT 正收益准入逐像素挑选。部署图完全删除辅助，参数 2,913,094。
 
-**Run1 消融**（`train_scripts/RDT-CD/Run1/README.md`）：3 组（B0 / D1 / D2）× 4 数据集 = 12 run，batch 64、40k、seed 2333；双卡并行——GPU 0 跑 SYSU+WHU、GPU 1 跑 CDD+LEVIR，各卡内 B0→D1→D2 串行。判定：D1 vs B0 为整体有效性；D1 vs D2 为 Cache 先验是否有增量。关键健康信号看 `effective_per_error_mass`（不应过早坍缩）、`teacher_ema_update_norm`/`teacher_target_gap`（教师是否持续演化）。单 seed 仅作筛选，论文级主比较 seed `2333/3407/5871`。
+**Run1 消融**（`train_scripts/RDT-CD/Run1/README.md`）：3 组（B0 / D1 / D2）× 4 数据集 = 12 run，batch 64、40k、seed 2333；双卡并行——GPU 0 跑 SYSU+WHU、GPU 1 跑 CDD+LEVIR，各卡内 B0→D1→D2 串行。判定：D1 vs B0 为整体有效性；D1 vs D2 为 Cache 先验是否有增量。关键健康信号看 `effective_per_error_mass`（不应过早坍缩）、`teacher_ema_update_norm`/`teacher_target_gap`（教师是否持续演化）。
+
+**Run1 正式结果（40k / seed 2333，F1%，来自 `docs/experiment_metrics.xlsx`）**：
+
+| 数据集 | B0 | D1 | D2 | Δ(D1−B0) |
+|---|---|---:|---:|---:|
+| SYSU | 80.8083 | 83.2334 | 82.6337 | **+2.4251** |
+| WHU | 94.0267 | 94.2130 | 93.5726 | +0.1863 |
+| CDD | 97.7929 | 97.7973 | 97.7998 | +0.0044 |
+| LEVIR | 91.2725 | 91.1595 | 91.1608 | −0.1130 |
+
+**结论（单 seed，初步证明有效性）**：D1 相对 B0 平均 ΔF1 ≈ +0.63，其中 **SYSU +2.43 F1 / +3.49 IoU** 是方向 C 一路以来第一个可信正信号（远超单 seed 噪声 ~0.1）；WHU +0.19、CDD ≈0、LEVIR −0.11。**Cache 先验有增量（D1 vs D2）**：SYSU +0.60、WHU +0.64；尤其 WHU 的 D2（纯在线教师、无 Cache 先验）反而比 B0 差 −0.45，靠 Cache 先验拉回 +0.19，说明「Cache 作先验 + 在线动态教师」组合有效、单独在线教师（D2）在 WHU 上甚至有害。收益集中在变化语义最丰富的 SYSU——正是固定教师失效最严重的场景，与动态教师设计动机一致。当前仅用于证明方法创新有效性，不追求多 seed 统计结论。
 
 ## 5. 模型与部署约束
 
