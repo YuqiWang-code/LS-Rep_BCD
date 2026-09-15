@@ -18,7 +18,9 @@ A. SCGR task-space mechanism
    4) teacher selection chooses the useful teacher (SAM/OV);
    5) sparse change is normalized by remaining error mass rather than HxW,
       so useful sparse supervision is not drowned by background area;
-   6) force_action=Reject really disables teacher supervision.
+   6) force_action=Reject really disables teacher supervision;
+   7) D1NG disables only the gradient gate and accepts the deliberately
+      positive-utility / negative-cosine counterexample.
 
 B. RDT-CD integration
    7) dynamic-teacher forward is finite and exposes the SCGR contract;
@@ -66,6 +68,7 @@ sys.path.insert(0, str(PROJECT_ROOT))
 
 from models import A2Net_LWGANet_L0  # noqa: E402
 from models.distill.task_space import (  # noqa: E402
+    DEFAULT_REGION_SIZE,
     OV_INDEX,
     REJECT_INDEX,
     SAM_INDEX,
@@ -104,7 +107,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--teacher_ema", type=float, default=0.99)
     parser.add_argument("--max_logit_delta", type=float, default=2.0)
     parser.add_argument("--kd_lambda", type=float, default=0.06)
-    parser.add_argument("--scgr_region_size", type=int, default=16)
 
     parser.add_argument(
         "--no-cache-conditioning",
@@ -112,6 +114,14 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Smoke the capacity-matched D2 no-cache control. "
             "The default smokes D1 with a synthetic SAM/OV cache pack."
+        ),
+    )
+    parser.add_argument(
+        "--no-gradient-gate",
+        action="store_true",
+        help=(
+            "Smoke the D1NG ablation: keep regional utility/error-mass "
+            "routing but disable only the gradient-concordance gate."
         ),
     )
 
@@ -133,8 +143,6 @@ def parse_args() -> argparse.Namespace:
         raise ValueError("--max_logit_delta must be positive")
     if args.kd_lambda < 0:
         raise ValueError("--kd_lambda must be non-negative")
-    if args.scgr_region_size <= 0:
-        raise ValueError("--scgr_region_size must be positive")
 
     return args
 
@@ -340,7 +348,6 @@ def check_scgr_rejects_nonpositive_utility(
         feature=feature,
         policy=SCGR_POLICY,
         teacher=SCGR_TEACHER,
-        region_size=16,
     )
 
     if bool(route["accepted_map"].any()):
@@ -394,7 +401,6 @@ def check_scgr_rejects_gradient_conflict(
         feature=feature,
         policy=SCGR_POLICY,
         teacher=SCGR_TEACHER,
-        region_size=16,
     )
 
     utility = float(route["region_utility"][0, SAM_INDEX, 0, 0])
@@ -429,6 +435,59 @@ def check_scgr_rejects_gradient_conflict(
 
 
 @torch.no_grad()
+def check_scgr_nogradgate_accepts_output_benefit(
+    device: torch.device,
+) -> None:
+    """D1NG must differ from full SCGR only at the gradient gate.
+
+    Reuse the positive-Brier / negative-cosine counterexample. Full SCGR rejects
+    it; NoGradGate must admit it because regional utility remains positive.
+    """
+    prediction, target, feature, quality = _base_two_error_fixture(device)
+
+    sam = prediction.clone()
+    sam[0, 0, 0, 0] = 0.201
+    sam[0, 0, 0, 1] = 0.0
+    ov = prediction.clone()
+    proposals = torch.cat((sam, ov), dim=1)
+    quality[:, 1] = 0.0
+
+    route = task_space_route(
+        prediction,
+        target,
+        proposals,
+        quality,
+        feature=feature,
+        policy=SCGR_POLICY,
+        teacher=SCGR_TEACHER,
+        gradient_gate=False,
+    )
+
+    utility = float(route["region_utility"][0, SAM_INDEX, 0, 0])
+    cosine = float(route["region_concordance"][0, SAM_INDEX, 0, 0])
+    if not utility > 0.0 or not cosine < 0.0:
+        raise AssertionError(
+            "NoGradGate counterexample lost its intended utility/cosine signs"
+        )
+    if not bool(route["accepted_map"].any()):
+        raise AssertionError(
+            "D1NG incorrectly rejected a positive-utility teacher"
+        )
+    if float(route["gradient_gate_enabled"]) != 0.0:
+        raise AssertionError("gradient_gate_enabled diagnostic is not zero")
+
+    kd = routed_bernoulli_kd(prediction, proposals, route)
+    if not float(kd["total"]) > 0.0:
+        raise AssertionError("D1NG accepted route produced zero KD")
+
+    print(
+        "[PASS] D1NG disables only gradient gate: "
+        f"utility={utility:.6e}, cosine={cosine:.6f}, "
+        f"kd={float(kd['total']):.6e}"
+    )
+
+
+@torch.no_grad()
 def check_scgr_accepts_concordant_teacher(
     device: torch.device,
 ) -> None:
@@ -452,7 +511,6 @@ def check_scgr_accepts_concordant_teacher(
         feature=feature,
         policy=SCGR_POLICY,
         teacher=SCGR_TEACHER,
-        region_size=16,
     )
 
     utility = float(route["region_utility"][0, SAM_INDEX, 0, 0])
@@ -524,7 +582,6 @@ def check_scgr_selects_best_available_teacher(
         feature=feature,
         policy=SCGR_POLICY,
         teacher=SCGR_TEACHER,
-        region_size=16,
     )
 
     if not bool(route["accepted_map"].any()):
@@ -593,7 +650,6 @@ def _sparse_mass_case(
         feature=feature,
         policy=SCGR_POLICY,
         teacher=SCGR_TEACHER,
-        region_size=16,
     )
     kd = routed_bernoulli_kd(
         prediction,
@@ -685,7 +741,6 @@ def check_scgr_force_reject(
         policy=SCGR_POLICY,
         teacher=SCGR_TEACHER,
         force_action=REJECT_INDEX,
-        region_size=16,
     )
 
     if bool(route["accepted_map"].any()):
@@ -939,7 +994,7 @@ def build_dynamic_model(
         "teacher": SCGR_TEACHER,
         "difficulty": True,
         "cache_conditioning": not args.no_cache_conditioning,
-        "region_size": args.scgr_region_size,
+        "gradient_gate": not args.no_gradient_gate,
     }
 
     model = A2Net_LWGANet_L0(
@@ -1491,6 +1546,7 @@ def run_scgr_unit_smoke(
     print("\n=== SCGR TASK-SPACE UNIT SMOKE ===")
     check_scgr_rejects_nonpositive_utility(device)
     check_scgr_rejects_gradient_conflict(device)
+    check_scgr_nogradgate_accepts_output_benefit(device)
     check_scgr_accepts_concordant_teacher(device)
     check_scgr_selects_best_available_teacher(device)
     check_scgr_sparse_change_mass_conservation(device)
@@ -1516,7 +1572,11 @@ def run_model_integration_smoke(
         mode_name = "D2 no-cache control"
     else:
         teacher_pack = make_synthetic_teacher_pack(target)
-        mode_name = "D1 cache-conditioned"
+        mode_name = (
+            "D1NG cache-conditioned NoGradGate"
+            if args.no_gradient_gate
+            else "D1 cache-conditioned full SCGR"
+        )
 
     print(f"mode: {mode_name}")
 
@@ -1575,7 +1635,8 @@ def main() -> None:
     print("RDT-CD + SCGR synthetic smoke")
     print(f"device: {device}")
     print(f"seed: {args.seed}")
-    print(f"region_size: {args.scgr_region_size}")
+    print(f"region_size: {DEFAULT_REGION_SIZE} (fixed)")
+    print(f"gradient_gate: {not args.no_gradient_gate}")
     print(
         "cache_conditioning: "
         f"{not args.no_cache_conditioning}"

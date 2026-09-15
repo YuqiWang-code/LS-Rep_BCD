@@ -9,9 +9,14 @@ D1
     Full reciprocal dynamic teacher (RDT-CD) with SAMStruct + OVCDistill
     cache priors and SCGR routing.
 
+D1NG
+    Minimal NoGradGate ablation.  Identical to D1 except the analytical
+    gradient-concordance gate is disabled; regional utility, error-mass
+    normalization, cache priors, teacher dynamics and all other rules remain.
+
 D2
     Capacity-matched no-cache control.  The same online/EMA teacher experts
-    are trained, but cache conditioning is disabled.  SCGR remains unchanged.
+    are trained, but cache conditioning is disabled.  Full SCGR remains.
 
 SCGR = Sparse-Change Gradient-Concordant Routing.
 
@@ -60,9 +65,11 @@ from models.utils.scheduler import adjust_learning_rate
 EXPECTED_DEPLOY_PARAMS = 2_913_094
 EXPECTED_DEPLOY_FLOPS = 2.7475e9
 DEPLOY_FLOPS_ATOL = 0.03e9
-IMPLEMENTATION_VERSION = "rdt_scgr_v1"
+IMPLEMENTATION_VERSION = "rdt_scgr_v2"
 SCGR_POLICY = "scgr"
 SCGR_TEACHER = "both"
+SCGR_REGION_SIZE = 16
+EXACT_PROBE_INTERVAL = 100
 
 EXPERIMENTS = {
     "B0": {
@@ -70,21 +77,31 @@ EXPERIMENTS = {
         "auxiliary_mode": "none",
         "mechanism": "none",
         "cache_conditioning": False,
+        "gradient_gate": False,
     },
     "D1": {
         "name": "D1_RDT_SCGR_Full",
         "auxiliary_mode": "direction_c",
         "mechanism": "dynamic_teacher",
         "cache_conditioning": True,
+        "gradient_gate": True,
+    },
+    "D1NG": {
+        "name": "D1NG_RDT_SCGR_NoGradGate",
+        "auxiliary_mode": "direction_c",
+        "mechanism": "dynamic_teacher",
+        "cache_conditioning": True,
+        "gradient_gate": False,
     },
     "D2": {
         "name": "D2_RDT_SCGR_NoCache",
         "auxiliary_mode": "direction_c",
         "mechanism": "dynamic_teacher",
         "cache_conditioning": False,
+        "gradient_gate": True,
     },
 }
-DYNAMIC_EXPERIMENTS = {"D1", "D2"}
+DYNAMIC_EXPERIMENTS = {"D1", "D1NG", "D2"}
 
 
 # Pair-valued diagnostics emitted as [B,2] or [2].
@@ -141,6 +158,8 @@ SCALAR_DETAIL_KEYS = (
     "scgr_background_error_mass",
     "scgr_effective_error_mass",
     "scgr_effective_per_error_mass",
+    "scgr_gradient_gate_enabled",
+    "scgr_region_size",
 )
 
 # These are required for a dynamic-teacher forward.  Failing loudly here is
@@ -153,6 +172,8 @@ REQUIRED_SCGR_DETAIL_KEYS = (
     "scgr_positive_concordance_ratio",
     "scgr_gradient_conflict_ratio",
     "scgr_effective_per_error_mass",
+    "scgr_gradient_gate_enabled",
+    "scgr_region_size",
 )
 
 
@@ -185,10 +206,8 @@ def parse_args():
     parser.add_argument("--boundary_radius", type=int, default=2)
     parser.add_argument("--small_area", type=int, default=64)
 
-    # SCGR is parameter-free.  region_size defines non-overlapping full-res
-    # routing regions in task_space.py.  16 means a 16x16 pixel region on a
-    # 256x256 training patch.
-    parser.add_argument("--scgr_region_size", type=int, default=16)
+    # Formal SCGR protocol fixes routing regions to 16x16 pixels.
+    # This is deliberately not exposed as a tunable CLI hyperparameter.
 
     # RDT-CD online teacher controls.  Their optimization schedule is preserved
     # from the current RDT implementation so routing is the only method change.
@@ -260,8 +279,6 @@ def parse_args():
         raise ValueError("kd_lambda must be nonnegative")
     if args.boundary_radius < 1 or args.small_area < 1:
         raise ValueError("boundary_radius/small_area must be positive")
-    if args.scgr_region_size < 1:
-        raise ValueError("scgr_region_size must be positive")
     if args.teacher_hidden < 1:
         raise ValueError("teacher_hidden must be positive")
     if not 0.0 <= args.teacher_ema < 1.0:
@@ -283,6 +300,9 @@ def parse_args():
     args.auxiliary_mode = recipe["auxiliary_mode"]
     args.mechanism = recipe["mechanism"]
     args.cache_conditioning = bool(recipe["cache_conditioning"])
+    args.gradient_gate = bool(recipe["gradient_gate"])
+    args.scgr_region_size = SCGR_REGION_SIZE
+    args.exact_probe_interval = EXACT_PROBE_INTERVAL
 
     args.cache_replay = "aligned"
     args.teacher_update = args.mechanism == "dynamic_teacher"
@@ -472,7 +492,7 @@ def build_model(args):
             "teacher": SCGR_TEACHER,
             "difficulty": True,
             "cache_conditioning": args.cache_conditioning,
-            "region_size": args.scgr_region_size,
+            "gradient_gate": args.gradient_gate,
         }
         return A2Net_LWGANet_L0(
             pretrained=args.pretrained,
@@ -502,6 +522,9 @@ def _training_metric_keys() -> Tuple[str, ...]:
         "teacher_target_gap",
         "probe_cls_kd_gt_ratio",
         "probe_cls_kd_gt_cosine",
+        "probe_cls_kd_gt_negative_ratio",
+        "probe_cls_kd_gt_cosine_min",
+        "probe_cls_kd_gt_count",
         "data_time",
         "step_time",
     ]
@@ -631,11 +654,15 @@ def train_epoch(
     last_teacher_lr = 0.0
     data_started = time.perf_counter()
 
-    # Exact probe is sampled on the first batch of every epoch.  This is the
-    # same low-frequency diagnostic spirit as the previous trainer and avoids
-    # paying two autograd.grad calls on every optimization step.
-    epoch_probe_ratio = 0.0
-    epoch_probe_cosine = 0.0
+    # Exact autograd probe is independent of the analytical SCGR proxy.
+    # It is sampled on the first dynamic-teacher step and every fixed 100 steps
+    # thereafter, giving enough observations to falsify the claim that SCGR
+    # reduces real final-classifier gradient conflict without probing every step.
+    probe_ratio_sum = 0.0
+    probe_cosine_sum = 0.0
+    probe_negative_count = 0
+    probe_count = 0
+    probe_cosine_min = 1.0
 
     for batch in loader:
         data_elapsed = time.perf_counter() - data_started
@@ -694,15 +721,21 @@ def train_epoch(
         teacher_loss = detail.get("teacher_total", zero)
         student_loss = main_loss + aux_weighted
 
-        if batches == 0 and detail:
-            (
-                epoch_probe_ratio,
-                epoch_probe_cosine,
-            ) = _exact_classifier_probe(
+        should_probe = bool(detail) and (
+            global_step == 0
+            or (global_step + 1) % EXACT_PROBE_INTERVAL == 0
+        )
+        if should_probe:
+            probe_ratio, probe_cosine = _exact_classifier_probe(
                 main_loss,
                 aux_weighted,
                 model.decoder.cls.weight,
             )
+            probe_ratio_sum += probe_ratio
+            probe_cosine_sum += probe_cosine
+            probe_negative_count += int(probe_cosine < 0.0)
+            probe_count += 1
+            probe_cosine_min = min(probe_cosine_min, probe_cosine)
 
         finite_values = [student_loss]
         if teacher_optimizer is not None:
@@ -783,8 +816,11 @@ def train_epoch(
                 teacher_ema_update_norm
             ),
             teacher_target_gap=zero.new_tensor(teacher_target_gap),
-            probe_cls_kd_gt_ratio=zero.new_tensor(epoch_probe_ratio),
-            probe_cls_kd_gt_cosine=zero.new_tensor(epoch_probe_cosine),
+            probe_cls_kd_gt_ratio=zero,
+            probe_cls_kd_gt_cosine=zero,
+            probe_cls_kd_gt_negative_ratio=zero,
+            probe_cls_kd_gt_cosine_min=zero,
+            probe_cls_kd_gt_count=zero,
             data_time=zero.new_tensor(data_elapsed),
             step_time=zero.new_tensor(time.perf_counter() - step_started),
         )
@@ -838,6 +874,26 @@ def train_epoch(
         for key, value in totals.items()
     }
 
+    # Exact-probe metrics are probe-normalized, not batch-normalized.
+    if probe_count > 0:
+        averages["probe_cls_kd_gt_ratio"] = (
+            probe_ratio_sum / probe_count
+        )
+        averages["probe_cls_kd_gt_cosine"] = (
+            probe_cosine_sum / probe_count
+        )
+        averages["probe_cls_kd_gt_negative_ratio"] = (
+            probe_negative_count / probe_count
+        )
+        averages["probe_cls_kd_gt_cosine_min"] = probe_cosine_min
+        averages["probe_cls_kd_gt_count"] = float(probe_count)
+    else:
+        averages["probe_cls_kd_gt_ratio"] = 0.0
+        averages["probe_cls_kd_gt_cosine"] = 0.0
+        averages["probe_cls_kd_gt_negative_ratio"] = 0.0
+        averages["probe_cls_kd_gt_cosine_min"] = 0.0
+        averages["probe_cls_kd_gt_count"] = 0.0
+
     # Keep clean B0 logs concise instead of fabricating zero teacher/SCGR
     # statistics that were never measured.
     if args.mechanism != "dynamic_teacher":
@@ -852,6 +908,9 @@ def train_epoch(
             "teacher_target_gap",
             "probe_cls_kd_gt_ratio",
             "probe_cls_kd_gt_cosine",
+            "probe_cls_kd_gt_negative_ratio",
+            "probe_cls_kd_gt_cosine_min",
+            "probe_cls_kd_gt_count",
             "w_sam",
             "w_ov",
             "w_reject",
@@ -1119,6 +1178,8 @@ def validate_resume(args, checkpoint):
         "boundary_radius",
         "small_area",
         "scgr_region_size",
+        "gradient_gate",
+        "exact_probe_interval",
         "kd_lambda",
         "inWidth",
         "inHeight",

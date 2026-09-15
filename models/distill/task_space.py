@@ -12,9 +12,11 @@ Teacher order is fixed:
   0 -> SAMStruct structural teacher
   1 -> OVCDistill semantic teacher
 
-A teacher is admitted only when it is available, gives positive GT-audited
-Brier utility, and has positive analytical classifier-gradient concordance
-with the GT direction. Otherwise the region is rejected.
+Full SCGR admits a teacher only when it is available, gives positive
+GT-audited Brier utility, and has positive analytical classifier-gradient
+concordance with the GT direction. The D1NG minimal ablation disables only
+the gradient-concordance gate while preserving region routing, error-mass
+normalization, teacher/cache construction, and every other training rule.
 
 Nothing in this file belongs to the deploy graph.
 """
@@ -360,7 +362,7 @@ def task_space_route(
     policy: str = "scgr",
     teacher: str = "both",
     force_action: Optional[int] = None,
-    region_size: int = DEFAULT_REGION_SIZE,
+    gradient_gate: bool = True,
 ) -> Dict[str, torch.Tensor]:
     """Sparse-Change Gradient-Concordant Routing.
 
@@ -369,8 +371,6 @@ def task_space_route(
     """
     if policy != "scgr":
         raise ValueError("task_space_route only supports policy='scgr'")
-    if region_size <= 0:
-        raise ValueError("region_size must be positive")
 
     _check_4d("prediction", prediction, 1)
     _check_binary_target(target)
@@ -395,6 +395,8 @@ def task_space_route(
     y = target.detach().float()
     q = proposals.detach().float().clamp(0.0, 1.0)
     reliability = quality.detach().float().clamp(0.0, 1.0)
+    # Formal SCGR protocol: region size is fixed, not a tunable hyperparameter.
+    region_size = DEFAULT_REGION_SIZE
 
     if importance is None:
         imp = torch.ones_like(p)
@@ -467,16 +469,28 @@ def task_space_route(
     tolerance = 8.0 * torch.finfo(p.dtype).eps
     region_positive_utility = region_utility > tolerance
     region_positive_concordance = region_concordance > 0.0
-    region_eligible = (
-        region_available
-        & region_positive_utility
-        & region_positive_concordance
-    )
+
+    # D1NG is the minimal falsification ablation for the gradient gate:
+    # everything remains identical to full SCGR except that concordance does
+    # not participate in eligibility or routing score.
+    if bool(gradient_gate):
+        region_eligible = (
+            region_available
+            & region_positive_utility
+            & region_positive_concordance
+        )
+        concordance_factor = region_concordance.clamp_min(0.0)
+    else:
+        region_eligible = (
+            region_available
+            & region_positive_utility
+        )
+        concordance_factor = torch.ones_like(region_concordance)
 
     # 4) Teacher routing score.
     region_score = (
         region_relative_utility.clamp_min(0.0)
-        * region_concordance.clamp_min(0.0)
+        * concordance_factor
         * region_quality
         * region_eligible.to(p.dtype)
     )
@@ -564,6 +578,12 @@ def task_space_route(
         "region_mixture": region_mixture,
         "region_accepted": region_accepted,
         "region_action": region_action,
+        "gradient_gate_enabled": torch.tensor(
+            float(bool(gradient_gate)), device=p.device, dtype=p.dtype
+        ),
+        "region_size": torch.tensor(
+            float(DEFAULT_REGION_SIZE), device=p.device, dtype=p.dtype
+        ),
     }
 
 

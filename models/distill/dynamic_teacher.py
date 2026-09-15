@@ -48,6 +48,7 @@ import torch.nn.functional as F
 
 from .diagnostics import build_cd_difficulty, masked_mean
 from .task_space import (
+    DEFAULT_REGION_SIZE,
     NUM_TEACHERS,
     OV_INDEX,
     REJECT_INDEX,
@@ -315,7 +316,7 @@ class ReciprocalDynamicTeacher(nn.Module):
         teacher: str = "both",
         difficulty: bool = True,
         cache_conditioning: bool = True,
-        region_size: int = 16,
+        gradient_gate: bool = True,
     ) -> None:
         super().__init__()
 
@@ -325,7 +326,6 @@ class ReciprocalDynamicTeacher(nn.Module):
         max_logit_delta = float(max_logit_delta)
         boundary_radius = int(boundary_radius)
         small_area = int(small_area)
-        region_size = int(region_size)
 
         if channels <= 0:
             raise ValueError("channels must be positive")
@@ -355,10 +355,6 @@ class ReciprocalDynamicTeacher(nn.Module):
             raise ValueError(
                 "teacher must be one of: both/sam/ov"
             )
-        if region_size <= 0:
-            raise ValueError(
-                "region_size must be positive"
-            )
 
         self.channels = channels
         self.hidden = hidden
@@ -370,7 +366,8 @@ class ReciprocalDynamicTeacher(nn.Module):
         self.teacher = str(teacher)
         self.difficulty = bool(difficulty)
         self.cache_conditioning = bool(cache_conditioning)
-        self.region_size = region_size
+        self.gradient_gate = bool(gradient_gate)
+        self.region_size = DEFAULT_REGION_SIZE
 
         self.fast = nn.ModuleList(
             [
@@ -784,7 +781,7 @@ class ReciprocalDynamicTeacher(nn.Module):
                 policy=self.policy,
                 teacher=self.teacher,
                 force_action=force_action,
-                region_size=self.region_size,
+                gradient_gate=self.gradient_gate,
             )
 
             # --------------------------------------------------------------
@@ -1089,10 +1086,15 @@ class ReciprocalDynamicTeacher(nn.Module):
 
             # Of regions that are output-space beneficial, how many are
             # explicitly rejected by the gradient-concordance safety gate?
-            scgr_negative_cosine_reject_ratio = _masked_ratio(
-                gradient_conflict_region,
-                positive_utility_available,
-            )
+            if self.gradient_gate:
+                scgr_negative_cosine_reject_ratio = _masked_ratio(
+                    gradient_conflict_region,
+                    positive_utility_available,
+                )
+            else:
+                # In D1NG negative-cosine regions are diagnosed but are not
+                # rejected by the disabled gradient gate.
+                scgr_negative_cosine_reject_ratio = p.new_zeros(())
 
             scgr_region_utility = _pair_region_mean(
                 route["region_utility"],
@@ -1340,6 +1342,16 @@ class ReciprocalDynamicTeacher(nn.Module):
                         )
                     ),
 
+                "scgr_gradient_gate_enabled":
+                    p.new_tensor(
+                        float(self.gradient_gate)
+                    ),
+
+                "scgr_region_size":
+                    p.new_tensor(
+                        float(DEFAULT_REGION_SIZE)
+                    ),
+
                 # ==========================================================
                 # SCGR-specific scalar diagnostics.
                 # ==========================================================
@@ -1465,7 +1477,8 @@ class ReciprocalDynamicTeacher(nn.Module):
             f"teacher={self.teacher!r}, "
             f"difficulty={self.difficulty}, "
             f"cache_conditioning={self.cache_conditioning}, "
-            f"region_size={self.region_size}"
+            f"gradient_gate={self.gradient_gate}, "
+            f"region_size={DEFAULT_REGION_SIZE}"
         )
 
 
