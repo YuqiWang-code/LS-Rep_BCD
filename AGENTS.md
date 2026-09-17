@@ -1,6 +1,6 @@
 # AGENTS.md — LS-Rep_BCD_RSML_3 / RDT-CD
 
-> Last updated: 2026-09-15
+> Last updated: 2026-09-17
 > 本文件是当前项目中 AI/Coding Agent 的工作约束。当前唯一活动实验是 `train_scripts/RDT-CD/Run2/`（方向 C），主方法为 **RDT-CD + SCGR（Sparse-Change Gradient-Concordant Routing，稀疏变化梯度一致路由）**；学生模型 A2Net-LWGANet-L0，部署参数 2,913,094 不变。项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。不记录或继承旧实验（SAM-HSD、DART-R-TS 的固定教师、旧 C0 梯度路由、RDT-CD Run1 等已归档）。
 
 ## GitHub 提交流程
@@ -109,9 +109,9 @@ cd /home/yqwang/projects/LS-Rep_BCD_RSML_3
 
 **SCGR（Run2 新增，`models/distill/task_space.py` 的 `task_space_route`）**：针对 Run1 在稀疏变化数据集上 image 级整图拒绝率过高、KD 梯度与 GT 反相的问题，把逐像素 Brier 增益路由升级为——(1) **16×16 区域路由**（避免稀疏有用变化被图像面积淹没）；(2) **误差质量归一化 KD**（按区域误差质量而非面积加权）；(3) **梯度一致门**（教师区域提案仅在分析分类器梯度与 GT 正 concordance 时准入）。部署图完全删除辅助，参数 2,913,094 不变，`implementation_version=rdt_scgr_v2`、`scgr_region_size=16`（固定，不暴露为 CLI 超参）。
 
-**Run2 消融（当前活动）**（`train_scripts/RDT-CD/Run2/README.md`）：4 组（B0 / D1NG / D1 / D2）× 4 数据集 = 16 run，batch 64、40k、seed 2333；双卡并行——GPU 0 跑 SYSU+WHU、GPU 1 跑 CDD+LEVIR，各卡内 B0→D1NG→D1→D2 串行。判定：D1 vs B0 = 完整 SCGR 整体有效性；D1 vs D1NG = 梯度一致门的净贡献（唯一变量是门开关）；D1 vs D2 = Cache 先验的增量。关键健康信号看 `scgr_region_accept_ratio`/`scgr_gradient_conflict_ratio`（梯度门是否起作用）、`effective_per_error_mass`（不应过早坍缩）、`teacher_ema_update_norm`/`teacher_target_gap`（教师是否持续演化）。
+**Run2 消融（已停训，SCGR 无效）**（`train_scripts/RDT-CD/Run2/README.md`）：4 组（B0 / D1NG / D1 / D2）× 4 数据集 = 16 run，batch 64、40k、seed 2333；双卡并行——GPU 0 跑 SYSU+WHU、GPU 1 跑 CDD+LEVIR，各卡内 B0→D1NG→D1→D2 串行。完成 11 run（B0×4、D1NG×4、D1×SYSU/CDD/LEVIR）；D1/WHU 与 D2 因结论已明而停训。判定：D1 vs B0 = 完整 SCGR 整体有效性；D1 vs D1NG = 梯度一致门的净贡献；D1 vs D2 = Cache 先验的增量（未完成）。
 
-**Run1 历史结论（已归档，单 seed 2333）**：D1 相对 B0 平均 ΔF1 ≈ +0.63，其中 SYSU +2.43 F1 / +3.49 IoU 是方向 C 首个可信正信号；WHU +0.19、CDD ≈0、LEVIR −0.11；Cache 先验有增量（D1 vs D2：SYSU +0.60、WHU +0.64，WHU 的 D2 纯在线教师反而 −0.45 被 Cache 拉回）。Run1 失效诊断（见 `docs/temporary/RDT-CD_教师演化与失效场景分析_2026-09-15.md`）：CDD 近天花板无 headroom、LEVIR 先验无信息、WHU 先验有信息但 change 稀疏致 image 级整图拒绝率 55%~75%——这正是 SCGR 要解决的三个点。**Run2（SCGR）当前训练中，正式结果待出**。
+**Run1 历史结论（已归档，单 seed 2333）**：D1 相对 B0 平均 ΔF1 ≈ +0.63，其中 SYSU +2.43 F1 / +3.49 IoU 是方向 C 首个可信正信号；WHU +0.19、CDD ≈0、LEVIR −0.11；Cache 先验有增量（D1 vs D2：SYSU +0.60、WHU +0.64，WHU 的 D2 纯在线教师反而 −0.45 被 Cache 拉回）。Run1 失效诊断（见 `docs/temporary/RDT-CD_教师演化与失效场景分析_2026-09-15.md`）：CDD 近天花板无 headroom、LEVIR 先验无信息、WHU 先验有信息但 change 稀疏致 image 级整图拒绝率 55%~75%——这正是 SCGR 要解决的三个点。**Run2 结论（单 seed 2333，SCGR 无效）**：D1（完整 SCGR）相对 B0 在 SYSU **−0.60**、CDD −0.04、LEVIR +0.14（WHU 停训未出）；D1 vs D1NG ≈0（梯度一致门几乎空转，`scgr_gradient_conflict_ratio≈0`，无可拒的梯度冲突）；D1NG vs B0 在 SYSU −0.57、WHU −0.99（区域/误差质量路由本身略有害）。即 SCGR 的两个新机制都没带来正收益，clean baseline 已是最强。Run1 的 +2.43 也被确认是 baseline 噪声（仅代码改动、零方法改动，B0 就重掷出 +2.43）。**方向 C 教师蒸馏线至此无可信正信号**。
 
 ## 5. 模型与部署约束
 
