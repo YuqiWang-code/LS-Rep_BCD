@@ -1,7 +1,7 @@
 # AGENTS.md — LS-Rep_BCD_RSML_3 / RDT-CD
 
 > Last updated: 2026-09-17
-> 本文件是当前项目中 AI/Coding Agent 的工作约束。当前唯一活动实验是 `train_scripts/RDT-CD/Run2/`（方向 C），主方法为 **RDT-CD + SCGR（Sparse-Change Gradient-Concordant Routing，稀疏变化梯度一致路由）**；学生模型 A2Net-LWGANet-L0，部署参数 2,913,094 不变。项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。不记录或继承旧实验（SAM-HSD、DART-R-TS 的固定教师、旧 C0 梯度路由、RDT-CD Run1 等已归档）。
+> 本文件是当前项目中 AI/Coding Agent 的工作约束。当前唯一活动实验为 `train_scripts/RDT-CD/Run1/`（方向 C），主方法为 **RDT-CD（Reciprocal Dynamic Teachers，互惠动态教师）**；学生模型 A2Net-LWGANet-L0，部署参数 2,913,094 不变。**Run2/SCGR 已根据现有实验结果判定无效并归档，不再继续迭代**。项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。不记录或继承旧实验（SAM-HSD、DART-R-TS 固定教师、旧 C0 梯度路由、RDT-CD Run2/SCGR 等已归档）。
 
 ## GitHub 提交流程
 
@@ -30,10 +30,10 @@ git push
 当前唯一活动实验族：
 
 ```text
-train_scripts/RDT-CD/Run2/      # 方向 C：RDT-CD + SCGR（B0 / D1NG / D1 / D2）
+train_scripts/RDT-CD/Run1/      # 方向 C：RDT-CD（B0 / D1 / D2）
 ```
 
-（`train_scripts/RDT-CD/Run1/`（旧 RDT-CD）、`train_scripts/SAM-HSD/`、`train_scripts/DART-R/` 的固定教师与旧 C0 梯度路由均为历史归档，不再活动。）
+（`train_scripts/RDT-CD/Run2/`（失败的 SCGR 迭代）、`train_scripts/SAM-HSD/`、`train_scripts/DART-R/` 的固定教师与旧 C0 梯度路由均为历史归档，不再活动。）
 
 按以下优先级判断事实：
 
@@ -86,32 +86,129 @@ cd /home/yqwang/projects/LS-Rep_BCD_RSML_3
 | 项目代码 | `/home/yqwang/projects/LS-Rep_BCD_RSML_3` |
 | 数据集 | `/share_datasets/CD` |
 | Teacher Cache | `/share_datasets/CD_teacher_cache` |
-| RDT-CD checkpoint | `/share_datasets/yqwang/checkpoints/LS-Rep_BCD_RSML_3/RDT-CD`（Run2 在 `RDT-CD/Run2/<实验>/<数据集>/`） |
-| RDT-CD 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/RDT-CD`（Run2 在 `RDT-CD/Run2/<实验>/<数据集>/`） |
+| RDT-CD checkpoint | `/share_datasets/yqwang/checkpoints/LS-Rep_BCD_RSML_3/RDT-CD`（当前 Run1 在 `RDT-CD/Run1/<实验>/<数据集>/`） |
+| RDT-CD 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/RDT-CD`（当前 Run1 在 `RDT-CD/Run1/<实验>/<数据集>/`） |
 | 预训练权重 | `/home/yqwang/projects/LS-Rep_BCD_RSML_3/pre-trained_weights` |
 
-（旧 SAM-HSD / DART-R-TS 的 checkpoint 也在 `/share_datasets/yqwang/checkpoints/` 下，仅作归档，不再活动。Run2 起不再有 `steps_40000/seed_2333` 中间目录，这两项只写进训练日志配置头，后续实验沿用。）
+（旧 SAM-HSD / DART-R-TS 的 checkpoint 也在 `/share_datasets/yqwang/checkpoints/` 下，仅作归档，不再活动。当前 RDT-CD 实验目录不再使用 `steps_40000/seed_2333` 中间目录，这两项只写进训练日志配置头。）
 
 `.vscode/sftp.json` 用于手动上传代码，自动上传保持关闭；该配置忽略 `pre-trained_weights/` 和常见权重文件。
 
 ## 4. RDT-CD（方向 C）
 
-方向 C 主方法经历迭代：C0（梯度路由）、C1（DART-R-TS 固定教师）均被判无效（固定教师很快被学生超越、教师有效贡献趋近于零），Run1 迭代为 **RDT-CD（Reciprocal Dynamic Teachers，互惠动态教师）**，Run2 在 RDT-CD 之上加入 **SCGR（Sparse-Change Gradient-Concordant Routing，稀疏变化梯度一致路由）**。学生模型仍叫 A2Net-LWGANet-L0，RDT-CD/SCGR 都是训练期机制。`models/scripts/train.py` 注册以下入口：
+方向 C 主方法经历过多次迭代：C0（旧梯度路由）、C1（DART-R-TS 固定教师）均被判无效；Run1 进一步提出 **RDT-CD（Reciprocal Dynamic Teachers，互惠动态教师）**。Run2 曾在 RDT-CD 基础上加入 **SCGR（Sparse-Change Gradient-Concordant Routing）**，但现有实验结果不支持 SCGR 的有效性，因此 **Run2/SCGR 已停止并归档，当前方法恢复为 Run1 RDT-CD**。
+
+学生模型始终为 A2Net-LWGANet-L0。RDT-CD 是纯训练期辅助机制，不进入部署期主预测路径。
+
+`models/scripts/train.py` 当前保留以下实验入口：
 
 | ID | 机制 | 说明 |
-|---|---|---|
-| B0 | none | clean baseline，无教师 |
-| D1NG | dynamic_teacher + SCGR / 无梯度门 | RDT + Cache + 区域/误差质量路由，**关**梯度一致门 |
-| D1 | dynamic_teacher + SCGR | **当前主方法**（RDT + Cache + 完整 SCGR） |
-| D2 | dynamic_teacher + SCGR / 无 Cache | 同结构在线教师 + 完整 SCGR，去 Cache 先验的负对照 |
+| -- | -------------------------- | ---------------------------------------------------------------------------- |
+| B0 | none | **统一固定 clean baseline**，无教师 |
+| D1 | dynamic_teacher + cache | **当前主方法**：完整 RDT-CD，使用 SAMStruct + OVCDistill Cache 作为教师先验 |
+| D2 | dynamic_teacher + no-cache | 与 D1 保持相同在线动态教师容量，但关闭 Cache conditioning，用于验证 Foundation Teacher Cache 的增量价值 |
 
-**RDT-CD 机制**（`models/distill/dynamic_teacher.py`）：SAMStruct / OVCDistill 的 Cache 不再是固定教师目标，而是**教师先验**；两个小型在线 `ResidualTeacherExpert`（fast，零初始化、输出有界 logit 修正）随训练优化，EMA 复制为 target teacher 生成学生看到的动态提案。学生与教师**互相更新**：教师→学生蒸馏（`total`，只更新学生）、学生误差→教师拟合（`teacher_total`，只更新 fast teacher）。
+### RDT-CD 机制
 
-**SCGR（Run2 新增，`models/distill/task_space.py` 的 `task_space_route`）**：针对 Run1 在稀疏变化数据集上 image 级整图拒绝率过高、KD 梯度与 GT 反相的问题，把逐像素 Brier 增益路由升级为——(1) **16×16 区域路由**（避免稀疏有用变化被图像面积淹没）；(2) **误差质量归一化 KD**（按区域误差质量而非面积加权）；(3) **梯度一致门**（教师区域提案仅在分析分类器梯度与 GT 正 concordance 时准入）。部署图完全删除辅助，参数 2,913,094 不变，`implementation_version=rdt_scgr_v2`、`scgr_region_size=16`（固定，不暴露为 CLI 超参）。
+RDT-CD 的核心实现在 `models/distill/dynamic_teacher.py`。
 
-**Run2 消融（已停训，SCGR 无效）**（`train_scripts/RDT-CD/Run2/README.md`）：4 组（B0 / D1NG / D1 / D2）× 4 数据集 = 16 run，batch 64、40k、seed 2333；双卡并行——GPU 0 跑 SYSU+WHU、GPU 1 跑 CDD+LEVIR，各卡内 B0→D1NG→D1→D2 串行。完成 11 run（B0×4、D1NG×4、D1×SYSU/CDD/LEVIR）；D1/WHU 与 D2 因结论已明而停训。判定：D1 vs B0 = 完整 SCGR 整体有效性；D1 vs D1NG = 梯度一致门的净贡献；D1 vs D2 = Cache 先验的增量（未完成）。
+SAMStruct / OVCDistill 的 Cache 不再被视为固定且不可改变的最终教师答案，而是作为 **teacher priors（教师先验）**。在此基础上，引入两个小型在线 `ResidualTeacherExpert`：
 
-**Run1 历史结论（已归档，单 seed 2333）**：D1 相对 B0 平均 ΔF1 ≈ +0.63，其中 SYSU +2.43 F1 / +3.49 IoU 是方向 C 首个可信正信号；WHU +0.19、CDD ≈0、LEVIR −0.11；Cache 先验有增量（D1 vs D2：SYSU +0.60、WHU +0.64，WHU 的 D2 纯在线教师反而 −0.45 被 Cache 拉回）。Run1 失效诊断（见 `docs/temporary/RDT-CD_教师演化与失效场景分析_2026-09-15.md`）：CDD 近天花板无 headroom、LEVIR 先验无信息、WHU 先验有信息但 change 稀疏致 image 级整图拒绝率 55%~75%——这正是 SCGR 要解决的三个点。**Run2 结论（单 seed 2333，SCGR 无效）**：D1（完整 SCGR）相对 B0 在 SYSU **−0.60**、CDD −0.04、LEVIR +0.14（WHU 停训未出）；D1 vs D1NG ≈0（梯度一致门几乎空转，`scgr_gradient_conflict_ratio≈0`，无可拒的梯度冲突）；D1NG vs B0 在 SYSU −0.57、WHU −0.99（区域/误差质量路由本身略有害）。即 SCGR 的两个新机制都没带来正收益，clean baseline 已是最强。Run1 的 +2.43 也被确认是 baseline 噪声（仅代码改动、零方法改动，B0 就重掷出 +2.43）。**方向 C 教师蒸馏线至此无可信正信号**。
+```text
+SAMStruct / OVCDistill Cache
+        ↓
+Teacher Priors
+        ↓
+Fast Residual Teacher Experts
+        ↓ EMA
+Target Teacher Experts
+        ↓
+Dynamic Teacher Proposals
+        ↓
+Task-space GT Audit
+        ↓
+Student Distillation
+```
+
+其中：
+
+* **Fast Teacher**：参与梯度优化，根据当前学生状态和监督信号不断学习；
+* **EMA Target Teacher**：由 Fast Teacher 通过 EMA 更新，不参与梯度优化，用于生成学生实际接收的动态 teacher proposal；
+* **Student KD loss (`total`)**：只允许更新学生；
+* **Teacher fitting loss (`teacher_total`)**：只允许更新 Fast Teacher，学生特征与预测在该路径中必须 detach；
+* **EMA Target Teacher**：`requires_grad=False`，只通过显式 EMA 更新。
+
+因此 RDT-CD 构成一个训练期互惠过程：
+
+```text
+Teacher → Student:
+动态教师 proposal 蒸馏学生
+
+Student → Teacher:
+当前学生状态与错误用于训练 Fast Teacher
+
+Fast Teacher → EMA Target Teacher:
+通过 EMA 形成更稳定的动态教师
+```
+
+RDT-CD 的目标不是强迫学生持续模仿 Foundation Teacher，而是让 Foundation Teacher Cache 作为先验参与构造可演化教师，并在教师知识确实优于当前学生时才提供监督。
+
+### Run1 Task-Space Routing
+
+当前 `models/distill/task_space.py` 已恢复为 Run1 的 **pixel-wise GT-audited positive-gain routing**，不再使用 Run2 的 SCGR 区域路由。
+
+对于学生预测 p、teacher proposal q 和 GT y，定义：
+
+```text
+Student Brier error:   E_s = (p - y)^2
+Teacher proposal error: E_t = (q - y)^2
+Teacher gain:          gain = E_s - E_t
+```
+
+仅当 `gain > numerical tolerance` 时，该 teacher proposal 才允许在当前像素参与 KD。即教师提案比当前学生更接近 GT → admit；否则 → reject。
+
+SAM 与 OV 的有效 proposal 会按照 proposal confidence 与相对 improvement 形成 pixel-wise soft mixture，再用于 Bernoulli task-space distillation。
+
+当前 Run1 task-space **不包含** 16×16 regional routing、regional utility、error-mass KD normalization、classifier-gradient concordance、gradient gate、D1NG、SCGR region diagnostics 等——上述机制均属于已失败的 Run2/SCGR，不再作为当前活动方法的一部分。
+
+### Run2 / SCGR 失败记录
+
+Run2 曾针对 Run1 在稀疏变化场景下的 teacher rejection 问题，引入 16×16 regional routing、error-mass normalized KD、gradient-concordance gate，正式实验含 B0 / D1NG / D1 / D2 四组（其中 D1NG 关闭 gradient-concordance gate）。
+
+当前已有结果：
+
+| Experiment | Dataset | F1 |
+| --- | --- | ---: |
+| B0 | SYSU | 83.24 |
+| D1NG | SYSU | 82.67 |
+| D1 | SYSU | 82.64 |
+| B0 | WHU | 93.69 |
+| D1NG | WHU | 92.70 |
+| B0 | CDD | 97.80 |
+| D1NG | CDD | 97.75 |
+| D1 | CDD | 97.76 |
+| B0 | LEVIR | 90.98 |
+| D1NG | LEVIR | 91.05 |
+| D1 | LEVIR | 91.12 |
+
+D1NG 已关闭 gradient-concordance gate，但 SYSU −0.57、WHU −0.99 仍明显低于 B0。因此当前证据不支持「Run2 失败只是因为 gradient gate 太严格」，现阶段判断为 Run2 的整套 SCGR 改造没有获得有效性支持。Run2/SCGR 已停止，不继续调 region size、调 gradient threshold、增加新的 routing gate 或继续完成 D2。Run2 结果仅作为失败实验与研究诊断证据保留。
+
+### Run1 历史结果及当前解释
+
+Run1 单 seed 2333 的历史结果为：
+
+| Dataset | B0 F1 | D1 F1 | ΔF1 |
+| --- | ---: | ---: | ---: |
+| SYSU | 80.81 | 83.23 | +2.42 |
+| WHU | 94.03 | 94.21 | +0.18 |
+| CDD | 97.79 | 97.80 | +0.01 |
+| LEVIR | 91.27 | 91.16 | -0.11 |
+
+Run1 曾在 SYSU 上出现明显正信号，但其余数据集收益很小或为负，不能表述为普适提升。另外，后续统一 clean B0 在 SYSU 达到 83.24，与 Run1 D1 的 83.23 几乎一致，因此 **Run1 的 SYSU +2.42 F1 正信号与后续 B0 波动存在明显混杂，不能再直接作为 Teacher 有效性的独立证据**。
+
+当前研究决定是：固定统一 B0，不再跨不同 Run 使用不同 baseline 解释方法收益；重新在同一训练协议下只比较 B0 与 Run1 RDT-CD D1，直接回答「Teacher 结构本身是否有效」。
+
+因此当前方向 C 的状态应表述为：**Run2/SCGR 已无可信正信号并停止；Run1 RDT-CD 已恢复为当前活动教师机制，但 Teacher 是否真正有效仍需在统一固定 B0 下通过 D1 vs B0 重新验证。**
 
 ## 5. 模型与部署约束
 
@@ -154,9 +251,9 @@ models/tools/export_deploy.py
 推荐顺序：
 
 1. 激活 `lsrep` 并进入项目目录；
-2. 跑 `smoke_dynamic_teacher`（CUDA 契约测试，覆盖 D1 / D1NG / D2 三条路径）；
+2. 跑 `smoke_dynamic_teacher`（CUDA 契约测试，覆盖 D1 / D2 及部署删除、梯度隔离、EMA 更新等关键路径）；
 3. 做一次 dry run（真实数据 + Cache 的短训练，验证全链路后删临时目录）；
-4. 启动 Run2 队列（双卡 tmux）；
+4. 启动当前 Run1 RDT-CD 队列（双卡 tmux）；
 5. 从 `train_log.txt` 收集正式 test 指标。
 
 每个实验目录使用：
