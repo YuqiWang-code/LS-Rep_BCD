@@ -1,25 +1,44 @@
-"""Atomic baseline / Direction-C / dynamic-teacher checkpoints.
+"""Run3 BT-SAM-RDT checkpoint utilities.
 
-Checkpoint format
------------------
-v2:
-    Historical B0 / C0 / C1-C5 checkpoints.
-    Stores:
-        model
-        main optimizer
-        optional router optimizer
-        training progress
-        args
-        RNG state
+This module defines the single checkpoint format used by the current Run3
+codebase.
 
-v3:
-    Adds:
-        optional teacher optimizer
+Run3 checkpoint contract
+------------------------
+format_version = 3
 
-For RDT-CD, both fast teachers and EMA target teachers are normal registered
-submodules of model.training_auxiliary, so their weights are already included
-in model.state_dict().  Exact resume therefore additionally requires only the
-separate teacher optimizer state, which is stored here in v3.
+A training checkpoint stores:
+
+    model
+        Complete training model state.
+
+        For R3A / R3 this includes:
+            training_auxiliary.fast.*
+            training_auxiliary.target.*
+
+        Therefore Fast Teacher and EMA Target Teacher weights are already
+        included in model.state_dict().
+
+    optimizer
+        Student optimizer state.
+
+    teacher_optimizer
+        Fast Teacher optimizer state for R3A / R3.
+        None for B0.
+
+    epoch
+    global_step
+    best_val_f1
+
+    args
+        Exact experiment configuration required by train.py resume checks.
+
+    rng
+        Python / NumPy / PyTorch CPU / all visible CUDA RNG states.
+
+Historical Direction-C / router / format-v2 compatibility is intentionally
+not implemented here. Current Run3 training must not silently resume an old
+experiment package.
 """
 
 from __future__ import annotations
@@ -36,11 +55,15 @@ import torch
 CHECKPOINT_FORMAT_VERSION = 3
 
 
-def rng_state() -> Dict[str, Any]:
-    """
-    Capture all RNG states needed for exact training resume.
+# ============================================================================
+# RNG state
+# ============================================================================
 
-    CUDA RNG state is saved for every currently visible CUDA device.
+
+def rng_state() -> Dict[str, Any]:
+    """Capture stochastic state required for exact Run3 resume.
+
+    CUDA RNG state is captured for every currently visible CUDA device.
     """
     return {
         "python": random.getstate(),
@@ -57,34 +80,137 @@ def rng_state() -> Dict[str, Any]:
 def restore_rng_state(
     state: Optional[Dict[str, Any]],
 ) -> None:
-    """
-    Restore RNG state saved by rng_state().
+    """Restore a Run3 RNG snapshot.
 
-    Historical checkpoints may pass None; in that case this function is a
-    no-op.
+    Parameters
+    ----------
+    state:
+        Dictionary produced by :func:`rng_state`.
+
+        ``None`` is accepted only as a convenience for callers that explicitly
+        have no RNG state to restore. Current Run3 checkpoints are expected to
+        contain a non-None RNG dictionary.
     """
-    if not state:
+    if state is None:
         return
 
-    python_state = state.get("python")
-    numpy_state = state.get("numpy")
-    torch_state = state.get("torch")
-    cuda_state = state.get("cuda")
+    if not isinstance(
+        state,
+        dict,
+    ):
+        raise TypeError(
+            "RNG state must be a dict or None"
+        )
 
-    if python_state is not None:
-        random.setstate(python_state)
+    required = {
+        "python",
+        "numpy",
+        "torch",
+        "cuda",
+    }
 
-    if numpy_state is not None:
-        np.random.set_state(numpy_state)
+    missing = (
+        required
+        - set(
+            state.keys()
+        )
+    )
 
-    if torch_state is not None:
-        torch.set_rng_state(torch_state)
+    if missing:
+        raise ValueError(
+            "RNG state is missing fields: "
+            + ", ".join(
+                sorted(
+                    missing
+                )
+            )
+        )
+
+    python_state = state[
+        "python"
+    ]
+
+    numpy_state = state[
+        "numpy"
+    ]
+
+    torch_state = state[
+        "torch"
+    ]
+
+    cuda_state = state[
+        "cuda"
+    ]
+
+    if python_state is None:
+        raise ValueError(
+            "Run3 RNG state is missing Python RNG state"
+        )
+
+    if numpy_state is None:
+        raise ValueError(
+            "Run3 RNG state is missing NumPy RNG state"
+        )
+
+    if torch_state is None:
+        raise ValueError(
+            "Run3 RNG state is missing PyTorch CPU RNG state"
+        )
+
+    random.setstate(
+        python_state
+    )
+
+    np.random.set_state(
+        numpy_state
+    )
+
+    torch.set_rng_state(
+        torch_state
+    )
+
+    # A checkpoint produced without CUDA can be restored on CPU.
+    if cuda_state is None:
+        return
+
+    if not torch.cuda.is_available():
+        raise RuntimeError(
+            "Checkpoint contains CUDA RNG state but CUDA is unavailable; "
+            "exact Run3 resume cannot be guaranteed"
+        )
+
+    if not isinstance(
+        cuda_state,
+        (list, tuple),
+    ):
+        raise TypeError(
+            "CUDA RNG state must be a list/tuple of per-device states"
+        )
+
+    visible_devices = (
+        torch.cuda.device_count()
+    )
 
     if (
-        cuda_state is not None
-        and torch.cuda.is_available()
+        len(
+            cuda_state
+        )
+        != visible_devices
     ):
-        torch.cuda.set_rng_state_all(cuda_state)
+        raise RuntimeError(
+            "CUDA device-count mismatch during exact resume: "
+            f"checkpoint={len(cuda_state)}, "
+            f"visible={visible_devices}"
+        )
+
+    torch.cuda.set_rng_state_all(
+        cuda_state
+    )
+
+
+# ============================================================================
+# Training checkpoint
+# ============================================================================
 
 
 def build_checkpoint(
@@ -94,76 +220,197 @@ def build_checkpoint(
     global_step,
     best_val_f1,
     args,
-    router_optimizer=None,
     teacher_optimizer=None,
 ):
-    """
-    Build one complete training checkpoint.
+    """Build one complete Run3 format-v3 training checkpoint.
 
     Parameters
     ----------
     model:
-        Full model.
+        Full training model.
 
-        For dynamic_teacher runs, model.state_dict() already contains:
+        For R3A/R3, ``model.state_dict()`` already contains both:
             training_auxiliary.fast.*
             training_auxiliary.target.*
 
-        Therefore fast-teacher and EMA-target weights require no special
-        checkpoint field.
-
     optimizer:
-        Main student optimizer.
+        Student optimizer.
 
     epoch:
-        Current epoch index.
+        Current zero-based epoch index.
 
     global_step:
-        Current global optimization-step count.
+        Number of completed optimization steps.
 
     best_val_f1:
         Best validation F1 observed so far.
 
     args:
-        argparse Namespace or Namespace-like object accepted by vars().
-
-    router_optimizer:
-        Optional legacy Direction-C router optimizer.
+        argparse Namespace or Namespace-like object accepted by ``vars()``.
 
     teacher_optimizer:
-        Optional RDT-CD fast-teacher optimizer.
-
-        This MUST be saved for exact dynamic-teacher resume because its Adam
-        moments are not part of model.state_dict().
+        Fast Teacher optimizer for R3A/R3.
+        ``None`` for B0.
 
     Returns
     -------
     dict
-        Checkpoint format version 3.
+        Run3 checkpoint with ``format_version == 3``.
     """
     if model is None:
-        raise ValueError("model must not be None")
+        raise ValueError(
+            "model must not be None"
+        )
 
     if optimizer is None:
-        raise ValueError("optimizer must not be None")
+        raise ValueError(
+            "Student optimizer must not be None"
+        )
+
+    if args is None:
+        raise ValueError(
+            "args must not be None"
+        )
+
+    try:
+        args_dict = dict(
+            vars(
+                args
+            )
+        )
+
+    except TypeError as exc:
+        raise TypeError(
+            "args must support vars(args)"
+        ) from exc
+
+    if not args_dict:
+        raise ValueError(
+            "args must contain the Run3 experiment configuration"
+        )
+
+    experiment = args_dict.get(
+        "experiment"
+    )
+
+    teacher_update = bool(
+        args_dict.get(
+            "teacher_update",
+            False,
+        )
+    )
+
+    mechanism = args_dict.get(
+        "mechanism"
+    )
+
+    # R3A/R3 must carry a Fast Teacher optimizer for exact resume.
+    expects_teacher_optimizer = (
+        teacher_update
+        or mechanism == "bt_sam_rdt"
+        or experiment in {
+            "R3A",
+            "R3",
+        }
+    )
+
+    if (
+        expects_teacher_optimizer
+        and teacher_optimizer is None
+    ):
+        raise ValueError(
+            "Run3 BT-SAM-RDT checkpoint requires teacher_optimizer "
+            "for exact resume"
+        )
+
+    # B0 should not accidentally contain a Teacher optimizer.
+    if (
+        not expects_teacher_optimizer
+        and teacher_optimizer is not None
+    ):
+        raise ValueError(
+            "Clean B0 checkpoint must not contain teacher_optimizer"
+        )
+
+    model_state = (
+        model.state_dict()
+    )
+
+    if not model_state:
+        raise ValueError(
+            "model.state_dict() is empty"
+        )
+
+    has_auxiliary_state = any(
+        key.startswith(
+            "training_auxiliary."
+        )
+        for key in model_state.keys()
+    )
+
+    if (
+        expects_teacher_optimizer
+        and not has_auxiliary_state
+    ):
+        raise ValueError(
+            "Run3 BT-SAM-RDT configuration expects training_auxiliary "
+            "state, but model.state_dict() contains none"
+        )
+
+    if (
+        not expects_teacher_optimizer
+        and has_auxiliary_state
+    ):
+        raise ValueError(
+            "Clean B0 configuration unexpectedly contains "
+            "training_auxiliary state"
+        )
+
+    epoch = int(
+        epoch
+    )
+
+    global_step = int(
+        global_step
+    )
+
+    best_val_f1 = float(
+        best_val_f1
+    )
+
+    if epoch < 0:
+        raise ValueError(
+            "epoch must be non-negative"
+        )
+
+    if global_step < 0:
+        raise ValueError(
+            "global_step must be non-negative"
+        )
+
+    if not np.isfinite(
+        best_val_f1
+    ):
+        raise ValueError(
+            "best_val_f1 must be finite"
+        )
 
     return {
-        "format_version": CHECKPOINT_FORMAT_VERSION,
-
-        # Model state includes the complete training auxiliary whenever it
-        # still exists at save time.
-        "model": model.state_dict(),
-
-        # Optimizer states are intentionally separate because the student,
-        # legacy router, and dynamic teachers have disjoint update graphs.
-        "optimizer": optimizer.state_dict(),
-
-        "router_optimizer": (
-            router_optimizer.state_dict()
-            if router_optimizer is not None
-            else None
+        "format_version": (
+            CHECKPOINT_FORMAT_VERSION
         ),
 
+        # Complete training state.
+        "model": (
+            model_state
+        ),
+
+        # Student optimizer.
+        "optimizer": (
+            optimizer.state_dict()
+        ),
+
+        # Fast Teacher optimizer for R3A/R3; None for B0.
         "teacher_optimizer": (
             teacher_optimizer.state_dict()
             if teacher_optimizer is not None
@@ -171,44 +418,96 @@ def build_checkpoint(
         ),
 
         # Training progress.
-        "epoch": int(epoch),
-        "global_step": int(global_step),
-        "best_val_f1": float(best_val_f1),
+        "epoch": (
+            epoch
+        ),
+
+        "global_step": (
+            global_step
+        ),
+
+        "best_val_f1": (
+            best_val_f1
+        ),
 
         # Exact experiment configuration.
-        "args": vars(args),
+        "args": (
+            args_dict
+        ),
 
         # Exact stochastic state.
-        "rng": rng_state(),
+        "rng": (
+            rng_state()
+        ),
     }
+
+
+# ============================================================================
+# Atomic persistence
+# ============================================================================
 
 
 def save_checkpoint_atomic(
     checkpoint,
     path,
 ) -> None:
-    """
-    Atomically save a checkpoint.
+    """Atomically save one checkpoint.
 
-    The checkpoint is first written to:
+    The payload is first written to:
+
         <destination>.tmp
 
-    and only after torch.save() succeeds is it atomically moved over the
-    destination with os.replace().  This avoids leaving a partially written
-    final checkpoint after interruption.
+    and is moved over the destination with ``os.replace`` only after
+    ``torch.save`` succeeds.
 
-    Existing valid checkpoints are not removed before the replacement
-    succeeds.
+    This means:
+        - an interrupted temporary write does not destroy the previous valid
+          destination;
+        - replacing ``last_checkpoint.pth`` remains atomic;
+        - best-checkpoint retention/deletion policy stays outside this utility
+          and is controlled by train.py.
     """
-    destination = Path(path)
+    if not isinstance(
+        checkpoint,
+        dict,
+    ):
+        raise TypeError(
+            "checkpoint must be a dict"
+        )
+
+    destination = Path(
+        path
+    )
+
+    if destination.name in {
+        "",
+        ".",
+        "..",
+    }:
+        raise ValueError(
+            f"Invalid checkpoint destination: {destination}"
+        )
+
     destination.parent.mkdir(
         parents=True,
         exist_ok=True,
     )
 
-    temporary = destination.with_suffix(
-        destination.suffix + ".tmp"
+    temporary = destination.with_name(
+        destination.name
+        + ".tmp"
     )
+
+    # Remove only a stale temporary file from a previous interrupted write.
+    #
+    # Never remove the valid destination here.
+    if temporary.exists():
+        if temporary.is_dir():
+            raise IsADirectoryError(
+                temporary
+            )
+
+        temporary.unlink()
 
     try:
         torch.save(
@@ -216,17 +515,24 @@ def save_checkpoint_atomic(
             temporary,
         )
 
+        if not temporary.is_file():
+            raise RuntimeError(
+                "torch.save returned without creating the temporary checkpoint"
+            )
+
         os.replace(
             temporary,
             destination,
         )
 
     except Exception:
-        # Best-effort cleanup of an incomplete temporary file only.
-        # Never delete/overwrite the existing destination on failure.
+        # Best-effort cleanup of the incomplete temporary file only.
+        # The previous valid destination is untouched unless os.replace()
+        # already succeeded.
         try:
             if temporary.exists():
                 temporary.unlink()
+
         except OSError:
             pass
 

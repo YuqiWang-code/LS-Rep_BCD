@@ -17,32 +17,41 @@ A. BT-SAM structural logic
     1. Same object geometry with different opaque SAM IDs -> no change.
     2. T1 object disappears -> high structural-change prior.
     3. New T2 object -> high structural-change prior.
-    4. Expansion gives asymmetric directional coverage.
-    5. Lower SAM quality reduces structural reliability.
+    4. Expansion:
+           stable overlap core -> structural prior ~= 0
+           newly occupied outer ring -> structural prior ~= 1
+           C12 > C21
+    5. Shrinkage:
+           remaining overlap core -> structural prior ~= 0
+           disappeared outer ring -> structural prior ~= 1
+           C21 > C12
+    6. Lower SAM quality reduces structural reliability.
+    7. Pair-match confidence is finite and bounded.
 
 B. SAM + OV fusion
-    6. Agreement keeps high fused reliability.
-    7. Strong SAM/OV disagreement suppresses fused reliability.
-    8. R3A SAM-only path reduces exactly to the SAM prior.
+    8. Agreement keeps high fused reliability.
+    9. Strong SAM/OV disagreement suppresses fused reliability.
+   10. R3A SAM-only path reduces exactly to the SAM prior.
 
 C. GT safety audit
-    9. Better teacher proposal is admitted.
-   10. Worse teacher proposal is rejected.
+   11. Better teacher proposal is admitted.
+   12. Worse teacher proposal is rejected.
 
 D. Dynamic teacher
-   11. Run3 uses one Fast Teacher and one frozen EMA Target Teacher.
-   12. Dynamic teacher starts from the Student identity.
-   13. Student objective does not update Fast Teacher.
-   14. Teacher fitting objective does not update Student.
-   15. Fast Teacher changes after optimization.
-   16. EMA Target Teacher changes only after update_ema().
-   17. Dynamic teacher state is checkpoint-visible.
+   13. Run3 uses one Fast Teacher and one frozen EMA Target Teacher.
+   14. ResidualTeacherExpert input contract is C+5.
+   15. Dynamic Target Teacher starts from Student identity.
+   16. Student objective does not update Fast Teacher.
+   17. Teacher fitting objective does not update Student.
+   18. Fast Teacher changes after optimization.
+   19. EMA Target Teacher changes only after update_ema().
+   20. Dynamic teacher state is checkpoint-visible.
 
 E. Deployment
-   18. Auxiliary ON/OFF does not change main predictions.
-   19. switch_to_deploy() physically removes the auxiliary.
-   20. Deploy prediction max error < 1e-6.
-   21. Deploy parameter count == 2,913,094.
+   21. Auxiliary ON/OFF does not change main predictions.
+   22. switch_to_deploy() physically removes the auxiliary.
+   23. Deploy prediction max error < 1e-6.
+   24. Deploy parameter count == 2,913,094.
 
 Run from project root:
 
@@ -52,8 +61,8 @@ CPU verification:
 
     python models/tools/smoke_dynamic_teacher.py --device cpu
 
-A separate real-cache dry run is still required after this synthetic smoke
-passes.
+A separate real-cache aligned-replay dry run is still required after this
+synthetic smoke passes.
 """
 
 from __future__ import annotations
@@ -98,22 +107,13 @@ STRUCTURE_ATOL = 1e-6
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description=(
-            "Synthetic P0 smoke test for Run3 BT-SAM-RDT"
-        )
+        description="Synthetic P0 smoke test for Run3 BT-SAM-RDT"
     )
 
     parser.add_argument(
         "--device",
-        choices=(
-            "cuda",
-            "cpu",
-        ),
-        default=(
-            "cuda"
-            if torch.cuda.is_available()
-            else "cpu"
-        ),
+        choices=("cuda", "cpu"),
+        default=("cuda" if torch.cuda.is_available() else "cpu"),
     )
 
     parser.add_argument(
@@ -179,9 +179,7 @@ def parse_args() -> argparse.Namespace:
     args = parser.parse_args()
 
     if args.batch_size <= 0:
-        raise ValueError(
-            "--batch_size must be positive"
-        )
+        raise ValueError("--batch_size must be positive")
 
     if (
         args.height != 256
@@ -192,14 +190,10 @@ def parse_args() -> argparse.Namespace:
         )
 
     if args.teacher_hidden <= 0:
-        raise ValueError(
-            "--teacher_hidden must be positive"
-        )
+        raise ValueError("--teacher_hidden must be positive")
 
     if args.teacher_lr <= 0:
-        raise ValueError(
-            "--teacher_lr must be positive"
-        )
+        raise ValueError("--teacher_lr must be positive")
 
     if not (
         0.0
@@ -211,14 +205,10 @@ def parse_args() -> argparse.Namespace:
         )
 
     if args.max_logit_delta <= 0:
-        raise ValueError(
-            "--max_logit_delta must be positive"
-        )
+        raise ValueError("--max_logit_delta must be positive")
 
     if args.kd_lambda < 0:
-        raise ValueError(
-            "--kd_lambda must be non-negative"
-        )
+        raise ValueError("--kd_lambda must be non-negative")
 
     return args
 
@@ -226,27 +216,14 @@ def parse_args() -> argparse.Namespace:
 def set_seed(
     seed: int,
 ) -> None:
-    random.seed(
-        seed
-    )
-
-    np.random.seed(
-        seed
-    )
-
-    torch.manual_seed(
-        seed
-    )
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
     if torch.cuda.is_available():
-        torch.cuda.manual_seed_all(
-            seed
-        )
+        torch.cuda.manual_seed_all(seed)
 
-    if hasattr(
-        torch.backends,
-        "cudnn",
-    ):
+    if hasattr(torch.backends, "cudnn"):
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
 
@@ -270,18 +247,14 @@ def get_device(
                 f"visible count={torch.cuda.device_count()}"
             )
 
-        torch.cuda.set_device(
-            args.gpu_id
-        )
+        torch.cuda.set_device(args.gpu_id)
 
         return torch.device(
             "cuda",
             args.gpu_id,
         )
 
-    return torch.device(
-        "cpu"
-    )
+    return torch.device("cpu")
 
 
 # ============================================================================
@@ -302,9 +275,7 @@ def snapshot_parameters(
     parameters: Iterable[torch.nn.Parameter],
 ) -> Tuple[torch.Tensor, ...]:
     return tuple(
-        parameter
-        .detach()
-        .clone()
+        parameter.detach().clone()
         for parameter in parameters
     )
 
@@ -318,10 +289,7 @@ def parameter_rms_difference(
         for parameter in after_parameters
     )
 
-    if (
-        len(before)
-        != len(after)
-    ):
+    if len(before) != len(after):
         raise AssertionError(
             "Parameter snapshot length changed"
         )
@@ -329,34 +297,18 @@ def parameter_rms_difference(
     square_sum = 0.0
     count = 0
 
-    for (
-        old,
-        new,
-    ) in zip(
-        before,
-        after,
-    ):
-        delta = (
-            new.float()
-            - old.float()
-        )
+    for old, new in zip(before, after):
+        delta = new.float() - old.float()
 
         square_sum += float(
-            delta
-            .square()
-            .sum()
+            delta.square().sum()
         )
 
-        count += (
-            delta.numel()
-        )
+        count += delta.numel()
 
     return math.sqrt(
         square_sum
-        / max(
-            count,
-            1,
-        )
+        / max(count, 1)
     )
 
 
@@ -366,10 +318,7 @@ def grad_norm(
     square_sum = 0.0
 
     for parameter in parameters:
-        if (
-            parameter.grad
-            is None
-        ):
+        if parameter.grad is None:
             continue
 
         gradient = (
@@ -380,53 +329,33 @@ def grad_norm(
         )
 
         square_sum += float(
-            gradient
-            .square()
-            .sum()
+            gradient.square().sum()
         )
 
-    return math.sqrt(
-        square_sum
-    )
+    return math.sqrt(square_sum)
 
 
 def max_prediction_difference(
     left,
     right,
 ) -> float:
-    if (
-        len(left)
-        != len(right)
-    ):
+    if len(left) != len(right):
         raise AssertionError(
             "Prediction tuple lengths differ"
         )
 
     maximum = 0.0
 
-    for (
-        x,
-        y,
-    ) in zip(
-        left,
-        right,
-    ):
-        if (
-            x.shape
-            != y.shape
-        ):
+    for x, y in zip(left, right):
+        if x.shape != y.shape:
             raise AssertionError(
                 f"Prediction shape mismatch: "
                 f"{x.shape} vs {y.shape}"
             )
 
         difference = (
-            x
-            .detach()
-            .float()
-            - y
-            .detach()
-            .float()
+            x.detach().float()
+            - y.detach().float()
         ).abs().max().item()
 
         maximum = max(
@@ -441,18 +370,41 @@ def assert_finite_tensor(
     name: str,
     value: torch.Tensor,
 ) -> None:
-    if not torch.is_tensor(
-        value
-    ):
+    if not torch.is_tensor(value):
         raise AssertionError(
             f"{name} is not a tensor"
         )
 
-    if not torch.isfinite(
-        value
-    ).all():
+    if not torch.isfinite(value).all():
         raise AssertionError(
             f"{name} contains NaN/Inf"
+        )
+
+
+def assert_probability_range(
+    name: str,
+    value: torch.Tensor,
+) -> None:
+    assert_finite_tensor(
+        name,
+        value,
+    )
+
+    minimum = float(
+        value.min()
+    )
+
+    maximum = float(
+        value.max()
+    )
+
+    if (
+        minimum < -STRUCTURE_ATOL
+        or maximum > 1.0 + STRUCTURE_ATOL
+    ):
+        raise AssertionError(
+            f"{name} is outside [0,1]: "
+            f"min={minimum:.6f}, max={maximum:.6f}"
         )
 
 
@@ -471,92 +423,32 @@ def make_boundary_from_ids(
     )
 
     vertical = (
-        ids[
-            :,
-            :,
-            1:,
-            :,
-        ]
-        != ids[
-            :,
-            :,
-            :-1,
-            :,
-        ]
+        ids[:, :, 1:, :]
+        != ids[:, :, :-1, :]
     ).float()
 
-    boundary[
-        :,
-        :,
-        1:,
-        :,
-    ] = torch.maximum(
-        boundary[
-            :,
-            :,
-            1:,
-            :,
-        ],
+    boundary[:, :, 1:, :] = torch.maximum(
+        boundary[:, :, 1:, :],
         vertical,
     )
 
-    boundary[
-        :,
-        :,
-        :-1,
-        :,
-    ] = torch.maximum(
-        boundary[
-            :,
-            :,
-            :-1,
-            :,
-        ],
+    boundary[:, :, :-1, :] = torch.maximum(
+        boundary[:, :, :-1, :],
         vertical,
     )
 
     horizontal = (
-        ids[
-            :,
-            :,
-            :,
-            1:,
-        ]
-        != ids[
-            :,
-            :,
-            :,
-            :-1,
-        ]
+        ids[:, :, :, 1:]
+        != ids[:, :, :, :-1]
     ).float()
 
-    boundary[
-        :,
-        :,
-        :,
-        1:,
-    ] = torch.maximum(
-        boundary[
-            :,
-            :,
-            :,
-            1:,
-        ],
+    boundary[:, :, :, 1:] = torch.maximum(
+        boundary[:, :, :, 1:],
         horizontal,
     )
 
-    boundary[
-        :,
-        :,
-        :,
-        :-1,
-    ] = torch.maximum(
-        boundary[
-            :,
-            :,
-            :,
-            :-1,
-        ],
+    boundary[:, :, :, :-1] = torch.maximum(
+        boundary[:, :, :, :-1],
         horizontal,
     )
 
@@ -570,25 +462,18 @@ def make_sam_pack(
     quality_t2: float = 1.0,
     use_boundaries: bool = False,
 ) -> Dict:
-    if (
-        ids_t1.shape
-        != ids_t2.shape
-    ):
+    if ids_t1.shape != ids_t2.shape:
         raise ValueError(
             "Synthetic T1/T2 IDs must have equal shapes"
         )
 
     if use_boundaries:
-        boundary_t1 = (
-            make_boundary_from_ids(
-                ids_t1
-            )
+        boundary_t1 = make_boundary_from_ids(
+            ids_t1
         )
 
-        boundary_t2 = (
-            make_boundary_from_ids(
-                ids_t2
-            )
+        boundary_t2 = make_boundary_from_ids(
+            ids_t2
         )
 
     else:
@@ -604,44 +489,28 @@ def make_sam_pack(
 
     q1 = torch.full(
         ids_t1.shape,
-        float(
-            quality_t1
-        ),
+        float(quality_t1),
         device=ids_t1.device,
         dtype=torch.float32,
     )
 
     q2 = torch.full(
         ids_t2.shape,
-        float(
-            quality_t2
-        ),
+        float(quality_t2),
         device=ids_t2.device,
         dtype=torch.float32,
     )
 
     return {
         "t1": {
-            "instance_id": (
-                ids_t1.long()
-            ),
-            "boundary": (
-                boundary_t1
-            ),
-            "quality": (
-                q1
-            ),
+            "instance_id": ids_t1.long(),
+            "boundary": boundary_t1,
+            "quality": q1,
         },
         "t2": {
-            "instance_id": (
-                ids_t2.long()
-            ),
-            "boundary": (
-                boundary_t2
-            ),
-            "quality": (
-                q2
-            ),
+            "instance_id": ids_t2.long(),
+            "boundary": boundary_t2,
+            "quality": q2,
         },
     }
 
@@ -667,41 +536,22 @@ def check_bt_sam_identical_geometry(
         dtype=torch.long,
     )
 
-    ids2 = torch.zeros_like(
-        ids1
-    )
+    ids2 = torch.zeros_like(ids1)
 
-    ids1[
-        :,
-        :,
-        4:12,
-        5:13,
-    ] = 11
+    ids1[:, :, 4:12, 5:13] = 11
 
     # Deliberately unrelated opaque ID.
-    ids2[
-        :,
-        :,
-        4:12,
-        5:13,
-    ] = 907
+    ids2[:, :, 4:12, 5:13] = 907
 
-    result = (
-        build_bitemporal_structural_prior(
-            make_sam_pack(
-                ids1,
-                ids2,
-            )
+    result = build_bitemporal_structural_prior(
+        make_sam_pack(
+            ids1,
+            ids2,
         )
     )
 
-    prior = result[
-        "prior"
-    ]
-
-    object_mask = (
-        ids1 > 0
-    )
+    prior = result["prior"]
+    object_mask = ids1 > 0
 
     maximum = (
         prior[
@@ -712,26 +562,29 @@ def check_bt_sam_identical_geometry(
         .item()
     )
 
-    if (
-        maximum
-        > STRUCTURE_ATOL
-    ):
+    if maximum > STRUCTURE_ATOL:
         raise AssertionError(
             "Identical geometry with different SAM IDs "
             f"produced change={maximum:.6e}"
         )
 
-    if (
-        float(
-            result[
-                "pair_match_iou"
-            ].mean()
-        )
-        < 1.0 - STRUCTURE_ATOL
-    ):
+    pair_iou = float(
+        result[
+            "pair_match_iou"
+        ].mean()
+    )
+
+    if pair_iou < 1.0 - STRUCTURE_ATOL:
         raise AssertionError(
             "Identical geometry did not produce IoU=1"
         )
+
+    assert_probability_range(
+        "pair_match_confidence",
+        result[
+            "pair_match_confidence"
+        ],
+    )
 
     print(
         "[PASS] BT-SAM opaque-ID invariance"
@@ -751,29 +604,18 @@ def check_bt_sam_disappearance(
         dtype=torch.long,
     )
 
-    ids2 = torch.zeros_like(
-        ids1
-    )
+    ids2 = torch.zeros_like(ids1)
 
-    ids1[
-        :,
-        :,
-        4:12,
-        4:12,
-    ] = 31
+    ids1[:, :, 4:12, 4:12] = 31
 
-    result = (
-        build_bitemporal_structural_prior(
-            make_sam_pack(
-                ids1,
-                ids2,
-            )
+    result = build_bitemporal_structural_prior(
+        make_sam_pack(
+            ids1,
+            ids2,
         )
     )
 
-    mask = (
-        ids1 > 0
-    )
+    mask = ids1 > 0
 
     mean_change = (
         result[
@@ -785,10 +627,7 @@ def check_bt_sam_disappearance(
         .item()
     )
 
-    if (
-        mean_change
-        < 1.0 - STRUCTURE_ATOL
-    ):
+    if mean_change < 1.0 - STRUCTURE_ATOL:
         raise AssertionError(
             "Disappearing T1 object did not produce high change prior: "
             f"{mean_change:.6f}"
@@ -812,29 +651,18 @@ def check_bt_sam_appearance(
         dtype=torch.long,
     )
 
-    ids2 = torch.zeros_like(
-        ids1
-    )
+    ids2 = torch.zeros_like(ids1)
 
-    ids2[
-        :,
-        :,
-        3:11,
-        6:14,
-    ] = 77
+    ids2[:, :, 3:11, 6:14] = 77
 
-    result = (
-        build_bitemporal_structural_prior(
-            make_sam_pack(
-                ids1,
-                ids2,
-            )
+    result = build_bitemporal_structural_prior(
+        make_sam_pack(
+            ids1,
+            ids2,
         )
     )
 
-    mask = (
-        ids2 > 0
-    )
+    mask = ids2 > 0
 
     mean_change = (
         result[
@@ -846,10 +674,7 @@ def check_bt_sam_appearance(
         .item()
     )
 
-    if (
-        mean_change
-        < 1.0 - STRUCTURE_ATOL
-    ):
+    if mean_change < 1.0 - STRUCTURE_ATOL:
         raise AssertionError(
             "New T2 object did not produce high change prior: "
             f"{mean_change:.6f}"
@@ -861,13 +686,21 @@ def check_bt_sam_appearance(
 
 
 @torch.no_grad()
-def check_bt_sam_directional_coverage(
+def check_bt_sam_expansion_localization(
     device: torch.device,
 ) -> None:
     """
-    T1 object is contained by a larger T2 object:
-        C12 should be near 1
-        C21 should be smaller.
+    Expansion contract:
+
+        T1 object is contained in larger T2 object.
+
+        overlap core:
+            structural prior == 0
+
+        T2-only ring:
+            structural prior == 1
+
+        C12 > C21
     """
     ids1 = torch.zeros(
         1,
@@ -878,31 +711,40 @@ def check_bt_sam_directional_coverage(
         dtype=torch.long,
     )
 
-    ids2 = torch.zeros_like(
-        ids1
+    ids2 = torch.zeros_like(ids1)
+
+    ids1[:, :, 6:10, 6:10] = 5
+    ids2[:, :, 4:12, 4:12] = 1005
+
+    result = build_bitemporal_structural_prior(
+        make_sam_pack(
+            ids1,
+            ids2,
+        )
     )
 
-    ids1[
-        :,
-        :,
-        6:10,
-        6:10,
-    ] = 5
+    prior = result["prior"]
 
-    ids2[
-        :,
-        :,
-        4:12,
-        4:12,
-    ] = 1005
+    core = (
+        (ids1 > 0)
+        & (ids2 > 0)
+    )
 
-    result = (
-        build_bitemporal_structural_prior(
-            make_sam_pack(
-                ids1,
-                ids2,
-            )
-        )
+    new_ring = (
+        (ids1 == 0)
+        & (ids2 > 0)
+    )
+
+    core_max = float(
+        prior[
+            core
+        ].abs().max()
+    )
+
+    ring_min = float(
+        prior[
+            new_ring
+        ].min()
     )
 
     cov12 = float(
@@ -917,27 +759,149 @@ def check_bt_sam_directional_coverage(
         ].mean()
     )
 
-    if (
+    if core_max > STRUCTURE_ATOL:
+        raise AssertionError(
+            "Expansion stable overlap core was incorrectly marked changed: "
+            f"max={core_max:.6f}"
+        )
+
+    if ring_min < 1.0 - STRUCTURE_ATOL:
+        raise AssertionError(
+            "Expansion new outer ring was not fully localized as change: "
+            f"min={ring_min:.6f}"
+        )
+
+    if not (
         cov12
-        < 1.0 - STRUCTURE_ATOL
+        > cov21
     ):
+        raise AssertionError(
+            "Expansion should produce C12 > C21, "
+            f"got C12={cov12:.6f}, C21={cov21:.6f}"
+        )
+
+    if cov12 < 1.0 - STRUCTURE_ATOL:
         raise AssertionError(
             "Contained T1 object should have C12≈1, "
             f"got {cov12:.6f}"
         )
 
+    print(
+        "[PASS] BT-SAM expansion localization: "
+        f"core={core_max:.3f}, "
+        f"ring={ring_min:.3f}, "
+        f"C12={cov12:.3f}, "
+        f"C21={cov21:.3f}"
+    )
+
+
+@torch.no_grad()
+def check_bt_sam_shrinkage_localization(
+    device: torch.device,
+) -> None:
+    """
+    Shrinkage contract:
+
+        T2 object is contained in larger T1 object.
+
+        remaining overlap core:
+            structural prior == 0
+
+        T1-only disappeared ring:
+            structural prior == 1
+
+        C21 > C12
+    """
+    ids1 = torch.zeros(
+        1,
+        1,
+        16,
+        16,
+        device=device,
+        dtype=torch.long,
+    )
+
+    ids2 = torch.zeros_like(ids1)
+
+    ids1[:, :, 4:12, 4:12] = 23
+    ids2[:, :, 6:10, 6:10] = 9001
+
+    result = build_bitemporal_structural_prior(
+        make_sam_pack(
+            ids1,
+            ids2,
+        )
+    )
+
+    prior = result["prior"]
+
+    core = (
+        (ids1 > 0)
+        & (ids2 > 0)
+    )
+
+    disappeared_ring = (
+        (ids1 > 0)
+        & (ids2 == 0)
+    )
+
+    core_max = float(
+        prior[
+            core
+        ].abs().max()
+    )
+
+    ring_min = float(
+        prior[
+            disappeared_ring
+        ].min()
+    )
+
+    cov12 = float(
+        result[
+            "pair_match_cov12"
+        ].mean()
+    )
+
+    cov21 = float(
+        result[
+            "pair_match_cov21"
+        ].mean()
+    )
+
+    if core_max > STRUCTURE_ATOL:
+        raise AssertionError(
+            "Shrinkage stable overlap core was incorrectly marked changed: "
+            f"max={core_max:.6f}"
+        )
+
+    if ring_min < 1.0 - STRUCTURE_ATOL:
+        raise AssertionError(
+            "Shrinkage disappeared outer ring was not fully localized as change: "
+            f"min={ring_min:.6f}"
+        )
+
     if not (
         cov21
-        < cov12
+        > cov12
     ):
         raise AssertionError(
-            "Expansion should produce C21 < C12, "
+            "Shrinkage should produce C21 > C12, "
             f"got C12={cov12:.6f}, C21={cov21:.6f}"
         )
 
+    if cov21 < 1.0 - STRUCTURE_ATOL:
+        raise AssertionError(
+            "Contained T2 object should have C21≈1, "
+            f"got {cov21:.6f}"
+        )
+
     print(
-        "[PASS] BT-SAM directional coverage: "
-        f"C12={cov12:.3f}, C21={cov21:.3f}"
+        "[PASS] BT-SAM shrinkage localization: "
+        f"core={core_max:.3f}, "
+        f"ring={ring_min:.3f}, "
+        f"C12={cov12:.3f}, "
+        f"C21={cov21:.3f}"
     )
 
 
@@ -954,49 +918,30 @@ def check_sam_quality_reliability(
         dtype=torch.long,
     )
 
-    ids2 = torch.zeros_like(
-        ids1
-    )
+    ids2 = torch.zeros_like(ids1)
 
-    ids1[
-        :,
-        :,
-        4:12,
-        4:12,
-    ] = 1
+    ids1[:, :, 4:12, 4:12] = 1
+    ids2[:, :, 4:12, 4:12] = 2
 
-    ids2[
-        :,
-        :,
-        4:12,
-        4:12,
-    ] = 2
-
-    high = (
-        build_bitemporal_structural_prior(
-            make_sam_pack(
-                ids1,
-                ids2,
-                quality_t1=1.0,
-                quality_t2=1.0,
-            )
+    high = build_bitemporal_structural_prior(
+        make_sam_pack(
+            ids1,
+            ids2,
+            quality_t1=1.0,
+            quality_t2=1.0,
         )
     )
 
-    low = (
-        build_bitemporal_structural_prior(
-            make_sam_pack(
-                ids1,
-                ids2,
-                quality_t1=0.1,
-                quality_t2=0.1,
-            )
+    low = build_bitemporal_structural_prior(
+        make_sam_pack(
+            ids1,
+            ids2,
+            quality_t1=0.1,
+            quality_t2=0.1,
         )
     )
 
-    mask = (
-        ids1 > 0
-    )
+    mask = ids1 > 0
 
     high_r = float(
         high[
@@ -1083,10 +1028,7 @@ def check_fusion_conflict(
             "SAM/OV disagreement did not reduce fused reliability"
         )
 
-    if (
-        conflict_r
-        > STRUCTURE_ATOL
-    ):
+    if conflict_r > STRUCTURE_ATOL:
         raise AssertionError(
             "Maximal SAM/OV disagreement should suppress reliability, "
             f"got {conflict_r:.6e}"
@@ -1102,10 +1044,10 @@ def check_task_space_audit(
     device: torch.device,
 ) -> None:
     # Pixel 0:
-    #   Student wrong-ish, teacher much better -> admit.
+    #   Student poor, teacher better -> admit.
     #
     # Pixel 1:
-    #   Student good, teacher much worse -> reject.
+    #   Student good, teacher worse -> reject.
     prediction = torch.tensor(
         [
             [
@@ -1213,9 +1155,7 @@ def make_synthetic_target(
     for index in range(
         batch_size
     ):
-        offset = (
-            5 * index
-        )
+        offset = 5 * index
 
         target[
             index,
@@ -1303,13 +1243,8 @@ def make_instance_grid(
 def make_synthetic_teacher_pack(
     target: torch.Tensor,
 ) -> Dict:
-    batch_size, _, height, width = (
-        target.shape
-    )
-
-    device = (
-        target.device
-    )
+    batch_size, _, height, width = target.shape
+    device = target.device
 
     ids_t1 = make_instance_grid(
         batch_size,
@@ -1325,7 +1260,7 @@ def make_synthetic_teacher_pack(
         + 10_000
     )
 
-    # Introduce one changed structural region.
+    # Introduce one structural segmentation difference.
     ids_t2[
         :,
         :,
@@ -1333,16 +1268,12 @@ def make_synthetic_teacher_pack(
         32:96,
     ] = 50_000
 
-    boundary_t1 = (
-        make_boundary_from_ids(
-            ids_t1
-        )
+    boundary_t1 = make_boundary_from_ids(
+        ids_t1
     )
 
-    boundary_t2 = (
-        make_boundary_from_ids(
-            ids_t2
-        )
+    boundary_t2 = make_boundary_from_ids(
+        ids_t2
     )
 
     quality_t1 = torch.full(
@@ -1359,7 +1290,6 @@ def make_synthetic_teacher_pack(
         dtype=torch.float32,
     )
 
-    # Teacher confidence is mildly reduced near instance boundaries.
     quality_t1 *= (
         1.0
         - 0.20
@@ -1372,14 +1302,8 @@ def make_synthetic_teacher_pack(
         * boundary_t2
     )
 
-    # ------------------------------------------------------------------
-    # Synthetic OV semantic prior.
-    #
-    # This intentionally uses target geometry only to build a deterministic
-    # synthetic smoke fixture. Formal training never constructs cache targets
-    # from GT.
-    # ------------------------------------------------------------------
-
+    # Synthetic OV fixture only.
+    # Formal training never derives Teacher Cache from GT.
     ov_l1 = F.interpolate(
         target,
         size=(
@@ -1431,44 +1355,24 @@ def make_synthetic_teacher_pack(
     return {
         "sam": {
             "t1": {
-                "instance_id": (
-                    ids_t1
-                ),
-                "boundary": (
-                    boundary_t1
-                ),
-                "quality": (
-                    quality_t1
-                ),
+                "instance_id": ids_t1,
+                "boundary": boundary_t1,
+                "quality": quality_t1,
             },
             "t2": {
-                "instance_id": (
-                    ids_t2
-                ),
-                "boundary": (
-                    boundary_t2
-                ),
-                "quality": (
-                    quality_t2
-                ),
+                "instance_id": ids_t2,
+                "boundary": boundary_t2,
+                "quality": quality_t2,
             },
         },
         "ov": {
             "soft_change": {
-                "l1": (
-                    ov_l1
-                ),
-                "l2": (
-                    ov_l2
-                ),
+                "l1": ov_l1,
+                "l2": ov_l2,
             },
             "confidence": {
-                "l1": (
-                    confidence_l1
-                ),
-                "l2": (
-                    confidence_l2
-                ),
+                "l1": confidence_l1,
+                "l2": confidence_l2,
             },
         },
     }
@@ -1503,6 +1407,7 @@ def check_foundation_prior_paths(
         "pair_match_iou",
         "pair_match_cov12",
         "pair_match_cov21",
+        "pair_match_confidence",
     )
 
     for key in required:
@@ -1512,6 +1417,25 @@ def check_foundation_prior_paths(
             )
 
         assert_finite_tensor(
+            key,
+            full[key],
+        )
+
+    for key in (
+        "sam_prior",
+        "sam_reliability",
+        "ov_prior",
+        "ov_reliability",
+        "fused_prior",
+        "fused_reliability",
+        "sam_ov_conflict",
+        "pair_match_ratio",
+        "pair_match_iou",
+        "pair_match_cov12",
+        "pair_match_cov21",
+        "pair_match_confidence",
+    ):
+        assert_probability_range(
             key,
             full[
                 key
@@ -1527,12 +1451,23 @@ def check_foundation_prior_paths(
         ]
     ).abs().max().item()
 
-    if (
-        difference
-        > STRUCTURE_ATOL
-    ):
+    reliability_difference = (
+        sam_only[
+            "fused_reliability"
+        ]
+        - sam_only[
+            "sam_reliability"
+        ]
+    ).abs().max().item()
+
+    if difference > STRUCTURE_ATOL:
         raise AssertionError(
             "R3A use_ov=False did not reduce exactly to SAM prior"
+        )
+
+    if reliability_difference > STRUCTURE_ATOL:
+        raise AssertionError(
+            "R3A use_ov=False did not reduce exactly to SAM reliability"
         )
 
     print(
@@ -1554,15 +1489,9 @@ def build_run3_model(
         pretrained_path=None,
         auxiliary_mode="bt_sam_rdt",
         auxiliary_cfg={
-            "hidden": (
-                args.teacher_hidden
-            ),
-            "ema": (
-                args.teacher_ema
-            ),
-            "max_logit_delta": (
-                args.max_logit_delta
-            ),
+            "hidden": args.teacher_hidden,
+            "ema": args.teacher_ema,
+            "max_logit_delta": args.max_logit_delta,
             "boundary_radius": 2,
             "small_area": 64,
             "policy": "advantage",
@@ -1571,9 +1500,7 @@ def build_run3_model(
         },
     )
 
-    return model.to(
-        device
-    )
+    return model.to(device)
 
 
 # ============================================================================
@@ -1592,9 +1519,7 @@ def check_state_registration(
             "Run3 model has no training_auxiliary"
         )
 
-    auxiliary = (
-        model.training_auxiliary
-    )
+    auxiliary = model.training_auxiliary
 
     if not hasattr(
         auxiliary,
@@ -1612,7 +1537,6 @@ def check_state_registration(
             "Run3 auxiliary has no EMA Target Teacher"
         )
 
-    # Run3 is intentionally a SINGLE-teacher architecture.
     if isinstance(
         auxiliary.fast,
         torch.nn.ModuleList,
@@ -1661,33 +1585,20 @@ def check_state_registration(
 
     if any(
         parameter.requires_grad
-        for parameter in (
-            auxiliary
-            .target_teacher_parameters()
-        )
+        for parameter in auxiliary.target_teacher_parameters()
     ):
         raise AssertionError(
             "EMA Target Teacher must be completely frozen"
         )
 
-    # C + 5 input contract.
-    first_conv = (
-        auxiliary
-        .fast
-        .net[
-            0
-        ]
-    )
+    first_conv = auxiliary.fast.net[0]
 
     expected_channels = (
         model.mid_d
         + 5
     )
 
-    if (
-        first_conv.in_channels
-        != expected_channels
-    ):
+    if first_conv.in_channels != expected_channels:
         raise AssertionError(
             "ResidualTeacherExpert input contract mismatch: "
             f"expected={expected_channels}, "
@@ -1718,6 +1629,7 @@ def check_auxiliary_prediction_invariance(
     """
     model.eval()
 
+    # Root only enters the training-return branch.
     model.training = True
 
     predictions_off, _ = model(
@@ -1738,25 +1650,17 @@ def check_auxiliary_prediction_invariance(
 
     model.training = False
 
-    if (
-        "bt_sam_rdt"
-        not in auxiliary
-    ):
+    if "bt_sam_rdt" not in auxiliary:
         raise AssertionError(
             "Run3 auxiliary output key 'bt_sam_rdt' is missing"
         )
 
-    maximum = (
-        max_prediction_difference(
-            predictions_off,
-            predictions_on,
-        )
+    maximum = max_prediction_difference(
+        predictions_off,
+        predictions_on,
     )
 
-    if (
-        maximum
-        != 0.0
-    ):
+    if maximum != 0.0:
         raise AssertionError(
             "Auxiliary ON/OFF changed main prediction: "
             f"max_abs={maximum:.9e}"
@@ -1821,10 +1725,7 @@ def check_forward_and_gradient_isolation(
     )
 
     for key in required:
-        if (
-            key
-            not in detail
-        ):
+        if key not in detail:
             raise AssertionError(
                 f"Missing Run3 output: {key}"
             )
@@ -1836,7 +1737,7 @@ def check_forward_and_gradient_isolation(
             ],
         )
 
-    # Identity-initialized Target Teacher.
+    # Identity-initialized EMA Target Teacher.
     initial_shift = float(
         detail[
             "dynamic_shift"
@@ -1849,19 +1750,13 @@ def check_forward_and_gradient_isolation(
         ]
     )
 
-    if (
-        initial_shift
-        >= PREDICTION_ATOL
-    ):
+    if initial_shift >= PREDICTION_ATOL:
         raise AssertionError(
             "Target Teacher is not identity initialized: "
             f"dynamic_shift={initial_shift:.9e}"
         )
 
-    if (
-        initial_residual
-        >= PREDICTION_ATOL
-    ):
+    if initial_residual >= PREDICTION_ATOL:
         raise AssertionError(
             "Initial Target Teacher residual is non-zero: "
             f"{initial_residual:.9e}"
@@ -1869,10 +1764,7 @@ def check_forward_and_gradient_isolation(
 
     student_parameters = tuple(
         parameter
-        for (
-            name,
-            parameter,
-        ) in model.named_parameters()
+        for name, parameter in model.named_parameters()
         if (
             parameter.requires_grad
             and not name.startswith(
@@ -1907,13 +1799,9 @@ def check_forward_and_gradient_isolation(
             "Student and Fast Teacher parameter sets overlap"
         )
 
-    main_loss = (
-        F.binary_cross_entropy(
-            predictions[
-                0
-            ],
-            target,
-        )
+    main_loss = F.binary_cross_entropy(
+        predictions[0],
+        target,
     )
 
     student_total = (
@@ -1924,11 +1812,9 @@ def check_forward_and_gradient_isolation(
         ]
     )
 
-    teacher_total = (
-        detail[
-            "teacher_total"
-        ]
-    )
+    teacher_total = detail[
+        "teacher_total"
+    ]
 
     assert_finite_tensor(
         "student_total",
@@ -1950,45 +1836,32 @@ def check_forward_and_gradient_isolation(
 
     student_total.backward()
 
-    student_gradient = (
-        grad_norm(
-            student_parameters
-        )
+    student_gradient = grad_norm(
+        student_parameters
     )
 
-    fast_gradient_from_student = (
-        grad_norm(
-            fast_teacher_parameters
-        )
+    fast_gradient_from_student = grad_norm(
+        fast_teacher_parameters
     )
 
-    target_gradient_from_student = (
-        grad_norm(
-            target_teacher_parameters
-        )
+    target_gradient_from_student = grad_norm(
+        target_teacher_parameters
     )
 
     if not (
-        student_gradient
-        > 0.0
+        student_gradient > 0.0
     ):
         raise AssertionError(
             "Student objective produced zero Student gradient"
         )
 
-    if (
-        fast_gradient_from_student
-        != 0.0
-    ):
+    if fast_gradient_from_student != 0.0:
         raise AssertionError(
             "Student loss leaked gradient into Fast Teacher: "
             f"{fast_gradient_from_student:.9e}"
         )
 
-    if (
-        target_gradient_from_student
-        != 0.0
-    ):
+    if target_gradient_from_student != 0.0:
         raise AssertionError(
             "Student loss leaked gradient into EMA Target Teacher"
         )
@@ -2002,7 +1875,7 @@ def check_forward_and_gradient_isolation(
     # ------------------------------------------------------------------
     # B. Fast Teacher objective
     #
-    # This uses the disconnected teacher graph from the same forward.
+    # The Fast Teacher graph is disconnected from Student graph by detach.
     # ------------------------------------------------------------------
 
     model.zero_grad(
@@ -2011,45 +1884,32 @@ def check_forward_and_gradient_isolation(
 
     teacher_total.backward()
 
-    student_gradient_from_teacher = (
-        grad_norm(
-            student_parameters
-        )
+    student_gradient_from_teacher = grad_norm(
+        student_parameters
     )
 
-    fast_teacher_gradient = (
-        grad_norm(
-            fast_teacher_parameters
-        )
+    fast_teacher_gradient = grad_norm(
+        fast_teacher_parameters
     )
 
-    target_gradient_from_teacher = (
-        grad_norm(
-            target_teacher_parameters
-        )
+    target_gradient_from_teacher = grad_norm(
+        target_teacher_parameters
     )
 
-    if (
-        student_gradient_from_teacher
-        != 0.0
-    ):
+    if student_gradient_from_teacher != 0.0:
         raise AssertionError(
             "Teacher loss leaked gradient into Student: "
             f"{student_gradient_from_teacher:.9e}"
         )
 
     if not (
-        fast_teacher_gradient
-        > 0.0
+        fast_teacher_gradient > 0.0
     ):
         raise AssertionError(
             "Teacher loss produced zero Fast Teacher gradient"
         )
 
-    if (
-        target_gradient_from_teacher
-        != 0.0
-    ):
+    if target_gradient_from_teacher != 0.0:
         raise AssertionError(
             "Teacher loss leaked gradient into EMA Target Teacher"
         )
@@ -2061,15 +1921,9 @@ def check_forward_and_gradient_isolation(
     )
 
     return {
-        "student_gradient": (
-            student_gradient
-        ),
-        "fast_teacher_gradient": (
-            fast_teacher_gradient
-        ),
-        "initial_dynamic_shift": (
-            initial_shift
-        ),
+        "student_gradient": student_gradient,
+        "fast_teacher_gradient": fast_teacher_gradient,
+        "initial_dynamic_shift": initial_shift,
     }
 
 
@@ -2134,25 +1988,20 @@ def check_teacher_optimizer_and_ema(
         compute_auxiliary=True,
     )
 
-    teacher_loss = (
-        auxiliary[
-            "bt_sam_rdt"
-        ][
-            "teacher_total"
-        ]
-    )
+    teacher_loss = auxiliary[
+        "bt_sam_rdt"
+    ][
+        "teacher_total"
+    ]
 
     teacher_loss.backward()
 
-    teacher_gradient = (
-        grad_norm(
-            fast_parameters
-        )
+    teacher_gradient = grad_norm(
+        fast_parameters
     )
 
     if not (
-        teacher_gradient
-        > 0.0
+        teacher_gradient > 0.0
     ):
         raise AssertionError(
             "Fast Teacher optimization received zero gradient"
@@ -2160,33 +2009,25 @@ def check_teacher_optimizer_and_ema(
 
     optimizer.step()
 
-    fast_update = (
-        parameter_rms_difference(
-            fast_before,
-            fast_parameters,
-        )
+    fast_update = parameter_rms_difference(
+        fast_before,
+        fast_parameters,
     )
 
     if not (
-        fast_update
-        > 0.0
+        fast_update > 0.0
     ):
         raise AssertionError(
             "Fast Teacher parameters did not change"
         )
 
     # Target must still be unchanged before explicit EMA.
-    target_before_ema = (
-        parameter_rms_difference(
-            target_before,
-            target_parameters,
-        )
+    target_before_ema = parameter_rms_difference(
+        target_before,
+        target_parameters,
     )
 
-    if (
-        target_before_ema
-        != 0.0
-    ):
+    if target_before_ema != 0.0:
         raise AssertionError(
             "EMA Target Teacher changed before update_ema()"
         )
@@ -2197,11 +2038,9 @@ def check_teacher_optimizer_and_ema(
         .update_ema()
     )
 
-    target_update = (
-        parameter_rms_difference(
-            target_before,
-            target_parameters,
-        )
+    target_update = parameter_rms_difference(
+        target_before,
+        target_parameters,
     )
 
     target_gap = float(
@@ -2211,16 +2050,14 @@ def check_teacher_optimizer_and_ema(
     )
 
     if not (
-        ema_update
-        > 0.0
+        ema_update > 0.0
     ):
         raise AssertionError(
             "update_ema() reported zero update"
         )
 
     if not (
-        target_update
-        > 0.0
+        target_update > 0.0
     ):
         raise AssertionError(
             "EMA Target Teacher parameters did not move"
@@ -2233,10 +2070,7 @@ def check_teacher_optimizer_and_ema(
             "teacher_target_gap is NaN/Inf"
         )
 
-    # --------------------------------------------------------------
-    # Target proposal should now begin to depart from Student identity.
-    # --------------------------------------------------------------
-
+    # Target proposal should now begin to depart from exact identity.
     with torch.no_grad():
         _, auxiliary_after = model(
             image_a,
@@ -2263,10 +2097,7 @@ def check_teacher_optimizer_and_ema(
             "Post-update dynamic_shift is NaN/Inf"
         )
 
-    if (
-        dynamic_shift
-        <= 0.0
-    ):
+    if dynamic_shift <= 0.0:
         raise AssertionError(
             "EMA Teacher updated but dynamic proposal still "
             "exactly copies Student"
@@ -2283,24 +2114,12 @@ def check_teacher_optimizer_and_ema(
     )
 
     return {
-        "teacher_gradient": (
-            teacher_gradient
-        ),
-        "fast_update": (
-            fast_update
-        ),
-        "ema_update": (
-            ema_update
-        ),
-        "target_update": (
-            target_update
-        ),
-        "target_gap": (
-            target_gap
-        ),
-        "dynamic_shift": (
-            dynamic_shift
-        ),
+        "teacher_gradient": teacher_gradient,
+        "fast_update": fast_update,
+        "ema_update": ema_update,
+        "target_update": target_update,
+        "target_gap": target_gap,
+        "dynamic_shift": dynamic_shift,
     }
 
 
@@ -2322,10 +2141,8 @@ def check_deploy_contract(
         image_b,
     )
 
-    training_parameters = (
-        parameter_count(
-            model
-        )
+    training_parameters = parameter_count(
+        model
     )
 
     if not hasattr(
@@ -2356,32 +2173,22 @@ def check_deploy_contract(
         image_b,
     )
 
-    maximum = (
-        max_prediction_difference(
-            prediction_before,
-            prediction_after,
-        )
+    maximum = max_prediction_difference(
+        prediction_before,
+        prediction_after,
     )
 
-    if (
-        maximum
-        >= PREDICTION_ATOL
-    ):
+    if maximum >= PREDICTION_ATOL:
         raise AssertionError(
             "Deploy conversion changed Student prediction: "
             f"max_abs={maximum:.9e}"
         )
 
-    deploy_parameters = (
-        parameter_count(
-            model
-        )
+    deploy_parameters = parameter_count(
+        model
     )
 
-    if (
-        deploy_parameters
-        != EXPECTED_DEPLOY_PARAMS
-    ):
+    if deploy_parameters != EXPECTED_DEPLOY_PARAMS:
         raise AssertionError(
             "Unexpected deployed parameter count: "
             f"expected={EXPECTED_DEPLOY_PARAMS:,}, "
@@ -2390,11 +2197,7 @@ def check_deploy_contract(
 
     leaked_keys = [
         key
-        for key in (
-            model
-            .state_dict()
-            .keys()
-        )
+        for key in model.state_dict().keys()
         if key.startswith(
             "training_auxiliary."
         )
@@ -2404,24 +2207,16 @@ def check_deploy_contract(
         raise AssertionError(
             "Training-only parameters remain after deploy: "
             + ", ".join(
-                leaked_keys[
-                    :5
-                ]
+                leaked_keys[:5]
             )
         )
 
-    if (
-        model.auxiliary_mode
-        != "none"
-    ):
+    if model.auxiliary_mode != "none":
         raise AssertionError(
             "auxiliary_mode was not reset to 'none'"
         )
 
-    if (
-        model.training_mechanism
-        != "none"
-    ):
+    if model.training_mechanism != "none":
         raise AssertionError(
             "training_mechanism was not reset to 'none'"
         )
@@ -2440,9 +2235,7 @@ def check_deploy_contract(
         "deploy_parameters": float(
             deploy_parameters
         ),
-        "deploy_error": (
-            maximum
-        ),
+        "deploy_error": maximum,
     }
 
 
@@ -2481,7 +2274,7 @@ def main() -> None:
     )
 
     # ------------------------------------------------------------------
-    # A. Pure task-space structural tests.
+    # A. Pure BT-SAM / task-space tests.
     # ------------------------------------------------------------------
 
     check_bt_sam_identical_geometry(
@@ -2496,7 +2289,11 @@ def main() -> None:
         device
     )
 
-    check_bt_sam_directional_coverage(
+    check_bt_sam_expansion_localization(
+        device
+    )
+
+    check_bt_sam_shrinkage_localization(
         device
     )
 
@@ -2523,10 +2320,8 @@ def main() -> None:
         device,
     )
 
-    teacher_pack = (
-        make_synthetic_teacher_pack(
-            target
-        )
+    teacher_pack = make_synthetic_teacher_pack(
+        target
     )
 
     check_foundation_prior_paths(
@@ -2575,34 +2370,28 @@ def main() -> None:
         teacher_pack,
     )
 
-    gradient_stats = (
-        check_forward_and_gradient_isolation(
-            args,
-            model,
-            image_a,
-            image_b,
-            target,
-            teacher_pack,
-        )
+    gradient_stats = check_forward_and_gradient_isolation(
+        args,
+        model,
+        image_a,
+        image_b,
+        target,
+        teacher_pack,
     )
 
-    teacher_stats = (
-        check_teacher_optimizer_and_ema(
-            args,
-            model,
-            image_a,
-            image_b,
-            target,
-            teacher_pack,
-        )
+    teacher_stats = check_teacher_optimizer_and_ema(
+        args,
+        model,
+        image_a,
+        image_b,
+        target,
+        teacher_pack,
     )
 
-    deploy_stats = (
-        check_deploy_contract(
-            model,
-            image_a,
-            image_b,
-        )
+    deploy_stats = check_deploy_contract(
+        model,
+        image_a,
+        image_b,
     )
 
     # ------------------------------------------------------------------
