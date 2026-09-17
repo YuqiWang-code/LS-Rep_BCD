@@ -1,4 +1,4 @@
-"""Trainer for clean A2Net, DART-R-TS and reciprocal dynamic teachers."""
+"""Run3 BT-SAM-RDT trainer for A2Net-LWGANet-L0."""
 
 from __future__ import annotations
 
@@ -25,8 +25,12 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
+
 from models import A2Net_LWGANet_L0, build_loss
-from models.datasets.cd_dataset import get_loader, get_test_loader
+from models.datasets.cd_dataset import (
+    get_loader,
+    get_test_loader,
+)
 from models.distill import PairedTeacherCache
 from models.distill.diagnostics import H_NAMES
 from models.utils.checkpoint import (
@@ -39,122 +43,354 @@ from models.utils.metrics import ConfuseMatrixMeter
 from models.utils.scheduler import adjust_learning_rate
 
 
+# ============================================================================
+# Deployment contract
+# ============================================================================
+
+
 EXPECTED_DEPLOY_PARAMS = 2_913_094
 EXPECTED_DEPLOY_FLOPS = 2.7475e9
 DEPLOY_FLOPS_ATOL = 0.03e9
 
 
+# ============================================================================
+# Run3 experiment matrix
+# ============================================================================
+
+
 EXPERIMENTS = {
+    # --------------------------------------------------------------
+    # Clean student.
+    # --------------------------------------------------------------
     "B0": {
-        "name": "Baseline_A2Net_LWGANet_L0",
+        "name": "B0_Clean_A2Net_LWGANet_L0",
         "auxiliary_mode": "none",
+        "use_ov": False,
+        "requires_teacher_cache": False,
     },
-    # Main reciprocal dynamic-teacher experiment.
-    "D1": {
-        "name": "D1_RDT_CD_Full",
-        "auxiliary_mode": "direction_c",
+
+    # --------------------------------------------------------------
+    # Minimal mechanism ablation:
+    #
+    # BT-SAM structural prior
+    #       -> one Fast Teacher
+    #       -> EMA Target Teacher
+    #
+    # OV information is disabled, while teacher capacity remains
+    # identical to the full Run3 model.
+    # --------------------------------------------------------------
+    "R3A": {
+        "name": "R3A_BT_SAM_RDT_SAM_Only",
+        "auxiliary_mode": "bt_sam_rdt",
+        "use_ov": False,
+        "requires_teacher_cache": True,
     },
-    # Capacity-matched negative/control experiment.  The same online teacher
-    # experts are kept, but SAM/OV cache conditioning is removed.
-    "D2": {
-        "name": "D2_RDT_CD_NoCache",
-        "auxiliary_mode": "direction_c",
+
+    # --------------------------------------------------------------
+    # Run3 main method:
+    #
+    # BT-SAM structural prior
+    #       +
+    # OV semantic prior
+    #       -> fused foundation prior
+    #       -> one Fast Teacher
+    #       -> EMA Target Teacher
+    #       -> positive-Brier-gain audit
+    #       -> Student KD
+    # --------------------------------------------------------------
+    "R3": {
+        "name": "R3_BT_SAM_RDT_Full",
+        "auxiliary_mode": "bt_sam_rdt",
+        "use_ov": True,
+        "requires_teacher_cache": True,
     },
 }
 
 
-DYNAMIC_EXPERIMENTS = {"D1", "D2"}
+AUXILIARY_EXPERIMENTS = {
+    "R3A",
+    "R3",
+}
+
+
+# ============================================================================
+# Arguments
+# ============================================================================
 
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="A2Net clean baseline / fixed-teacher / reciprocal dynamic-teacher trainer"
+        description=(
+            "Run3 BT-SAM-RDT trainer: "
+            "B0 clean / R3A BT-SAM-only / R3 BT-SAM+OV"
+        )
     )
 
+    # ------------------------------------------------------------------
+    # Experiment / dataset
+    # ------------------------------------------------------------------
     parser.add_argument(
         "--experiment",
         required=True,
         choices=sorted(EXPERIMENTS),
     )
+
     parser.add_argument(
         "--dataset_name",
         required=True,
-        choices=["CDD", "LEVIR", "SYSU", "WHU"],
+        choices=[
+            "CDD",
+            "LEVIR",
+            "SYSU",
+            "WHU",
+        ],
     )
-    parser.add_argument("--data_root", required=True)
-    parser.add_argument("--sam_cache_root", default=None)
-    parser.add_argument("--ov_cache_root", default=None)
 
     parser.add_argument(
+        "--data_root",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--sam_cache_root",
+        default=None,
+    )
+
+    parser.add_argument(
+        "--ov_cache_root",
+        default=None,
+    )
+
+    # ------------------------------------------------------------------
+    # Device / reproducibility
+    # ------------------------------------------------------------------
+    parser.add_argument(
         "--device",
-        choices=["cuda", "cpu"],
+        choices=[
+            "cuda",
+            "cpu",
+        ],
         default="cuda",
     )
-    parser.add_argument("--gpu_id", type=int, default=0)
-    parser.add_argument("--seed", type=int, default=2333)
 
-    # Legacy C0 router controls.
-    parser.add_argument("--router_lr", type=float, default=1e-3)
-    parser.add_argument("--router_hidden", type=int, default=16)
-    parser.add_argument("--utility_margin", type=float, default=0.02)
+    parser.add_argument(
+        "--gpu_id",
+        type=int,
+        default=0,
+    )
 
-    # Shared difficulty / routing controls.
-    parser.add_argument("--boundary_radius", type=int, default=2)
-    parser.add_argument("--small_area", type=int, default=64)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=2333,
+    )
 
-    # RDT-CD training-only teacher controls.
-    parser.add_argument("--teacher_lr", type=float, default=5e-4)
-    parser.add_argument("--teacher_hidden", type=int, default=24)
-    parser.add_argument("--teacher_ema", type=float, default=0.99)
-    parser.add_argument("--max_logit_delta", type=float, default=2.0)
-    parser.add_argument("--teacher_weight_decay", type=float, default=1e-4)
-    parser.add_argument("--teacher_grad_clip", type=float, default=5.0)
+    # ------------------------------------------------------------------
+    # Run3 detached Student-difficulty diagnosis
+    # ------------------------------------------------------------------
+    parser.add_argument(
+        "--boundary_radius",
+        type=int,
+        default=2,
+    )
 
+    parser.add_argument(
+        "--small_area",
+        type=int,
+        default=64,
+    )
+
+    # ------------------------------------------------------------------
+    # Run3 Fast / EMA Teacher
+    # ------------------------------------------------------------------
+    parser.add_argument(
+        "--teacher_lr",
+        type=float,
+        default=5e-4,
+    )
+
+    parser.add_argument(
+        "--teacher_hidden",
+        type=int,
+        default=24,
+    )
+
+    parser.add_argument(
+        "--teacher_ema",
+        type=float,
+        default=0.99,
+    )
+
+    parser.add_argument(
+        "--max_logit_delta",
+        type=float,
+        default=2.0,
+    )
+
+    parser.add_argument(
+        "--teacher_weight_decay",
+        type=float,
+        default=1e-4,
+    )
+
+    parser.add_argument(
+        "--teacher_grad_clip",
+        type=float,
+        default=5.0,
+    )
+
+    # ------------------------------------------------------------------
+    # Student initialization
+    # ------------------------------------------------------------------
     parser.add_argument(
         "--pretrained",
         action=argparse.BooleanOptionalAction,
         default=True,
     )
-    parser.add_argument("--pretrained_path", default=None)
 
-    parser.add_argument("--inWidth", type=int, default=256)
-    parser.add_argument("--inHeight", type=int, default=256)
-    parser.add_argument("--batch_size", type=int, default=64)
-    parser.add_argument("--max_steps", type=int, default=40000)
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument(
+        "--pretrained_path",
+        default=None,
+    )
 
-    parser.add_argument("--lr", type=float, default=5e-4)
+    # ------------------------------------------------------------------
+    # Formal training protocol
+    # ------------------------------------------------------------------
+    parser.add_argument(
+        "--inWidth",
+        type=int,
+        default=256,
+    )
+
+    parser.add_argument(
+        "--inHeight",
+        type=int,
+        default=256,
+    )
+
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=64,
+    )
+
+    parser.add_argument(
+        "--max_steps",
+        type=int,
+        default=40000,
+    )
+
+    parser.add_argument(
+        "--num_workers",
+        type=int,
+        default=4,
+    )
+
+    # ------------------------------------------------------------------
+    # Student optimizer
+    # ------------------------------------------------------------------
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=5e-4,
+    )
+
     parser.add_argument(
         "--lr_mode",
         default="poly",
-        choices=["poly", "step"],
+        choices=[
+            "poly",
+            "step",
+        ],
     )
-    parser.add_argument("--step_loss", type=int, default=30)
-    parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--backbone_lr_mult", type=float, default=1.0)
 
+    parser.add_argument(
+        "--step_loss",
+        type=int,
+        default=30,
+    )
+
+    parser.add_argument(
+        "--weight_decay",
+        type=float,
+        default=1e-4,
+    )
+
+    parser.add_argument(
+        "--backbone_lr_mult",
+        type=float,
+        default=1.0,
+    )
+
+    # ------------------------------------------------------------------
+    # Student loss
+    # ------------------------------------------------------------------
     parser.add_argument(
         "--dice_reduction",
         default="batch",
-        choices=["sample", "batch"],
+        choices=[
+            "sample",
+            "batch",
+        ],
     )
-    parser.add_argument("--main_loss_weights", default="1,1,1,1")
-    parser.add_argument("--kd_lambda", type=float, default=0.06)
 
-    parser.add_argument("--save_dir", required=True)
-    parser.add_argument("--log_file", default="train_log.txt")
-    parser.add_argument("--resume", default=None)
+    parser.add_argument(
+        "--main_loss_weights",
+        default="1,1,1,1",
+    )
+
+    parser.add_argument(
+        "--kd_lambda",
+        type=float,
+        default=0.06,
+    )
+
+    # ------------------------------------------------------------------
+    # Output / recovery
+    # ------------------------------------------------------------------
+    parser.add_argument(
+        "--save_dir",
+        required=True,
+    )
+
+    parser.add_argument(
+        "--log_file",
+        default="train_log.txt",
+    )
+
+    parser.add_argument(
+        "--resume",
+        default=None,
+    )
 
     args = parser.parse_args()
+
+    # ==================================================================
+    # Parse / validate
+    # ==================================================================
 
     args.main_loss_weights = tuple(
         float(value)
         for value in args.main_loss_weights.split(",")
     )
 
-    if len(args.main_loss_weights) != 4:
+    if (
+        len(args.main_loss_weights)
+        != 4
+    ):
         raise ValueError(
             "main_loss_weights must contain four comma-separated values"
+        )
+
+    if any(
+        (
+            not math.isfinite(value)
+            or value < 0
+        )
+        for value in args.main_loss_weights
+    ):
+        raise ValueError(
+            "Invalid main_loss_weights"
         )
 
     if (
@@ -163,240 +399,444 @@ def parse_args():
         or args.num_workers < 0
     ):
         raise ValueError(
-            "batch_size/max_steps must be positive and num_workers non-negative"
+            "batch_size/max_steps must be positive and "
+            "num_workers must be non-negative"
         )
 
-    if args.kd_lambda < 0:
-        raise ValueError("kd_lambda must be nonnegative")
-
-    if args.lr <= 0 or args.router_lr <= 0 or args.teacher_lr <= 0:
-        raise ValueError("All learning rates must be positive")
-
-    if args.weight_decay < 0 or args.teacher_weight_decay < 0:
-        raise ValueError("Weight decay must be nonnegative")
-
-    if args.teacher_grad_clip < 0:
-        raise ValueError("teacher_grad_clip must be nonnegative")
-
-    if args.inWidth != 256 or args.inHeight != 256:
+    if args.lr <= 0:
         raise ValueError(
-            "Formal trainer preserves the existing 256x256 protocol"
+            "Student learning rate must be positive"
         )
 
-    if args.inWidth != args.inHeight:
-        raise ValueError("Only square 256x256 inputs are supported")
-
-    if args.pretrained and not args.pretrained_path:
+    if args.teacher_lr <= 0:
         raise ValueError(
-            "--pretrained_path is required unless --no-pretrained is given"
+            "Teacher learning rate must be positive"
+        )
+
+    if args.weight_decay < 0:
+        raise ValueError(
+            "Student weight_decay must be non-negative"
         )
 
     if (
-        args.router_hidden < 1
-        or args.boundary_radius < 1
-        or args.small_area < 1
-        or args.teacher_hidden < 1
-    ):
-        raise ValueError("Invalid routing/dynamic-teacher dimensions")
-
-    if not 0.0 <= args.utility_margin < 1.0:
-        raise ValueError("utility_margin must be in [0,1)")
-
-    if not 0.0 <= args.teacher_ema < 1.0:
-        raise ValueError("teacher_ema must be in [0,1)")
-
-    if args.max_logit_delta <= 0:
-        raise ValueError("max_logit_delta must be positive")
-
-    if any(
-        not math.isfinite(value) or value < 0
-        for value in args.main_loss_weights
-    ):
-        raise ValueError("Invalid main loss weights")
-
-    recipe = EXPERIMENTS[args.experiment]
-    args.experiment_name = recipe["name"]
-    args.auxiliary_mode = recipe["auxiliary_mode"]
-
-    if args.experiment in DYNAMIC_EXPERIMENTS:
-        args.mechanism = "dynamic_teacher"
-    else:
-        args.mechanism = "none"
-
-    args.cache_replay = "aligned"
-    args.cache_conditioning = args.experiment != "D2"
-    args.teacher_update = args.mechanism == "dynamic_teacher"
-
-    args.implementation_version = "rdt_cd_v1"
-    if args.mechanism == "dynamic_teacher":
-        args.routing_signal = "relative_brier_gain_dynamic_teacher"
-    else:
-        args.routing_signal = "none"
-    args.reject_unit = "pixel"
-    args.legacy_d_r_router_fields_active = False
-
-    # Full auxiliary experiments require paired cache unless this is the
-    # explicit D2 no-cache control.
-    args.requires_teacher_cache = (
-        args.auxiliary_mode == "direction_c"
-        and not (
-            args.mechanism == "dynamic_teacher"
-            and not args.cache_conditioning
-        )
-    )
-
-    if args.requires_teacher_cache and not (
-        args.sam_cache_root and args.ov_cache_root
+        args.teacher_weight_decay
+        < 0
     ):
         raise ValueError(
-            f"{args.experiment} requires --sam_cache_root AND --ov_cache_root"
+            "teacher_weight_decay must be non-negative"
+        )
+
+    if (
+        args.teacher_grad_clip
+        < 0
+    ):
+        raise ValueError(
+            "teacher_grad_clip must be non-negative"
+        )
+
+    if (
+        args.boundary_radius
+        < 1
+    ):
+        raise ValueError(
+            "boundary_radius must be positive"
+        )
+
+    if (
+        args.small_area
+        < 1
+    ):
+        raise ValueError(
+            "small_area must be positive"
+        )
+
+    if (
+        args.teacher_hidden
+        < 1
+    ):
+        raise ValueError(
+            "teacher_hidden must be positive"
+        )
+
+    if not (
+        0.0
+        <= args.teacher_ema
+        < 1.0
+    ):
+        raise ValueError(
+            "teacher_ema must satisfy 0 <= teacher_ema < 1"
+        )
+
+    if (
+        args.max_logit_delta
+        <= 0
+    ):
+        raise ValueError(
+            "max_logit_delta must be positive"
+        )
+
+    if (
+        args.kd_lambda
+        < 0
+    ):
+        raise ValueError(
+            "kd_lambda must be non-negative"
+        )
+
+    if (
+        args.inWidth != 256
+        or args.inHeight != 256
+    ):
+        raise ValueError(
+            "Formal Run3 protocol requires 256x256 inputs"
+        )
+
+    if (
+        args.inWidth
+        != args.inHeight
+    ):
+        raise ValueError(
+            "Only square 256x256 inputs are supported"
+        )
+
+    if (
+        args.pretrained
+        and not args.pretrained_path
+    ):
+        raise ValueError(
+            "--pretrained_path is required when --pretrained is enabled"
+        )
+
+    # ==================================================================
+    # Resolve experiment
+    # ==================================================================
+
+    recipe = EXPERIMENTS[
+        args.experiment
+    ]
+
+    args.experiment_name = (
+        recipe[
+            "name"
+        ]
+    )
+
+    args.auxiliary_mode = (
+        recipe[
+            "auxiliary_mode"
+        ]
+    )
+
+    args.use_ov = bool(
+        recipe[
+            "use_ov"
+        ]
+    )
+
+    args.requires_teacher_cache = bool(
+        recipe[
+            "requires_teacher_cache"
+        ]
+    )
+
+    args.teacher_update = (
+        args.experiment
+        in AUXILIARY_EXPERIMENTS
+    )
+
+    args.mechanism = (
+        "bt_sam_rdt"
+        if args.teacher_update
+        else "none"
+    )
+
+    # Exact augmentation/cache replay protocol.
+    args.cache_replay = "aligned"
+
+    # Fixed Run3 audit policy.
+    args.routing_signal = (
+        "pixel_positive_brier_gain"
+        if args.teacher_update
+        else "none"
+    )
+
+    args.reject_unit = (
+        "pixel"
+        if args.teacher_update
+        else "none"
+    )
+
+    args.implementation_version = (
+        "bt_sam_rdt_run3_v1"
+    )
+
+    # Run3/R3A intentionally use the same paired-cache loading path.
+    # R3A ignores OV inside BTSAMRDT but uses the identical input pipeline.
+    if (
+        args.requires_teacher_cache
+        and not (
+            args.sam_cache_root
+            and args.ov_cache_root
+        )
+    ):
+        raise ValueError(
+            f"{args.experiment} requires "
+            "--sam_cache_root AND --ov_cache_root"
         )
 
     return args
 
 
-def set_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+# ============================================================================
+# Reproducibility
+# ============================================================================
+
+
+def set_seed(
+    seed,
+):
+    random.seed(
+        seed
+    )
+
+    np.random.seed(
+        seed
+    )
+
+    torch.manual_seed(
+        seed
+    )
+
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(
+            seed
+        )
 
     cudnn.deterministic = True
     cudnn.benchmark = False
 
 
-def nested_to(value, device):
-    if torch.is_tensor(value):
-        return value.to(device, non_blocking=True)
-
-    if isinstance(value, dict):
-        return {
-            key: nested_to(item, device)
-            for key, item in value.items()
-        }
-
-    return value
+# ============================================================================
+# Nested teacher-pack helpers
+# ============================================================================
 
 
-def nested_add_batch_to(value, device):
-    """Add a batch dimension to one Dataset sample and move it to device."""
-    if torch.is_tensor(value):
-        return value.unsqueeze(0).to(
+def nested_to(
+    value,
+    device,
+):
+    if torch.is_tensor(
+        value
+    ):
+        return value.to(
             device,
             non_blocking=True,
         )
 
-    if isinstance(value, dict):
+    if isinstance(
+        value,
+        dict,
+    ):
         return {
-            key: nested_add_batch_to(item, device)
+            key: nested_to(
+                item,
+                device,
+            )
             for key, item in value.items()
         }
 
     return value
 
 
-def unpack_batch(batch):
+def nested_add_batch_to(
+    value,
+    device,
+):
+    """
+    Add batch dimension to one Dataset sample teacher pack.
+    """
+    if torch.is_tensor(
+        value
+    ):
+        return (
+            value
+            .unsqueeze(0)
+            .to(
+                device,
+                non_blocking=True,
+            )
+        )
+
+    if isinstance(
+        value,
+        dict,
+    ):
+        return {
+            key: nested_add_batch_to(
+                item,
+                device,
+            )
+            for key, item in value.items()
+        }
+
+    return value
+
+
+# ============================================================================
+# Batch / loss helpers
+# ============================================================================
+
+
+def unpack_batch(
+    batch,
+):
     if len(batch) == 2:
-        return batch[0], batch[1], None, None
+        return (
+            batch[0],
+            batch[1],
+            None,
+            None,
+        )
 
     if len(batch) == 3:
-        return batch[0], batch[1], batch[2], None
+        return (
+            batch[0],
+            batch[1],
+            batch[2],
+            None,
+        )
 
     if len(batch) == 4:
-        return batch[0], batch[1], batch[2], batch[3]
+        return (
+            batch[0],
+            batch[1],
+            batch[2],
+            batch[3],
+        )
 
     raise ValueError(
-        f"Unexpected batch structure with {len(batch)} fields"
+        "Unexpected batch structure with "
+        f"{len(batch)} fields"
     )
 
 
-def multiscale_loss(predictions, target, criterion, weights):
+def multiscale_loss(
+    predictions,
+    target,
+    criterion,
+    weights,
+):
     return sum(
-        weight * criterion(prediction, target)
-        for weight, prediction in zip(weights, predictions)
+        weight
+        * criterion(
+            prediction,
+            target,
+        )
+        for (
+            weight,
+            prediction,
+        ) in zip(
+            weights,
+            predictions,
+        )
     )
 
 
-def build_optimizer(args, model):
+# ============================================================================
+# Optimizers
+# ============================================================================
+
+
+def build_student_optimizer(
+    args,
+    model,
+):
     """
-    Build the STUDENT optimizer.
+    Build Student optimizer.
 
-    Critical RDT-CD rule:
-        no training_auxiliary parameter is allowed in the student optimizer.
-
-    Legacy rule:
-        the learned C0 router keeps its own optimizer and is therefore excluded
-        from the student optimizer, exactly as before.
+    Critical Run3 contract:
+        no training_auxiliary parameter may enter this optimizer.
     """
     grouped = {}
 
-    for name, parameter in model.named_parameters():
+    for (
+        name,
+        parameter,
+    ) in model.named_parameters():
+
         if not parameter.requires_grad:
             continue
 
-        if args.mechanism == "dynamic_teacher":
-            if name.startswith("training_auxiliary."):
-                continue
-        elif name.startswith("training_auxiliary.router."):
+        if name.startswith(
+            "training_auxiliary."
+        ):
             continue
 
         scale = (
             args.backbone_lr_mult
-            if name.startswith("backbone.")
+            if name.startswith(
+                "backbone."
+            )
             else 1.0
         )
 
-        grouped.setdefault(scale, []).append(parameter)
+        grouped.setdefault(
+            scale,
+            [],
+        ).append(
+            parameter
+        )
 
     if not grouped:
-        raise RuntimeError("Student optimizer received no parameters")
+        raise RuntimeError(
+            "Student optimizer received no parameters"
+        )
 
     groups = [
         {
             "params": parameters,
-            "lr": args.lr * scale,
+            "lr": (
+                args.lr
+                * scale
+            ),
             "lr_scale": scale,
-            "weight_decay": args.weight_decay,
+            "weight_decay": (
+                args.weight_decay
+            ),
         }
-        for scale, parameters in grouped.items()
+        for (
+            scale,
+            parameters,
+        ) in grouped.items()
     ]
 
     return torch.optim.Adam(
         groups,
         lr=args.lr,
-        betas=(0.9, 0.99),
+        betas=(
+            0.9,
+            0.99,
+        ),
         eps=1e-8,
     )
 
 
-def build_router_optimizer(args, model):
-    """Legacy C0 learned router optimizer."""
-    if args.mechanism != "legacy":
-        return None
+def build_teacher_optimizer(
+    args,
+    model,
+):
+    """
+    Build Run3 Fast Teacher optimizer.
 
-    if not model.use_training_auxiliary:
-        return None
-
-    if not hasattr(
-        model.training_auxiliary,
-        "router",
-    ):
-        return None
-
-    return torch.optim.Adam(
-        model.training_auxiliary.router.parameters(),
-        lr=args.router_lr,
-    )
-
-
-def build_teacher_optimizer(args, model):
-    """RDT-CD FAST teacher optimizer."""
-    if args.mechanism != "dynamic_teacher":
+    EMA Target Teacher parameters are frozen and are not returned by
+    teacher_parameters().
+    """
+    if not args.teacher_update:
         return None
 
     if not model.use_training_auxiliary:
         raise RuntimeError(
-            "dynamic_teacher selected but model has no training auxiliary"
+            "Run3 selected but model contains no training auxiliary"
         )
 
     if not hasattr(
@@ -404,34 +844,46 @@ def build_teacher_optimizer(args, model):
         "teacher_parameters",
     ):
         raise RuntimeError(
-            "dynamic_teacher auxiliary does not expose teacher_parameters()"
+            "BTSAMRDT does not expose teacher_parameters()"
         )
 
     parameters = list(
-        model.training_auxiliary.teacher_parameters()
+        model
+        .training_auxiliary
+        .teacher_parameters()
     )
 
     if not parameters:
         raise RuntimeError(
-            "Dynamic teacher optimizer received no parameters"
+            "Fast Teacher optimizer received no parameters"
         )
 
-    if any(not parameter.requires_grad for parameter in parameters):
+    if any(
+        not parameter.requires_grad
+        for parameter in parameters
+    ):
         raise RuntimeError(
-            "Fast teacher parameters must all require gradients"
+            "Every Fast Teacher parameter must require gradients"
         )
 
     return torch.optim.Adam(
         [
             {
                 "params": parameters,
-                "lr": args.teacher_lr,
+                "lr": (
+                    args.teacher_lr
+                ),
                 "lr_scale": 1.0,
-                "weight_decay": args.teacher_weight_decay,
+                "weight_decay": (
+                    args.teacher_weight_decay
+                ),
             }
         ],
         lr=args.teacher_lr,
-        betas=(0.9, 0.99),
+        betas=(
+            0.9,
+            0.99,
+        ),
         eps=1e-8,
     )
 
@@ -442,29 +894,55 @@ def adjust_teacher_learning_rate(
     student_base_lr,
 ):
     """
-    Give the online teacher the same warmup/decay factor as the student while
-    preserving its own base learning rate.
+    Apply the same warmup/decay factor used by the Student while preserving
+    the Teacher's independent base learning rate.
     """
     if teacher_optimizer is None:
         return 0.0
 
     if args.lr <= 0:
-        raise ValueError("Student base LR must be positive")
+        raise ValueError(
+            "Student base learning rate must be positive"
+        )
 
-    factor = float(student_base_lr) / float(args.lr)
-    teacher_lr = float(args.teacher_lr) * factor
+    factor = (
+        float(
+            student_base_lr
+        )
+        / float(
+            args.lr
+        )
+    )
 
-    for group in teacher_optimizer.param_groups:
-        group["lr"] = teacher_lr * group.get(
-            "lr_scale",
-            1.0,
+    teacher_lr = (
+        float(
+            args.teacher_lr
+        )
+        * factor
+    )
+
+    for group in (
+        teacher_optimizer.param_groups
+    ):
+        group[
+            "lr"
+        ] = (
+            teacher_lr
+            * group.get(
+                "lr_scale",
+                1.0,
+            )
         )
 
     return teacher_lr
 
 
-def gradient_norm(parameters):
-    """Return global L2 gradient norm without modifying gradients."""
+def gradient_norm(
+    parameters,
+):
+    """
+    Global L2 gradient norm without modifying gradients.
+    """
     squared = None
 
     for parameter in parameters:
@@ -472,69 +950,101 @@ def gradient_norm(parameters):
             continue
 
         value = (
-            parameter.grad.detach()
+            parameter
+            .grad
+            .detach()
             .float()
             .square()
             .sum()
         )
 
-        squared = value if squared is None else squared + value
+        squared = (
+            value
+            if squared is None
+            else squared + value
+        )
 
     if squared is None:
         return 0.0
 
-    return float(torch.sqrt(squared).item())
+    return float(
+        torch.sqrt(
+            squared
+        ).item()
+    )
 
 
-def build_model(args):
-    if args.mechanism == "dynamic_teacher":
-        cfg = {
-            "mechanism": "dynamic_teacher",
-            "hidden": args.teacher_hidden,
-            "ema": args.teacher_ema,
-            "max_logit_delta": args.max_logit_delta,
-            "boundary_radius": args.boundary_radius,
-            "small_area": args.small_area,
-            "policy": "advantage",
-            "teacher": "both",
+# ============================================================================
+# Model
+# ============================================================================
+
+
+def build_model(
+    args,
+):
+    if args.teacher_update:
+        auxiliary_cfg = {
+            "hidden": (
+                args.teacher_hidden
+            ),
+            "ema": (
+                args.teacher_ema
+            ),
+            "max_logit_delta": (
+                args.max_logit_delta
+            ),
+            "boundary_radius": (
+                args.boundary_radius
+            ),
+            "small_area": (
+                args.small_area
+            ),
+            "policy": (
+                "advantage"
+            ),
             "difficulty": True,
-            "cache_conditioning": args.cache_conditioning,
+            "use_ov": (
+                args.use_ov
+            ),
         }
 
         return A2Net_LWGANet_L0(
             pretrained=args.pretrained,
             pretrained_path=args.pretrained_path,
-            auxiliary_mode=args.auxiliary_mode,
-            routing_cfg=cfg,
+            auxiliary_mode="bt_sam_rdt",
+            auxiliary_cfg=auxiliary_cfg,
         )
 
     return A2Net_LWGANet_L0(
         pretrained=args.pretrained,
         pretrained_path=args.pretrained_path,
-        auxiliary_mode=args.auxiliary_mode,
+        auxiliary_mode="none",
+        auxiliary_cfg=None,
     )
+
+
+# ============================================================================
+# Training diagnostics
+# ============================================================================
 
 
 def _training_metric_keys():
     keys = [
+        # Main losses.
         "total",
         "main",
         "aux_raw",
         "aux_weighted",
         "aux_ratio",
-        "router_loss",
+
+        # Fast Teacher optimization.
         "teacher_total",
         "teacher_lr",
         "teacher_grad_norm",
         "teacher_ema_update_norm",
         "teacher_target_gap",
-        "reject_ratio",
-        "target_reject_ratio",
-        "router_accuracy",
-        "sam_boundary",
-        "sam_relation",
-        "ov_response",
-        "ov_relation",
+
+        # Runtime.
         "data_time",
         "step_time",
     ]
@@ -544,164 +1054,224 @@ def _training_metric_keys():
         for name in H_NAMES
     )
 
-    for prefix in (
-        "q_",
-        "d_",
-        "r_",
-        "w_",
-        "effective_",
-    ):
-        for name in ("sam", "ov"):
-            keys.append(prefix + name)
-
     keys.extend(
         [
-            "w_reject",
+            # ----------------------------------------------------------
+            # BT-SAM correspondence
+            # ----------------------------------------------------------
+            "pair_match_ratio",
+            "pair_match_iou",
+            "pair_match_cov12",
+            "pair_match_cov21",
+
+            # ----------------------------------------------------------
+            # Reliability / fusion
+            # ----------------------------------------------------------
+            "sam_reliability_mean",
+            "ov_reliability_mean",
+            "fused_reliability_mean",
+            "sam_ov_conflict",
+            "foundation_support_ratio",
+
+            # ----------------------------------------------------------
+            # GT safety audit
+            # ----------------------------------------------------------
             "pixel_reject_ratio",
             "image_reject_ratio",
             "accepted_change_ratio",
             "accepted_bg_ratio",
+            "available_ratio",
+            "eligible_ratio",
             "effective_mass",
+            "effective_per_error_mass",
+
+            # ----------------------------------------------------------
+            # Prior / teacher quality
+            # ----------------------------------------------------------
             "student_brier",
-            "sam_transport",
-            "ov_task",
-        ]
-    )
+            "sam_prior_brier",
+            "ov_prior_brier",
+            "fusion_prior_brier",
+            "dynamic_teacher_brier",
+            "fast_teacher_brier",
 
-    for prefix in (
-        "proposal_gain_",
-        "relative_gain_",
-        "eligible_ratio_",
-        "available_ratio_",
-        "proposal_brier_",
-    ):
-        for name in ("sam", "ov"):
-            keys.append(prefix + name)
+            "sam_prior_gain",
+            "ov_prior_gain",
+            "fusion_prior_gain",
+            "dynamic_teacher_gain",
 
-    # RDT-CD-specific observables.
-    for prefix in (
-        "dynamic_teacher_brier_",
-        "fast_teacher_brier_",
-        "static_teacher_brier_",
-        "dynamic_teacher_gain_",
-        "static_teacher_gain_",
-        "static_shift_",
-        "target_residual_",
-        "fast_residual_",
-        "cache_support_",
-    ):
-        for name in ("sam", "ov"):
-            keys.append(prefix + name)
+            "sam_prior_brier_weighted",
+            "ov_prior_brier_weighted",
+            "fusion_prior_brier_weighted",
+            "dynamic_teacher_brier_weighted",
 
-    keys.extend(
-        [
-            "dynamic_shift_sam",
-            "dynamic_shift_ov",
-            "teacher_fit_sam",
-            "teacher_fit_ov",
+            # ----------------------------------------------------------
+            # Student / teacher displacement
+            # ----------------------------------------------------------
+            "dynamic_shift",
+            "fused_prior_shift",
+            "sam_prior_shift",
+            "ov_prior_shift",
+
+            "target_residual_magnitude",
+            "fast_residual_magnitude",
+
+            # ----------------------------------------------------------
+            # Remaining Student error
+            # ----------------------------------------------------------
             "student_abs_error",
             "student_error_mass",
-            "effective_per_error_mass",
-            "cache_conditioning",
-            "probe_cls_kd_gt_ratio",
-            "probe_cls_kd_gt_cosine",
+
+            # ----------------------------------------------------------
+            # Explicit experiment state
+            # ----------------------------------------------------------
+            "use_ov",
+            "policy_advantage",
         ]
     )
 
-    return tuple(keys)
+    return tuple(
+        keys
+    )
 
 
-def _set_pair_metrics(values, detail, key, prefix):
-    if key not in detail:
-        return
-
-    tensor = detail[key]
-
-    if not torch.is_tensor(tensor):
-        return
-
-    if tensor.ndim == 0:
-        return
-
-    if tensor.shape[-1] != 2:
-        return
-
-    for index, name in enumerate(("sam", "ov")):
-        values[prefix + name] = tensor[..., index].mean()
-
-
-def _populate_task_space_metrics(values, detail):
-    for index, name in enumerate(H_NAMES):
-        values["h_" + name] = detail["h"][:, index].mean()
-
-    for key, prefix in (
-        ("q", "q_"),
-        ("weights", "w_"),
-        ("effective_weights", "effective_"),
-        ("proposal_gain", "proposal_gain_"),
-        ("relative_gain", "relative_gain_"),
-        ("eligible_ratio", "eligible_ratio_"),
-        ("available_ratio", "available_ratio_"),
-        ("proposal_brier", "proposal_brier_"),
-    ):
-        _set_pair_metrics(
-            values,
-            detail,
-            key,
-            prefix,
+def _scalar_metric(
+    value,
+    reference,
+):
+    """
+    Convert scalar or tensor diagnostic into one detached scalar tensor.
+    """
+    if value is None:
+        return reference.new_zeros(
+            ()
         )
 
-    if "weights" in detail:
-        values["w_reject"] = detail["weights"][:, 2].mean()
+    if torch.is_tensor(
+        value
+    ):
+        return (
+            value
+            .detach()
+            .float()
+            .mean()
+        )
 
-    if "pixel_reject_ratio" in detail:
-        values["reject_ratio"] = detail["pixel_reject_ratio"]
+    return reference.new_tensor(
+        float(value)
+    )
 
-    for name in (
+
+def _populate_run3_metrics(
+    values,
+    detail,
+    reference,
+):
+    if not detail:
+        return
+
+    if "h" in detail:
+        h = (
+            detail[
+                "h"
+            ]
+            .detach()
+            .float()
+        )
+
+        if (
+            h.ndim != 2
+            or h.shape[1]
+            != len(H_NAMES)
+        ):
+            raise ValueError(
+                "Run3 diagnostic h must be [B,6]"
+            )
+
+        for (
+            index,
+            name,
+        ) in enumerate(
+            H_NAMES
+        ):
+            values[
+                "h_" + name
+            ] = (
+                h[
+                    :,
+                    index,
+                ]
+                .mean()
+            )
+
+    scalar_names = (
+        "pair_match_ratio",
+        "pair_match_iou",
+        "pair_match_cov12",
+        "pair_match_cov21",
+
+        "sam_reliability_mean",
+        "ov_reliability_mean",
+        "fused_reliability_mean",
+        "sam_ov_conflict",
+        "foundation_support_ratio",
+
         "pixel_reject_ratio",
         "image_reject_ratio",
         "accepted_change_ratio",
         "accepted_bg_ratio",
+        "available_ratio",
+        "eligible_ratio",
         "effective_mass",
+        "effective_per_error_mass",
+
         "student_brier",
-        "sam_transport",
-        "ov_task",
-    ):
-        if name in detail:
-            values[name] = detail[name]
+        "sam_prior_brier",
+        "ov_prior_brier",
+        "fusion_prior_brier",
+        "dynamic_teacher_brier",
+        "fast_teacher_brier",
 
+        "sam_prior_gain",
+        "ov_prior_gain",
+        "fusion_prior_gain",
+        "dynamic_teacher_gain",
 
-def _populate_dynamic_metrics(values, detail):
-    for key, prefix in (
-        ("dynamic_teacher_brier", "dynamic_teacher_brier_"),
-        ("fast_teacher_brier", "fast_teacher_brier_"),
-        ("static_teacher_brier", "static_teacher_brier_"),
-        ("dynamic_teacher_gain", "dynamic_teacher_gain_"),
-        ("static_teacher_gain", "static_teacher_gain_"),
-        ("static_shift", "static_shift_"),
-        ("target_residual_magnitude", "target_residual_"),
-        ("fast_residual_magnitude", "fast_residual_"),
-        ("cache_support_ratio", "cache_support_"),
-    ):
-        _set_pair_metrics(
-            values,
-            detail,
-            key,
-            prefix,
-        )
+        "sam_prior_brier_weighted",
+        "ov_prior_brier_weighted",
+        "fusion_prior_brier_weighted",
+        "dynamic_teacher_brier_weighted",
 
-    for name in (
-        "dynamic_shift_sam",
-        "dynamic_shift_ov",
-        "teacher_fit_sam",
-        "teacher_fit_ov",
+        "dynamic_shift",
+        "fused_prior_shift",
+        "sam_prior_shift",
+        "ov_prior_shift",
+
+        "target_residual_magnitude",
+        "fast_residual_magnitude",
+
         "student_abs_error",
         "student_error_mass",
-        "effective_per_error_mass",
-        "cache_conditioning",
-    ):
+
+        "use_ov",
+        "policy_advantage",
+    )
+
+    for name in scalar_names:
         if name in detail:
-            values[name] = detail[name]
+            values[
+                name
+            ] = _scalar_metric(
+                detail[
+                    name
+                ],
+                reference,
+            )
+
+
+# ============================================================================
+# One training epoch
+# ============================================================================
 
 
 def train_epoch(
@@ -709,35 +1279,47 @@ def train_epoch(
     loader,
     model,
     criterion,
-    optimizer,
+    student_optimizer,
     epoch,
     global_step,
     device,
-    router_optimizer=None,
     teacher_optimizer=None,
 ):
     model.train()
 
-    loader.dataset.set_epoch(epoch)
+    loader.dataset.set_epoch(
+        epoch
+    )
+
     loader.generator.manual_seed(
-        args.seed + epoch
+        args.seed
+        + epoch
     )
 
     meter = ConfuseMatrixMeter(
         n_class=2
     )
 
-    keys = _training_metric_keys()
-    totals = dict.fromkeys(keys, 0.0)
+    keys = (
+        _training_metric_keys()
+    )
+
+    totals = dict.fromkeys(
+        keys,
+        0.0,
+    )
 
     batches = 0
-    last_lr = args.lr
+
+    last_lr = (
+        args.lr
+    )
+
     last_teacher_lr = 0.0
 
-    data_started = time.perf_counter()
-
-    probe_ratio = 0.0
-    probe_cosine = 0.0
+    data_started = (
+        time.perf_counter()
+    )
 
     for batch in loader:
         data_elapsed = (
@@ -745,78 +1327,112 @@ def train_epoch(
             - data_started
         )
 
-        step_started = time.perf_counter()
-
-        if global_step >= args.max_steps:
+        if (
+            global_step
+            >= args.max_steps
+        ):
             break
 
-        image, target, _, pack = unpack_batch(
+        step_started = (
+            time.perf_counter()
+        )
+
+        (
+            image,
+            target,
+            _,
+            teacher_pack,
+        ) = unpack_batch(
             batch
         )
 
-        pre = image[:, :3].to(
-            device,
-            non_blocking=True,
+        pre = (
+            image[
+                :,
+                :3,
+            ]
+            .to(
+                device,
+                non_blocking=True,
+            )
         )
-        post = image[:, 3:6].to(
-            device,
-            non_blocking=True,
-        )
-        target = target.to(
-            device,
-            non_blocking=True,
-        ).float()
 
-        pack = (
-            nested_to(pack, device)
-            if pack is not None
+        post = (
+            image[
+                :,
+                3:6,
+            ]
+            .to(
+                device,
+                non_blocking=True,
+            )
+        )
+
+        target = (
+            target
+            .to(
+                device,
+                non_blocking=True,
+            )
+            .float()
+        )
+
+        teacher_pack = (
+            nested_to(
+                teacher_pack,
+                device,
+            )
+            if teacher_pack is not None
             else None
         )
 
-        # --------------------------------------------------------------
-        # LR schedules
-        # --------------------------------------------------------------
+        # ==============================================================
+        # Learning rates
+        # ==============================================================
+
         last_lr = adjust_learning_rate(
             args,
-            optimizer,
+            student_optimizer,
             epoch,
             global_step,
             len(loader),
         )
 
-        last_teacher_lr = adjust_teacher_learning_rate(
-            args,
-            teacher_optimizer,
-            last_lr,
+        last_teacher_lr = (
+            adjust_teacher_learning_rate(
+                args,
+                teacher_optimizer,
+                last_lr,
+            )
         )
 
-        # --------------------------------------------------------------
-        # Clear three disjoint optimizer groups.
-        # --------------------------------------------------------------
-        optimizer.zero_grad(
+        # ==============================================================
+        # Clear disjoint optimization graphs
+        # ==============================================================
+
+        student_optimizer.zero_grad(
             set_to_none=True
         )
 
-        if router_optimizer is not None:
-            router_optimizer.zero_grad(
-                set_to_none=True
-            )
-
-        if teacher_optimizer is not None:
+        if (
+            teacher_optimizer
+            is not None
+        ):
             teacher_optimizer.zero_grad(
                 set_to_none=True
             )
 
-        # --------------------------------------------------------------
-        # Single model forward.
-        # --------------------------------------------------------------
+        # ==============================================================
+        # Forward
+        # ==============================================================
+
         predictions, auxiliary = model(
             pre,
             post,
             target=target,
-            teacher_pack=pack,
+            teacher_pack=teacher_pack,
             compute_auxiliary=(
-                args.auxiliary_mode != "none"
+                args.teacher_update
             ),
         )
 
@@ -827,12 +1443,25 @@ def train_epoch(
             args.main_loss_weights,
         )
 
-        zero = main_loss.new_zeros(())
+        zero = (
+            main_loss
+            .new_zeros(
+                ()
+            )
+        )
 
         detail = auxiliary.get(
-            "direction_c",
+            "bt_sam_rdt",
             {},
         )
+
+        if (
+            args.teacher_update
+            and not detail
+        ):
+            raise RuntimeError(
+                "Run3 auxiliary was requested but BTSAMRDT returned no output"
+            )
 
         aux_raw = detail.get(
             "total",
@@ -844,9 +1473,9 @@ def train_epoch(
             * aux_raw
         )
 
-        router_loss = detail.get(
-            "router_loss",
-            zero,
+        student_loss = (
+            main_loss
+            + aux_weighted
         )
 
         teacher_loss = detail.get(
@@ -854,117 +1483,78 @@ def train_epoch(
             zero,
         )
 
-        student_loss = (
-            main_loss
-            + aux_weighted
-        )
+        if (
+            teacher_optimizer is not None
+            and "teacher_total" not in detail
+        ):
+            raise RuntimeError(
+                "Run3 Fast Teacher optimizer exists but teacher_total is missing"
+            )
 
-        # --------------------------------------------------------------
-        # Diagnostic only:
-        # exact weighted KD gradient versus actual four-scale supervised
-        # gradient at the final classifier.
-        # --------------------------------------------------------------
-        if batches == 0 and detail:
-            classifier_weight = model.decoder.cls.weight
+        # ==============================================================
+        # Numerical safety
+        # ==============================================================
 
-            main_gradient = torch.autograd.grad(
-                main_loss,
-                classifier_weight,
-                retain_graph=True,
-            )[0].detach().float()
-
-            kd_gradient = torch.autograd.grad(
-                aux_weighted,
-                classifier_weight,
-                retain_graph=True,
-                allow_unused=True,
-            )[0]
-
-            if kd_gradient is not None:
-                kd_gradient = (
-                    kd_gradient.detach().float()
-                )
-
-                main_norm = (
-                    main_gradient.norm()
-                    .clamp_min(1e-12)
-                )
-
-                kd_norm = kd_gradient.norm()
-
-                probe_ratio = float(
-                    kd_norm / main_norm
-                )
-
-                probe_cosine = float(
-                    (
-                        main_gradient
-                        * kd_gradient
-                    ).sum()
-                    / (
-                        main_norm
-                        * kd_norm.clamp_min(1e-12)
-                    )
-                )
-
-        # --------------------------------------------------------------
-        # Numerical safety before changing any state.
-        # --------------------------------------------------------------
         finite_values = [
             student_loss,
-            router_loss,
         ]
 
-        if teacher_optimizer is not None:
+        if (
+            teacher_optimizer
+            is not None
+        ):
             finite_values.append(
                 teacher_loss
             )
 
         if not all(
-            bool(torch.isfinite(value))
+            bool(
+                torch.isfinite(
+                    value
+                )
+            )
             for value in finite_values
         ):
             raise FloatingPointError(
                 "Non-finite training loss; checkpoint not overwritten"
             )
 
-        # --------------------------------------------------------------
-        # A. Teacher -> Student.
+        # ==============================================================
+        # A. Target Teacher -> Student
         #
-        # In RDT-CD, target-teacher proposals are no-grad, so this backward
-        # updates the student only.
-        # --------------------------------------------------------------
+        # Dynamic target proposal is no-grad inside BTSAMRDT.
+        # Fast Teacher parameters are excluded from Student optimizer.
+        # ==============================================================
+
         student_loss.backward()
 
-        # Legacy C0 router has a separate detached graph.
-        if router_optimizer is not None:
-            router_loss.backward()
+        student_optimizer.step()
 
-        optimizer.step()
-
-        if router_optimizer is not None:
-            router_optimizer.step()
-
-        # --------------------------------------------------------------
-        # B. Student -> Fast Teacher.
+        # ==============================================================
+        # B. Student -> Fast Teacher
         #
-        # dynamic_teacher.py detached every student input before the fast
-        # teacher graph.  This backward therefore cannot modify the student.
-        # --------------------------------------------------------------
+        # BTSAMRDT explicitly detached all Student inputs on this graph.
+        # ==============================================================
+
         teacher_grad_norm = 0.0
         teacher_ema_update_norm = 0.0
         teacher_target_gap = 0.0
 
-        if teacher_optimizer is not None:
+        if (
+            teacher_optimizer
+            is not None
+        ):
             if not teacher_loss.requires_grad:
                 raise RuntimeError(
-                    "Dynamic teacher loss has no gradient graph"
+                    "teacher_total has no gradient graph"
                 )
 
             teacher_loss.backward()
 
             teacher_parameters = list(
-                model.training_auxiliary.teacher_parameters()
+                model
+                .training_auxiliary
+                .teacher_parameters()
             )
 
             teacher_grad_norm = gradient_norm(
@@ -975,48 +1565,71 @@ def train_epoch(
                 teacher_grad_norm
             ):
                 raise FloatingPointError(
-                    "Non-finite dynamic-teacher gradient norm"
+                    "Non-finite Fast Teacher gradient norm"
                 )
 
-            if args.teacher_grad_clip > 0:
+            if (
+                args.teacher_grad_clip
+                > 0
+            ):
                 torch.nn.utils.clip_grad_norm_(
                     teacher_parameters,
-                    max_norm=args.teacher_grad_clip,
+                    max_norm=(
+                        args.teacher_grad_clip
+                    ),
                 )
 
             teacher_optimizer.step()
 
-            # ----------------------------------------------------------
-            # C. Fast Teacher -> EMA Target Teacher.
-            #
-            # Only now is the next-step target teacher updated.  The current
-            # student never sees a proposal that was fit with its current GT
-            # during the same optimization step.
-            # ----------------------------------------------------------
+            # ==========================================================
+            # C. Fast Teacher -> EMA Target Teacher
+            # ==========================================================
+
             teacher_ema_update_norm = float(
-                model.training_auxiliary.update_ema()
+                model
+                .training_auxiliary
+                .update_ema()
             )
 
             teacher_target_gap = float(
-                model.training_auxiliary.teacher_target_gap()
+                model
+                .training_auxiliary
+                .teacher_target_gap()
             )
 
-        # --------------------------------------------------------------
-        # Metrics
-        # --------------------------------------------------------------
-        prediction = (
-            predictions[0].detach() > 0.5
+        # ==============================================================
+        # Training segmentation metrics
+        # ==============================================================
+
+        hard_prediction = (
+            predictions[
+                0
+            ]
+            .detach()
+            > 0.5
         ).long()
 
-        current_f1 = meter.update_cm(
-            prediction.cpu().numpy(),
-            target.cpu().numpy(),
+        current_f1 = (
+            meter.update_cm(
+                hard_prediction
+                .cpu()
+                .numpy(),
+                target
+                .cpu()
+                .numpy(),
+            )
         )
 
         aux_ratio = (
             aux_weighted.detach()
-            / main_loss.detach().clamp_min(1e-8)
+            / main_loss.detach().clamp_min(
+                1e-8
+            )
         )
+
+        # ==============================================================
+        # Diagnostic accumulation
+        # ==============================================================
 
         values = {
             key: zero
@@ -1024,212 +1637,158 @@ def train_epoch(
         }
 
         values.update(
-            total=student_loss,
-            main=main_loss,
-            aux_raw=aux_raw,
-            aux_weighted=aux_weighted,
-            aux_ratio=aux_ratio,
-            router_loss=router_loss,
-            teacher_total=teacher_loss,
-            teacher_lr=zero.new_tensor(
-                last_teacher_lr
-            ),
-            teacher_grad_norm=zero.new_tensor(
-                teacher_grad_norm
-            ),
-            teacher_ema_update_norm=zero.new_tensor(
-                teacher_ema_update_norm
-            ),
-            teacher_target_gap=zero.new_tensor(
-                teacher_target_gap
-            ),
+            {
+                "total": (
+                    student_loss
+                ),
+                "main": (
+                    main_loss
+                ),
+                "aux_raw": (
+                    aux_raw
+                ),
+                "aux_weighted": (
+                    aux_weighted
+                ),
+                "aux_ratio": (
+                    aux_ratio
+                ),
+                "teacher_total": (
+                    teacher_loss
+                ),
+                "teacher_lr": (
+                    zero.new_tensor(
+                        last_teacher_lr
+                    )
+                ),
+                "teacher_grad_norm": (
+                    zero.new_tensor(
+                        teacher_grad_norm
+                    )
+                ),
+                "teacher_ema_update_norm": (
+                    zero.new_tensor(
+                        teacher_ema_update_norm
+                    )
+                ),
+                "teacher_target_gap": (
+                    zero.new_tensor(
+                        teacher_target_gap
+                    )
+                ),
+            }
         )
 
-        if detail and "target_action" in detail:
-            # Legacy learned-router diagnostics.
-            action = detail["action"]
-            target_action = detail["target_action"]
-
-            values.update(
-                reject_ratio=(
-                    action == 2
-                ).float().mean(),
-                target_reject_ratio=(
-                    target_action == 2
-                ).float().mean(),
-                router_accuracy=(
-                    action == target_action
-                ).float().mean(),
-            )
-
-            for index, name in enumerate(H_NAMES):
-                values["h_" + name] = (
-                    detail["h"][:, index].mean()
-                )
-
-            for key, prefix in (
-                ("q", "q_"),
-                ("d", "d_"),
-                ("r", "r_"),
-                ("weights", "w_"),
-                ("effective_weights", "effective_"),
-            ):
-                _set_pair_metrics(
-                    values,
-                    detail,
-                    key,
-                    prefix,
-                )
-
-            values["w_reject"] = (
-                detail["weights"][:, 2].mean()
-            )
-
-            for name in (
-                "sam_boundary",
-                "sam_relation",
-                "ov_response",
-                "ov_relation",
-            ):
-                if name in detail:
-                    values[name] = detail[name]
-
-        elif detail:
-            # Shared C1-C5 / D1-D2 task-space diagnostics.
-            _populate_task_space_metrics(
+        if detail:
+            _populate_run3_metrics(
                 values,
                 detail,
+                zero,
             )
 
-            if args.mechanism == "dynamic_teacher":
-                _populate_dynamic_metrics(
-                    values,
-                    detail,
-                )
-
-        values["data_time"] = zero.new_tensor(
+        values[
+            "data_time"
+        ] = zero.new_tensor(
             data_elapsed
         )
-        values["step_time"] = zero.new_tensor(
+
+        values[
+            "step_time"
+        ] = zero.new_tensor(
             time.perf_counter()
             - step_started
         )
-        values["probe_cls_kd_gt_ratio"] = zero.new_tensor(
-            probe_ratio
-        )
-        values["probe_cls_kd_gt_cosine"] = zero.new_tensor(
-            probe_cosine
-        )
 
-        for key, value in values.items():
-            totals[key] += float(
-                value.detach()
+        for (
+            key,
+            value,
+        ) in values.items():
+
+            totals[
+                key
+            ] += float(
+                _scalar_metric(
+                    value,
+                    zero,
+                )
             )
 
         batches += 1
         global_step += 1
 
-        if global_step % 5 == 0:
+        # ==============================================================
+        # Console progress
+        # ==============================================================
+
+        if (
+            global_step
+            % 5
+            == 0
+        ):
             message = (
                 f"\rstep [{global_step}/{args.max_steps}] "
                 f"F1={current_f1:.3f} "
                 f"lr={last_lr:.7f} "
-                f"loss={float(student_loss.detach()):.3f} "
-                f"aux_ratio={float(aux_ratio):.3f} "
-                f"reject={float(values['reject_ratio']):.3f}"
+                f"loss={float(student_loss.detach()):.3f}"
             )
 
-            if teacher_optimizer is not None:
+            if (
+                teacher_optimizer
+                is not None
+            ):
                 message += (
-                    f" teacher={float(teacher_loss.detach()):.3f}"
+                    f" aux={float(aux_raw.detach()):.4f}"
+                    f" reject={float(values['pixel_reject_ratio']):.3f}"
+                    f" teacher={float(teacher_loss.detach()):.4f}"
                     f" tg={teacher_grad_norm:.3e}"
                     f" ema={teacher_ema_update_norm:.3e}"
                 )
 
-            message += f" data={data_elapsed:.3f}s"
+            message += (
+                f" data={data_elapsed:.3f}s"
+            )
 
             print(
                 message,
                 end="",
             )
 
-        data_started = time.perf_counter()
+        data_started = (
+            time.perf_counter()
+        )
 
     if not batches:
         raise RuntimeError(
-            "No training batches; check batch size and max_steps"
+            "No training batches; check batch_size and max_steps"
         )
 
     averages = {
-        key: value / batches
-        for key, value in totals.items()
+        key: (
+            value
+            / batches
+        )
+        for (
+            key,
+            value,
+        ) in totals.items()
     }
 
-    if args.mechanism in {
-        "task_space",
-        "dynamic_teacher",
-    }:
-        # Do not fabricate old v1 cosine/reliability/router quantities for
-        # task-space methods.
-        inactive = {
-            "router_loss",
-            "router_accuracy",
-            "target_reject_ratio",
-            "sam_boundary",
-            "sam_relation",
-            "ov_response",
-            "ov_relation",
-            "d_sam",
-            "d_ov",
-            "r_sam",
-            "r_ov",
+    # Clean baseline logs only contain meaningful baseline fields.
+    if not args.teacher_update:
+        keep = {
+            "total",
+            "main",
+            "data_time",
+            "step_time",
         }
 
         averages = {
             key: value
-            for key, value in averages.items()
-            if key not in inactive
-        }
-
-    if args.mechanism != "dynamic_teacher":
-        dynamic_only = {
-            "teacher_total",
-            "teacher_lr",
-            "teacher_grad_norm",
-            "teacher_ema_update_norm",
-            "teacher_target_gap",
-            "dynamic_teacher_brier_sam",
-            "dynamic_teacher_brier_ov",
-            "fast_teacher_brier_sam",
-            "fast_teacher_brier_ov",
-            "static_teacher_brier_sam",
-            "static_teacher_brier_ov",
-            "dynamic_teacher_gain_sam",
-            "dynamic_teacher_gain_ov",
-            "static_teacher_gain_sam",
-            "static_teacher_gain_ov",
-            "dynamic_shift_sam",
-            "dynamic_shift_ov",
-            "static_shift_sam",
-            "static_shift_ov",
-            "target_residual_sam",
-            "target_residual_ov",
-            "fast_residual_sam",
-            "fast_residual_ov",
-            "teacher_fit_sam",
-            "teacher_fit_ov",
-            "student_abs_error",
-            "student_error_mass",
-            "effective_per_error_mass",
-            "cache_support_sam",
-            "cache_support_ov",
-            "cache_conditioning",
-        }
-
-        averages = {
-            key: value
-            for key, value in averages.items()
-            if key not in dynamic_only
+            for (
+                key,
+                value,
+            ) in averages.items()
+            if key in keep
         }
 
     return (
@@ -1238,6 +1797,11 @@ def train_epoch(
         last_lr,
         global_step,
     )
+
+
+# ============================================================================
+# Validation
+# ============================================================================
 
 
 @torch.no_grad()
@@ -1257,22 +1821,45 @@ def evaluate(
     losses = []
 
     for batch in loader:
-        image, target, _, _ = unpack_batch(
+        (
+            image,
+            target,
+            _,
+            _,
+        ) = unpack_batch(
             batch
         )
 
-        pre = image[:, :3].to(
-            device,
-            non_blocking=True,
+        pre = (
+            image[
+                :,
+                :3,
+            ]
+            .to(
+                device,
+                non_blocking=True,
+            )
         )
-        post = image[:, 3:6].to(
-            device,
-            non_blocking=True,
+
+        post = (
+            image[
+                :,
+                3:6,
+            ]
+            .to(
+                device,
+                non_blocking=True,
+            )
         )
-        target = target.to(
-            device,
-            non_blocking=True,
-        ).float()
+
+        target = (
+            target
+            .to(
+                device,
+                non_blocking=True,
+            )
+            .float()
+        )
 
         predictions = model(
             pre,
@@ -1288,65 +1875,42 @@ def evaluate(
 
         meter.update_cm(
             (
-                predictions[0] > 0.5
-            ).long().cpu().numpy(),
-            target.cpu().numpy(),
+                predictions[
+                    0
+                ]
+                > 0.5
+            )
+            .long()
+            .cpu()
+            .numpy(),
+            target
+            .cpu()
+            .numpy(),
         )
 
         losses.append(
-            float(loss)
+            float(
+                loss
+            )
         )
 
     return (
-        sum(losses) / max(len(losses), 1),
+        sum(
+            losses
+        )
+        / max(
+            len(
+                losses
+            ),
+            1,
+        ),
         meter.get_scores(),
     )
 
 
-@torch.no_grad()
-def deploy_consistency(
-    model,
-    loader,
-    device,
-):
-    model.eval()
-
-    image, _, _, _ = unpack_batch(
-        next(iter(loader))
-    )
-
-    pre = image[:1, :3].to(device)
-    post = image[:1, 3:6].to(device)
-
-    before = model(
-        pre,
-        post,
-    )
-
-    model.switch_to_deploy().eval()
-
-    after = model(
-        pre,
-        post,
-    )
-
-    max_error = max(
-        (
-            left - right
-        ).abs().max().item()
-        for left, right in zip(
-            before,
-            after,
-        )
-    )
-
-    if max_error >= 1e-6:
-        raise RuntimeError(
-            "Deploy consistency failed: "
-            f"max_error={max_error:.8e}"
-        )
-
-    return max_error
+# ============================================================================
+# Deployment invariance tests
+# ============================================================================
 
 
 @torch.no_grad()
@@ -1356,23 +1920,45 @@ def auxiliary_toggle_consistency(
     device,
 ):
     """
-    Prove that enabling the training-only auxiliary cannot alter the student's
-    main prediction in the same deterministic model state.
+    Prove that Run3 auxiliary ON/OFF cannot alter Student main predictions.
     """
-    sample = dataset[0]
+    sample = (
+        dataset[
+            0
+        ]
+    )
 
-    image, target, _, teacher_pack = unpack_batch(
+    (
+        image,
+        target,
+        _,
+        teacher_pack,
+    ) = unpack_batch(
         sample
     )
 
-    image = image.unsqueeze(0).to(
-        device,
-        non_blocking=True,
+    image = (
+        image
+        .unsqueeze(
+            0
+        )
+        .to(
+            device,
+            non_blocking=True,
+        )
     )
-    target = target.unsqueeze(0).to(
-        device,
-        non_blocking=True,
-    ).float()
+
+    target = (
+        target
+        .unsqueeze(
+            0
+        )
+        .to(
+            device,
+            non_blocking=True,
+        )
+        .float()
+    )
 
     teacher_pack = (
         nested_add_batch_to(
@@ -1383,22 +1969,35 @@ def auxiliary_toggle_consistency(
         else None
     )
 
-    # Put every child in deterministic eval mode, then make only the root
-    # execute its training return/auxiliary branch.
+    # Make every child deterministic.
     model.eval()
+
+    # Root only enters the training-return branch.
     model.training = True
 
     without_auxiliary, _ = model(
-        image[:, :3],
-        image[:, 3:6],
+        image[
+            :,
+            :3,
+        ],
+        image[
+            :,
+            3:6,
+        ],
         target=target,
         teacher_pack=teacher_pack,
         compute_auxiliary=False,
     )
 
     with_auxiliary, _ = model(
-        image[:, :3],
-        image[:, 3:6],
+        image[
+            :,
+            :3,
+        ],
+        image[
+            :,
+            3:6,
+        ],
         target=target,
         teacher_pack=teacher_pack,
         compute_auxiliary=True,
@@ -1408,21 +2007,122 @@ def auxiliary_toggle_consistency(
 
     max_error = max(
         (
-            left - right
-        ).abs().max().item()
-        for left, right in zip(
+            left
+            - right
+        )
+        .abs()
+        .max()
+        .item()
+        for (
+            left,
+            right,
+        ) in zip(
             without_auxiliary,
             with_auxiliary,
         )
     )
 
-    if max_error != 0.0:
+    if (
+        max_error
+        != 0.0
+    ):
         raise RuntimeError(
-            "Auxiliary changed the main output: "
+            "Auxiliary changed main prediction: "
             f"max_error={max_error:.8e}"
         )
 
     return max_error
+
+
+@torch.no_grad()
+def deploy_consistency(
+    model,
+    loader,
+    device,
+):
+    """
+    Compare predictions immediately before and after switch_to_deploy().
+    """
+    model.eval()
+
+    (
+        image,
+        _,
+        _,
+        _,
+    ) = unpack_batch(
+        next(
+            iter(
+                loader
+            )
+        )
+    )
+
+    pre = (
+        image[
+            :1,
+            :3,
+        ]
+        .to(
+            device
+        )
+    )
+
+    post = (
+        image[
+            :1,
+            3:6,
+        ]
+        .to(
+            device
+        )
+    )
+
+    before = model(
+        pre,
+        post,
+    )
+
+    model.switch_to_deploy()
+    model.eval()
+
+    after = model(
+        pre,
+        post,
+    )
+
+    max_error = max(
+        (
+            left
+            - right
+        )
+        .abs()
+        .max()
+        .item()
+        for (
+            left,
+            right,
+        ) in zip(
+            before,
+            after,
+        )
+    )
+
+    if (
+        max_error
+        >= 1e-6
+    ):
+        raise RuntimeError(
+            "Deploy consistency failed: "
+            f"max_error={max_error:.8e}"
+        )
+
+    return max_error
+
+
+# ============================================================================
+# Deployed test
+# ============================================================================
 
 
 @torch.no_grad()
@@ -1439,16 +2139,27 @@ def test_deployed(
     )
 
     for batch in loader:
-        image, target, _, _ = unpack_batch(
+        (
+            image,
+            target,
+            _,
+            _,
+        ) = unpack_batch(
             batch
         )
 
         output = model(
-            image[:, :3].to(
+            image[
+                :,
+                :3,
+            ].to(
                 device,
                 non_blocking=True,
             ),
-            image[:, 3:6].to(
+            image[
+                :,
+                3:6,
+            ].to(
                 device,
                 non_blocking=True,
             ),
@@ -1456,9 +2167,15 @@ def test_deployed(
 
         meter.update_cm(
             (
-                output > 0.5
-            ).long().cpu().numpy(),
-            target.cpu().numpy(),
+                output
+                > 0.5
+            )
+            .long()
+            .cpu()
+            .numpy(),
+            target
+            .cpu()
+            .numpy(),
         )
 
     infer_params = sum(
@@ -1479,7 +2196,10 @@ def test_deployed(
 
         flops, _ = profile(
             model,
-            inputs=(dummy, dummy),
+            inputs=(
+                dummy,
+                dummy,
+            ),
             verbose=False,
         )
 
@@ -1490,11 +2210,18 @@ def test_deployed(
     )
 
 
+# ============================================================================
+# Authoritative test block
+# ============================================================================
+
+
 def append_test_results(
     logger,
     args,
     scores,
     train_params,
+    trainable_params,
+    auxiliary_params,
     infer_params,
     flops,
     auxiliary_error,
@@ -1502,26 +2229,60 @@ def append_test_results(
     elapsed,
 ):
     """
-    Keep the authoritative test result at the end of train_log.txt.
+    Append the single authoritative final test block.
+
+    Formal result extraction must use the final complete block between:
+        === TEST RESULTS ===
+        === END TEST RESULTS ===
     """
     logger.log_message(
         "=" * 100
     )
+
     logger.log_message(
         "=== TEST RESULTS ==="
     )
+
     logger.log_message(
         "Metric Split: test"
     )
+
     logger.log_message(
         f"Dataset: {args.dataset_name}"
     )
+
     logger.log_message(
         f"Experiment: {args.experiment}/{args.experiment_name}"
     )
+
+    logger.log_message(
+        f"Implementation: {args.implementation_version}"
+    )
+
+    logger.log_message(
+        f"Seed: {args.seed}"
+    )
+
+    logger.log_message(
+        f"Max Steps: {args.max_steps}"
+    )
+
+    logger.log_message(
+        f"Batch Size: {args.batch_size}"
+    )
+
     logger.log_message(
         f"Train Params: {train_params / 1e6:.4f}M"
     )
+
+    logger.log_message(
+        f"Trainable Params: {trainable_params / 1e6:.4f}M"
+    )
+
+    logger.log_message(
+        f"Auxiliary Params: {auxiliary_params / 1e6:.4f}M"
+    )
+
     logger.log_message(
         f"Infer Params: {infer_params / 1e6:.4f}M"
     )
@@ -1530,6 +2291,7 @@ def append_test_results(
         logger.log_message(
             f"FLOPs: {flops / 1e9:.4f}G"
         )
+
     else:
         logger.log_message(
             "FLOPs: unavailable"
@@ -1539,6 +2301,7 @@ def append_test_results(
         "Auxiliary toggle max error: "
         f"{auxiliary_error:.8e}"
     )
+
     logger.log_message(
         "Deploy max error: "
         f"{deploy_error:.8e}"
@@ -1547,13 +2310,16 @@ def append_test_results(
     labels = {
         "recall": "Recall",
         "precision": "Precision",
+        "OA": "OA",
         "F1": "F1",
         "IoU": "IoU",
-        "OA": "OA",
         "Kappa": "Kappa",
     }
 
-    for key, label in labels.items():
+    for (
+        key,
+        label,
+    ) in labels.items():
         logger.log_message(
             f"{label}: {scores[key]:.6f}"
         )
@@ -1561,9 +2327,15 @@ def append_test_results(
     logger.log_message(
         f"Total time: {elapsed}"
     )
+
     logger.log_message(
         "=== END TEST RESULTS ==="
     )
+
+
+# ============================================================================
+# Exact-resume validation
+# ============================================================================
 
 
 def validate_resume(
@@ -1571,27 +2343,18 @@ def validate_resume(
     checkpoint,
 ):
     """
-    Validate exact-resume configuration.
+    Run3 exact-resume validation.
 
-    Format v2 remains readable for historical B0/C0/C1-C5 checkpoints.
-    Dynamic-teacher runs require the new v3 checkpoint because the teacher
-    optimizer state must be restored exactly.
+    Clean Run3 does not resume historical Run1/Run2 checkpoints.
     """
     version = checkpoint.get(
         "format_version"
     )
 
-    if version not in {2, 3}:
+    if version != 3:
         raise ValueError(
-            "Unsupported checkpoint format; start a fresh run"
-        )
-
-    if (
-        args.mechanism == "dynamic_teacher"
-        and version < 3
-    ):
-        raise ValueError(
-            "Dynamic-teacher resume requires checkpoint format_version >= 3"
+            "Run3 requires checkpoint format_version=3; "
+            "do not resume historical Run1/Run2 checkpoints"
         )
 
     saved = checkpoint.get(
@@ -1600,12 +2363,21 @@ def validate_resume(
     )
 
     keys = [
+        # Identity.
         "implementation_version",
         "experiment",
+        "experiment_name",
         "dataset_name",
+        "mechanism",
+
+        # Protocol.
         "batch_size",
         "max_steps",
         "seed",
+        "inWidth",
+        "inHeight",
+
+        # Student optimization.
         "lr",
         "lr_mode",
         "step_loss",
@@ -1613,52 +2385,62 @@ def validate_resume(
         "backbone_lr_mult",
         "dice_reduction",
         "main_loss_weights",
-        "router_lr",
-        "router_hidden",
-        "utility_margin",
+        "kd_lambda",
+
+        # Run3 mechanism.
         "boundary_radius",
         "small_area",
-        "kd_lambda",
-        "inWidth",
-        "inHeight",
+        "teacher_lr",
+        "teacher_hidden",
+        "teacher_ema",
+        "max_logit_delta",
+        "teacher_weight_decay",
+        "teacher_grad_clip",
+        "use_ov",
+        "teacher_update",
+        "requires_teacher_cache",
+        "routing_signal",
+        "reject_unit",
+
+        # Data/cache identity.
+        "cache_replay",
         "data_fingerprint",
         "cache_fingerprint",
-        "mechanism",
-        "cache_replay",
     ]
 
-    if version >= 3:
-        keys.extend(
-            [
-                "requires_teacher_cache",
-                "cache_conditioning",
-                "teacher_update",
-                "teacher_lr",
-                "teacher_hidden",
-                "teacher_ema",
-                "max_logit_delta",
-                "teacher_weight_decay",
-                "teacher_grad_clip",
-            ]
+    for key in keys:
+        saved_value = saved.get(
+            key
         )
 
-    for key in keys:
-        saved_value = saved.get(key)
         current_value = getattr(
             args,
             key,
             None,
         )
 
-        if saved_value != current_value:
+        if (
+            saved_value
+            != current_value
+        ):
             raise ValueError(
                 "Resume configuration mismatch for "
-                f"{key}: {saved_value!r} vs {current_value!r}"
+                f"{key}: "
+                f"{saved_value!r} vs {current_value!r}"
             )
 
 
-def _split_fingerprints(data_root):
-    root = Path(data_root)
+# ============================================================================
+# Dataset fingerprints
+# ============================================================================
+
+
+def _split_fingerprints(
+    data_root,
+):
+    root = Path(
+        data_root
+    )
 
     return {
         split: hashlib.sha256(
@@ -1676,8 +2458,12 @@ def _split_fingerprints(data_root):
     }
 
 
-def _read_split_ids(data_root):
-    root = Path(data_root)
+def _read_split_ids(
+    data_root,
+):
+    root = Path(
+        data_root
+    )
 
     result = {}
 
@@ -1692,9 +2478,20 @@ def _read_split_ids(data_root):
             / f"{split}.txt"
         )
 
+        if not path.is_file():
+            raise FileNotFoundError(
+                path
+            )
+
         ids = [
             value.strip()
-            for value in path.read_text().splitlines()
+            for value in (
+                path
+                .read_text(
+                    encoding="utf-8"
+                )
+                .splitlines()
+            )
             if value.strip()
         ]
 
@@ -1703,32 +2500,77 @@ def _read_split_ids(data_root):
                 f"Empty split: {split}"
             )
 
-        if len(ids) != len(set(ids)):
+        if (
+            len(ids)
+            != len(
+                set(
+                    ids
+                )
+            )
+        ):
             raise ValueError(
                 f"Duplicate IDs in split: {split}"
             )
 
-        result[split] = ids
+        result[
+            split
+        ] = ids
 
-    if any(
-        set(result[left]) & set(result[right])
-        for left, right in (
-            ("train", "val"),
-            ("train", "test"),
-            ("val", "test"),
-        )
+    for (
+        left,
+        right,
+    ) in (
+        (
+            "train",
+            "val",
+        ),
+        (
+            "train",
+            "test",
+        ),
+        (
+            "val",
+            "test",
+        ),
     ):
-        raise ValueError(
-            "Sample IDs overlap between train/val/test"
+        overlap = (
+            set(
+                result[
+                    left
+                ]
+            )
+            & set(
+                result[
+                    right
+                ]
+            )
         )
+
+        if overlap:
+            raise ValueError(
+                "Sample IDs overlap between "
+                f"{left}/{right}: {len(overlap)}"
+            )
 
     return result
+
+
+# ============================================================================
+# Main
+# ============================================================================
 
 
 def main():
     args = parse_args()
 
-    if args.device == "cuda":
+    # ==================================================================
+    # Device
+    # ==================================================================
+
+    if (
+        args.device
+        == "cuda"
+    ):
         if not torch.cuda.is_available():
             raise RuntimeError(
                 "CUDA unavailable; use --device cpu only for local verification"
@@ -1739,26 +2581,39 @@ def main():
         )
 
     device = torch.device(
-        f"cuda:{args.gpu_id}"
-        if args.device == "cuda"
-        else "cpu"
+        (
+            f"cuda:{args.gpu_id}"
+            if args.device == "cuda"
+            else "cpu"
+        )
     )
 
     set_seed(
         args.seed
     )
 
+    # ==================================================================
+    # Output directory
+    # ==================================================================
+
     save_dir = Path(
         args.save_dir
     )
+
     save_dir.mkdir(
         parents=True,
         exist_ok=True,
     )
 
+    # ==================================================================
+    # Model
+    # ==================================================================
+
     model = build_model(
         args
-    ).to(device)
+    ).to(
+        device
+    )
 
     train_params = sum(
         parameter.numel()
@@ -1773,7 +2628,10 @@ def main():
 
     auxiliary_params = sum(
         parameter.numel()
-        for name, parameter in model.named_parameters()
+        for (
+            name,
+            parameter,
+        ) in model.named_parameters()
         if name.startswith(
             "training_auxiliary."
         )
@@ -1781,7 +2639,10 @@ def main():
 
     fast_teacher_params = sum(
         parameter.numel()
-        for name, parameter in model.named_parameters()
+        for (
+            name,
+            parameter,
+        ) in model.named_parameters()
         if name.startswith(
             "training_auxiliary.fast."
         )
@@ -1789,50 +2650,93 @@ def main():
 
     target_teacher_params = sum(
         parameter.numel()
-        for name, parameter in model.named_parameters()
+        for (
+            name,
+            parameter,
+        ) in model.named_parameters()
         if name.startswith(
             "training_auxiliary.target."
         )
     )
 
-    optimizer = build_optimizer(
-        args,
-        model,
+    # Target teacher must be fully frozen.
+    if args.teacher_update:
+        target_trainable = [
+            name
+            for (
+                name,
+                parameter,
+            ) in model.named_parameters()
+            if (
+                name.startswith(
+                    "training_auxiliary.target."
+                )
+                and parameter.requires_grad
+            )
+        ]
+
+        if target_trainable:
+            raise RuntimeError(
+                "EMA Target Teacher contains trainable parameters: "
+                + ", ".join(
+                    target_trainable
+                )
+            )
+
+    # ==================================================================
+    # Optimizers / criterion
+    # ==================================================================
+
+    student_optimizer = (
+        build_student_optimizer(
+            args,
+            model,
+        )
     )
 
-    router_optimizer = build_router_optimizer(
-        args,
-        model,
-    )
-
-    teacher_optimizer = build_teacher_optimizer(
-        args,
-        model,
+    teacher_optimizer = (
+        build_teacher_optimizer(
+            args,
+            model,
+        )
     )
 
     criterion = build_loss(
         args.dice_reduction
     )
 
-    args.data_fingerprint = _split_fingerprints(
-        args.data_root
+    # ==================================================================
+    # Data/cache identity
+    # ==================================================================
+
+    args.data_fingerprint = (
+        _split_fingerprints(
+            args.data_root
+        )
     )
 
-    split_ids = _read_split_ids(
-        args.data_root
+    split_ids = (
+        _read_split_ids(
+            args.data_root
+        )
     )
 
-    train_list = split_ids[
-        "train"
-    ]
+    train_list = (
+        split_ids[
+            "train"
+        ]
+    )
 
     if args.requires_teacher_cache:
-        teacher_cache = PairedTeacherCache(
-            args.sam_cache_root,
-            args.ov_cache_root,
-            args.dataset_name,
-            train_list,
+        teacher_cache = (
+            PairedTeacherCache(
+                args.sam_cache_root,
+                args.ov_cache_root,
+                args.dataset_name,
+                train_list,
+            )
         )
+
     else:
         teacher_cache = None
 
@@ -1841,6 +2745,10 @@ def main():
         if teacher_cache is not None
         else None
     )
+
+    # ==================================================================
+    # DataLoaders
+    # ==================================================================
 
     train_loader = get_loader(
         args.data_root,
@@ -1857,9 +2765,13 @@ def main():
         cache_replay=args.cache_replay,
     )
 
-    if len(train_loader) == 0:
+    if (
+        len(train_loader)
+        == 0
+    ):
         raise ValueError(
-            "Training dataset smaller than batch_size with drop_last=True"
+            "Training dataset is smaller than batch_size "
+            "with drop_last=True"
         )
 
     val_loader = get_test_loader(
@@ -1891,9 +2803,15 @@ def main():
     args.max_epochs = int(
         np.ceil(
             args.max_steps
-            / len(train_loader)
+            / len(
+                train_loader
+            )
         )
     )
+
+    # ==================================================================
+    # Resume state
+    # ==================================================================
 
     start_epoch = 0
     global_step = 0
@@ -1912,54 +2830,72 @@ def main():
         )
 
         model.load_state_dict(
-            checkpoint["model"]
+            checkpoint[
+                "model"
+            ]
         )
 
-        optimizer.load_state_dict(
-            checkpoint["optimizer"]
+        student_optimizer.load_state_dict(
+            checkpoint[
+                "optimizer"
+            ]
         )
 
-        if router_optimizer is not None:
-            state = checkpoint.get(
-                "router_optimizer"
-            )
-
-            if state is None:
-                raise ValueError(
-                    "Missing router optimizer state"
-                )
-
-            router_optimizer.load_state_dict(
-                state
-            )
-
-        if teacher_optimizer is not None:
-            state = checkpoint.get(
+        if (
+            teacher_optimizer
+            is not None
+        ):
+            teacher_state = checkpoint.get(
                 "teacher_optimizer"
             )
 
-            if state is None:
+            if teacher_state is None:
                 raise ValueError(
-                    "Missing dynamic-teacher optimizer state"
+                    "Run3 checkpoint is missing teacher_optimizer state"
                 )
 
             teacher_optimizer.load_state_dict(
-                state
+                teacher_state
+            )
+
+        elif (
+            checkpoint.get(
+                "teacher_optimizer"
+            )
+            is not None
+        ):
+            raise ValueError(
+                "B0 checkpoint unexpectedly contains Teacher optimizer state"
             )
 
         start_epoch = (
-            checkpoint["epoch"] + 1
+            checkpoint[
+                "epoch"
+            ]
+            + 1
         )
-        global_step = checkpoint[
-            "global_step"
-        ]
-        best_val_f1 = checkpoint[
-            "best_val_f1"
-        ]
+
+        global_step = int(
+            checkpoint[
+                "global_step"
+            ]
+        )
+
+        best_val_f1 = float(
+            checkpoint[
+                "best_val_f1"
+            ]
+        )
 
         restore_rng_state(
-            checkpoint.get("rng")
+            checkpoint.get(
+                "rng"
+            )
         )
+
+    # ==================================================================
+    # Log path / overwrite protection
+    # ==================================================================
 
     log_path = Path(
         args.log_file
@@ -1971,75 +2907,143 @@ def main():
             / log_path
         )
 
+    last_path = (
+        save_dir
+        / "last_checkpoint.pth"
+    )
+
     if (
         not args.resume
         and (
             log_path.exists()
-            or (
-                save_dir
-                / "last_checkpoint.pth"
-            ).exists()
+            or last_path.exists()
         )
     ):
         raise FileExistsError(
-            "Existing run found: use --resume or a fresh save/log directory"
+            "Existing run found; use --resume or a fresh save/log directory"
         )
 
+    # ==================================================================
+    # Logger
+    # ==================================================================
+
     logger = TrainingLogger(
-        str(log_path),
+        str(
+            log_path
+        ),
         {
-            **vars(args),
-            "train_params": f"{train_params / 1e6:.4f}M",
-            "trainable_params": f"{trainable_params / 1e6:.4f}M",
-            "auxiliary_params": f"{auxiliary_params / 1e6:.6f}M",
-            "fast_teacher_params": f"{fast_teacher_params / 1e6:.6f}M",
-            "target_teacher_params": f"{target_teacher_params / 1e6:.6f}M",
-            "n_train": len(train_loader.dataset),
-            "n_val": len(val_loader.dataset),
-            "n_test": len(test_loader.dataset),
+            **vars(
+                args
+            ),
+
+            "train_params": (
+                f"{train_params / 1e6:.4f}M"
+            ),
+
+            "trainable_params": (
+                f"{trainable_params / 1e6:.4f}M"
+            ),
+
+            "auxiliary_params": (
+                f"{auxiliary_params / 1e6:.6f}M"
+            ),
+
+            "fast_teacher_params": (
+                f"{fast_teacher_params / 1e6:.6f}M"
+            ),
+
+            "target_teacher_params": (
+                f"{target_teacher_params / 1e6:.6f}M"
+            ),
+
+            "n_train": (
+                len(
+                    train_loader.dataset
+                )
+            ),
+
+            "n_val": (
+                len(
+                    val_loader.dataset
+                )
+            ),
+
+            "n_test": (
+                len(
+                    test_loader.dataset
+                )
+            ),
         },
-        append=bool(args.resume),
+        append=bool(
+            args.resume
+        ),
     )
+
+    # ==================================================================
+    # Best-checkpoint path
+    # ==================================================================
 
     best_path = None
 
     if args.resume:
         candidate = (
             save_dir
-            / f"best_model_F1={best_val_f1:.6f}.pth"
+            / (
+                "best_model_F1="
+                f"{best_val_f1:.6f}.pth"
+            )
         )
 
         if candidate.is_file():
-            best_path = candidate
+            best_path = (
+                candidate
+            )
 
-    last_path = (
-        save_dir
-        / "last_checkpoint.pth"
+    started = (
+        datetime.datetime.now()
     )
 
-    started = datetime.datetime.now()
+    # ==================================================================
+    # Train
+    # ==================================================================
 
     for epoch in range(
         start_epoch,
         args.max_epochs,
     ):
-        if global_step >= args.max_steps:
+        if (
+            global_step
+            >= args.max_steps
+        ):
             break
 
-        losses, _, lr, global_step = train_epoch(
+        (
+            train_losses,
+            _,
+            current_lr,
+            global_step,
+        ) = train_epoch(
             args,
             train_loader,
             model,
             criterion,
-            optimizer,
+            student_optimizer,
             epoch,
             global_step,
             device,
-            router_optimizer=router_optimizer,
-            teacher_optimizer=teacher_optimizer,
+            teacher_optimizer=(
+                teacher_optimizer
+            ),
         )
 
-        val_loss, val_scores = evaluate(
+        # ==============================================================
+        # Validation
+        # ==============================================================
+
+        (
+            val_loss,
+            val_scores,
+        ) = evaluate(
             val_loader,
             model,
             criterion,
@@ -2048,24 +3052,33 @@ def main():
         )
 
         is_best = (
-            val_scores["F1"]
+            val_scores[
+                "F1"
+            ]
             > best_val_f1
         )
 
         if is_best:
-            best_val_f1 = val_scores[
-                "F1"
-            ]
+            best_val_f1 = (
+                val_scores[
+                    "F1"
+                ]
+            )
+
+        # ==============================================================
+        # Checkpoint
+        # ==============================================================
 
         checkpoint = build_checkpoint(
             model,
-            optimizer,
+            student_optimizer,
             epoch,
             global_step,
             best_val_f1,
             args,
-            router_optimizer=router_optimizer,
-            teacher_optimizer=teacher_optimizer,
+            teacher_optimizer=(
+                teacher_optimizer
+            ),
         )
 
         save_checkpoint_atomic(
@@ -2076,7 +3089,10 @@ def main():
         if is_best:
             new_best = (
                 save_dir
-                / f"best_model_F1={best_val_f1:.6f}.pth"
+                / (
+                    "best_model_F1="
+                    f"{best_val_f1:.6f}.pth"
+                )
             )
 
             save_checkpoint_atomic(
@@ -2086,7 +3102,8 @@ def main():
 
             if (
                 best_path is not None
-                and best_path != new_best
+                and best_path
+                != new_best
                 and best_path.name.startswith(
                     "best_model_F1="
                 )
@@ -2095,36 +3112,78 @@ def main():
                     missing_ok=True
                 )
 
-            best_path = new_best
+            best_path = (
+                new_best
+            )
+
+        # ==============================================================
+        # Epoch log
+        # ==============================================================
 
         logger.log_epoch(
             epoch,
             args.max_epochs,
-            losses,
+            train_losses,
             {
-                "f1": val_scores["F1"],
-                "iou": val_scores["IoU"],
-                "kappa": val_scores["Kappa"],
-                "recall": val_scores["recall"],
-                "precision": val_scores["precision"],
-                "oa": val_scores["OA"],
+                "f1": (
+                    val_scores[
+                        "F1"
+                    ]
+                ),
+                "iou": (
+                    val_scores[
+                        "IoU"
+                    ]
+                ),
+                "kappa": (
+                    val_scores[
+                        "Kappa"
+                    ]
+                ),
+                "recall": (
+                    val_scores[
+                        "recall"
+                    ]
+                ),
+                "precision": (
+                    val_scores[
+                        "precision"
+                    ]
+                ),
+                "oa": (
+                    val_scores[
+                        "OA"
+                    ]
+                ),
             },
-            lr,
+            current_lr,
             (
-                torch.cuda.max_memory_allocated(device)
+                torch.cuda.max_memory_allocated(
+                    device
+                )
                 / 1e9
-                if device.type == "cuda"
+                if device.type
+                == "cuda"
                 else 0.0
             ),
             is_best,
         )
 
         logger.log_message(
-            f"Val loss: {val_loss:.6f}; global_step: {global_step}"
+            "Val loss: "
+            f"{val_loss:.6f}; "
+            f"global_step: {global_step}"
         )
 
-        if global_step >= args.max_steps:
+        if (
+            global_step
+            >= args.max_steps
+        ):
             break
+
+    # ==================================================================
+    # Load validation-selected best checkpoint
+    # ==================================================================
 
     if (
         best_path is None
@@ -2141,36 +3200,57 @@ def main():
     )
 
     model.load_state_dict(
-        checkpoint["model"]
+        checkpoint[
+            "model"
+        ]
     )
 
-    # 1. Auxiliary cannot change main prediction.
-    auxiliary_error = auxiliary_toggle_consistency(
-        model,
-        train_loader.dataset,
-        device,
+    # ==================================================================
+    # Deployment correctness
+    # ==================================================================
+
+    # 1. Training auxiliary ON/OFF cannot change main predictions.
+    auxiliary_error = (
+        auxiliary_toggle_consistency(
+            model,
+            train_loader.dataset,
+            device,
+        )
     )
 
-    # 2. Physically delete every training auxiliary and confirm identical
-    #    deploy prediction.
-    deploy_error = deploy_consistency(
-        model,
-        test_loader,
-        device,
+    # 2. Physically remove complete training auxiliary.
+    deploy_error = (
+        deploy_consistency(
+            model,
+            test_loader,
+            device,
+        )
     )
 
-    # 3. Test only the final deploy graph.
-    scores, infer_params, flops = test_deployed(
+    # 3. Test only the deployed Student.
+    (
+        test_scores,
+        infer_params,
+        flops,
+    ) = test_deployed(
         args,
         test_loader,
         model,
         device,
     )
 
-    if infer_params != EXPECTED_DEPLOY_PARAMS:
+    # ==================================================================
+    # Hard deployment contracts
+    # ==================================================================
+
+    if (
+        infer_params
+        != EXPECTED_DEPLOY_PARAMS
+    ):
         raise RuntimeError(
             "Unexpected deploy parameter count: "
-            f"{infer_params:,}"
+            f"{infer_params:,}; "
+            f"expected {EXPECTED_DEPLOY_PARAMS:,}"
         )
 
     if (
@@ -2178,33 +3258,46 @@ def main():
         and abs(
             flops
             - EXPECTED_DEPLOY_FLOPS
-        ) > DEPLOY_FLOPS_ATOL
+        )
+        > DEPLOY_FLOPS_ATOL
     ):
         raise RuntimeError(
             "Unexpected deploy FLOPs: "
-            f"{flops / 1e9:.6f}G"
+            f"{flops / 1e9:.6f}G; "
+            f"expected approximately "
+            f"{EXPECTED_DEPLOY_FLOPS / 1e9:.6f}G"
         )
+
+    # ==================================================================
+    # Authoritative final result
+    # ==================================================================
 
     append_test_results(
         logger,
         args,
-        scores,
+        test_scores,
         train_params,
+        trainable_params,
+        auxiliary_params,
         infer_params,
         flops,
         auxiliary_error,
         deploy_error,
-        datetime.datetime.now()
-        - started,
+        (
+            datetime.datetime.now()
+            - started
+        ),
     )
 
 
 if __name__ == "__main__":
     try:
         main()
+
     except Exception:
         import traceback
 
         traceback.print_exc()
-        sys.exit(1)
-
+        sys.exit(
+            1
+        )

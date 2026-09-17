@@ -1,6 +1,8 @@
-"""Unchanged student with a removable, loss-only direction-C auxiliary."""
+"""A2Net-LWGANet-L0 with a removable Run3 BT-SAM-RDT training auxiliary."""
 
 from __future__ import annotations
+
+from typing import Any, Dict, Optional
 
 import torch
 import torch.nn as nn
@@ -16,55 +18,63 @@ from .decoder.a2net_decoder import (
 
 class A2Net_LWGANet_L0(nn.Module):
     """
-    A2Net-LWGANet-L0 change-detection student.
+    A2Net-LWGANet-L0 binary change-detection student.
 
-    Deploy graph is ALWAYS:
+    Deploy graph
+    ------------
+    The deployable student is always exactly:
 
         backbone
             -> NeighborFeatureAggregation (SWA)
             -> TemporalFusionModule (TFM)
             -> Decoder
 
-    All Direction-C / dynamic-teacher components are TRAINING-ONLY,
-    loss-only auxiliaries.
+    Run3
+    ----
+    auxiliary_mode="bt_sam_rdt" enables the TRAINING-ONLY BT-SAM-RDT
+    auxiliary implemented in ``models/distill/dynamic_teacher.py``.
 
-    They are never injected into the deploy feature path.
+    The auxiliary may observe:
+        - one decoder feature map;
+        - one main student prediction;
+        - binary GT;
+        - synchronously replayed SAMStruct + OVCDistill teacher caches.
 
-    Supported training mechanisms
-    -----------------------------
-    auxiliary_mode="none":
-        Clean baseline.
-
-    auxiliary_mode="direction_c", mechanism="dynamic_teacher":
-        RDT-CD reciprocal dynamic teachers implemented in
-        models/distill/dynamic_teacher.py.
+    It must never inject teacher/cache tensors into the deploy feature path.
+    Its only influence on the student is through an auxiliary loss during
+    backward propagation.
 
     Deployment contract
     -------------------
-    switch_to_deploy() physically removes training_auxiliary and leaves
-    exactly the unchanged student graph.
+    ``switch_to_deploy()`` physically removes the complete training auxiliary.
+    After removal, the registered model graph is only the unchanged student.
     """
+
+    _SUPPORTED_AUXILIARY_MODES = {
+        "none",
+        "bt_sam_rdt",
+    }
 
     def __init__(
         self,
-        pretrained=True,
-        pretrained_path=None,
-        auxiliary_mode="none",
-        routing_cfg=None,
-    ):
+        pretrained: bool = True,
+        pretrained_path: Optional[str] = None,
+        auxiliary_mode: str = "none",
+        auxiliary_cfg: Optional[Dict[str, Any]] = None,
+    ) -> None:
         super().__init__()
 
-        if auxiliary_mode not in {
-            "none",
-            "direction_c",
-        }:
+        auxiliary_mode = str(auxiliary_mode)
+
+        if auxiliary_mode not in self._SUPPORTED_AUXILIARY_MODES:
             raise ValueError(
-                "Only none / direction_c are supported; "
-                "old auxiliary modes were removed"
+                "auxiliary_mode must be one of "
+                f"{sorted(self._SUPPORTED_AUXILIARY_MODES)}, "
+                f"got {auxiliary_mode!r}"
             )
 
         # ------------------------------------------------------------------
-        # Unchanged deployable student
+        # 1. Unchanged deployable student
         # ------------------------------------------------------------------
         self.backbone = LWGANet_L0_1242_e32_k11_GELU(
             pretrained=pretrained,
@@ -88,100 +98,57 @@ class A2Net_LWGANet_L0(nn.Module):
         )
 
         # ------------------------------------------------------------------
-        # Training-only auxiliary
+        # 2. Training-only Run3 auxiliary
         # ------------------------------------------------------------------
         self.auxiliary_mode = auxiliary_mode
-
-        # Explicitly record the selected training mechanism.
-        #
-        # This is metadata/control state only. It does not enter the main
-        # prediction graph.
         self.training_mechanism = "none"
-
-        # Whether forward(..., compute_auxiliary=True) requires an actual
-        # SAMStruct + OVCDistill teacher_pack.
-        #
-        # dynamic_teacher + cache_conditioning=True:  True
-        # dynamic_teacher + cache_conditioning=False: False
-        #
-        # The False case is the capacity-matched no-cache ablation (D2).
         self.training_auxiliary_requires_cache = False
 
-        if auxiliary_mode == "direction_c":
-            cfg = dict(routing_cfg or {})
+        if auxiliary_mode == "bt_sam_rdt":
+            # Lazy import:
+            # the clean/deploy student does not depend on the Run3 auxiliary
+            # unless the auxiliary is explicitly enabled.
+            from .distill.dynamic_teacher import BTSAMRDT
 
-            mechanism = cfg.pop(
-                "mechanism",
-                "legacy",
-            )
+            self.training_mechanism = "bt_sam_rdt"
 
-            self.training_mechanism = str(
-                mechanism
-            )
+            # Run3 uses synchronously replayed SAMStruct + OVCDistill caches.
+            #
+            # Teacher ablations such as SAM-only are handled inside BTSAMRDT;
+            # the outer model/cache-loading contract remains unchanged so that
+            # all experiments use the same data pipeline.
+            self.training_auxiliary_requires_cache = True
+
+            cfg = dict(auxiliary_cfg or {})
 
             # --------------------------------------------------------------
-            # RDT-CD:
-            # Reciprocal Dynamic Teachers.
-            #
-            # Cache values are priors rather than immutable final teacher
-            # answers. Fast teacher experts are optimized online and EMA
-            # target teachers generate the proposals seen by the student.
+            # Reproducibility contract
             # --------------------------------------------------------------
-            if mechanism == "dynamic_teacher":
-                from .distill.dynamic_teacher import (
-                    DynamicTeacherDirectionC as DirectionC,
-                )
-
-                # Full RDT-CD requires both SAMStruct and OVCDistill.
-                #
-                # For the no-cache capacity control (D2):
-                #
-                #     cache_conditioning=False
-                #
-                # dynamic_teacher.py deliberately supports teacher_pack=None.
-                self.training_auxiliary_requires_cache = bool(
-                    cfg.get(
-                        "cache_conditioning",
-                        True,
-                    )
-                )
-
-            else:
-                raise ValueError(
-                    "Unknown training mechanism: "
-                    + str(mechanism)
-                )
-
-            # --------------------------------------------------------------
-            # IMPORTANT REPRODUCIBILITY CONTRACT
-            # --------------------------------------------------------------
+            # Initializing training-only parameters must not advance the
+            # global CPU RNG stream.
             #
-            # Auxiliary parameter initialization must not consume the global
-            # torch CPU RNG stream.
+            # This keeps B0 and Run3 identical under the same random seed with
+            # respect to subsequent stochastic data augmentation / sampling.
             #
-            # This keeps clean baseline and auxiliary experiments identical
-            # under the same seed with respect to subsequent random
-            # input/data-augmentation behavior.
-            #
-            # The auxiliary is initialized on CPU during model construction;
-            # therefore fork_rng(devices=[]) is sufficient here.
+            # The auxiliary is created on CPU during model construction, so
+            # preserving the CPU RNG stream is sufficient here.
             # --------------------------------------------------------------
             with torch.random.fork_rng(
-                devices=[]
+                devices=[],
             ):
-                self.training_auxiliary = DirectionC(
-                    self.mid_d,
+                self.training_auxiliary = BTSAMRDT(
+                    channels=self.mid_d,
                     **cfg,
                 )
 
     # ----------------------------------------------------------------------
-    # Training-auxiliary state
+    # Training auxiliary state
     # ----------------------------------------------------------------------
 
     @property
-    def use_training_auxiliary(self):
+    def use_training_auxiliary(self) -> bool:
         """
-        True only while a removable training auxiliary physically exists.
+        True only while the removable Run3 training auxiliary exists.
         """
         return (
             self.auxiliary_mode != "none"
@@ -192,23 +159,26 @@ class A2Net_LWGANet_L0(nn.Module):
         )
 
     # ----------------------------------------------------------------------
-    # Unchanged deployable main path
+    # Unchanged deployable student
     # ----------------------------------------------------------------------
 
     def extract_pair_features(
         self,
-        x1,
-        x2,
+        x1: torch.Tensor,
+        x2: torch.Tensor,
     ):
         """
-        Siamese backbone extraction.
+        Siamese backbone feature extraction.
 
-        This function is part of the deployable student and contains no
-        teacher information.
+        No teacher/cache information is accepted by this function.
         """
         return (
-            tuple(self.backbone(x1)),
-            tuple(self.backbone(x2)),
+            tuple(
+                self.backbone(x1)
+            ),
+            tuple(
+                self.backbone(x2)
+            ),
         )
 
     def _forward_main_path(
@@ -216,12 +186,12 @@ class A2Net_LWGANet_L0(nn.Module):
         features1,
         features2,
         output_size,
-        return_decoder_features=False,
+        return_decoder_features: bool = False,
     ):
         """
-        Execute the unchanged deploy graph.
+        Execute the unchanged deployable A2Net main path.
 
-        Teacher/cache tensors never enter this function.
+        Teacher/cache tensors must never enter this function.
         """
         aggregated1 = self.swa(
             *features1
@@ -240,13 +210,13 @@ class A2Net_LWGANet_L0(nn.Module):
             *change
         )
 
-        # Decoder contract:
+        # Decoder output contract:
         #
-        #   first four outputs:
-        #       p2 / p3 / p4 / p5 decoder features
+        # first four outputs:
+        #     p2 / p3 / p4 / p5 decoder feature maps
         #
-        #   remaining outputs:
-        #       four-scale prediction logits
+        # remaining outputs:
+        #     four-scale prediction logits
         decoder_features = tuple(
             decoder_features_and_logits[:4]
         )
@@ -281,22 +251,22 @@ class A2Net_LWGANet_L0(nn.Module):
 
     def forward(
         self,
-        x1,
-        x2,
-        target=None,
-        teacher_pack=None,
-        compute_auxiliary=True,
-        force_action=None,
+        x1: torch.Tensor,
+        x2: torch.Tensor,
+        target: Optional[torch.Tensor] = None,
+        teacher_pack: Optional[Dict[str, Any]] = None,
+        compute_auxiliary: bool = True,
     ):
         """
         Forward pass.
 
-        Main-output invariance contract
-        -------------------------------
-        The main predictions are computed BEFORE the training auxiliary and
+        Main-output invariance
+        ----------------------
+        Main predictions are computed before the Run3 training auxiliary and
         are never modified by auxiliary outputs.
 
-        Consequently:
+        Therefore, when all deployable modules are in the same deterministic
+        state:
 
             compute_auxiliary=False
 
@@ -304,12 +274,11 @@ class A2Net_LWGANet_L0(nn.Module):
 
             compute_auxiliary=True
 
-        must produce bit-identical main predictions when the main modules are
-        in the same deterministic state.
+        must produce identical main predictions.
 
-        Evaluation/deployment
-        ---------------------
-        If self.training == False, only the prediction tuple is returned.
+        Evaluation / deployment
+        -----------------------
+        In ``eval()`` mode only the main prediction tuple is returned.
 
         Training
         --------
@@ -317,32 +286,36 @@ class A2Net_LWGANet_L0(nn.Module):
 
             predictions, auxiliary
 
-        where auxiliary["direction_c"] contains the selected training
-        mechanism's loss/diagnostic dictionary.
+        For Run3:
+
+            auxiliary["bt_sam_rdt"]
+
+        contains the student KD loss, fast-teacher fitting loss and diagnostic
+        quantities produced by the training-only BT-SAM-RDT auxiliary.
         """
 
         # ------------------------------------------------------------------
-        # 1. Student encoder
+        # 1. Student Siamese encoder
         # ------------------------------------------------------------------
-        features1, features2 = (
-            self.extract_pair_features(
-                x1,
-                x2,
-            )
+        features1, features2 = self.extract_pair_features(
+            x1,
+            x2,
         )
 
-        # Auxiliary is computed only during an actual training forward.
+        # Auxiliary computation is allowed only during training.
         need_aux = (
             self.training
-            and compute_auxiliary
+            and bool(
+                compute_auxiliary
+            )
             and self.use_training_auxiliary
         )
 
         # ------------------------------------------------------------------
-        # 2. Unchanged main prediction path
+        # 2. Unchanged A2Net main prediction path
         #
-        # Decoder features are exposed only when the auxiliary needs them.
-        # Their exposure does not change the main computation itself.
+        # Decoder features are exposed only when the Run3 auxiliary needs
+        # them. Exposing them does not alter the main-path computation.
         # ------------------------------------------------------------------
         output = self._forward_main_path(
             features1,
@@ -352,27 +325,29 @@ class A2Net_LWGANet_L0(nn.Module):
         )
 
         if need_aux:
-            predictions, decoder_features = (
-                output
-            )
+            (
+                predictions,
+                decoder_features,
+            ) = output
+
         else:
             predictions = output
             decoder_features = None
 
-        # Inference/evaluation graph ends here.
+        # Evaluation / deployment graph ends here.
         if not self.training:
             return predictions
 
         # ------------------------------------------------------------------
-        # 3. Training-only loss auxiliary
+        # 3. Training-only Run3 auxiliary
         # ------------------------------------------------------------------
-        auxiliary = {}
+        auxiliary: Dict[str, Any] = {}
 
         if need_aux:
             if target is None:
                 raise ValueError(
-                    "Direction C requires training GT "
-                    "when compute_auxiliary=True"
+                    "BT-SAM-RDT requires binary training GT when "
+                    "compute_auxiliary=True"
                 )
 
             if (
@@ -380,33 +355,41 @@ class A2Net_LWGANet_L0(nn.Module):
                 and teacher_pack is None
             ):
                 raise ValueError(
-                    f"{self.training_mechanism} requires "
-                    "both synchronously replayed teacher caches"
+                    "BT-SAM-RDT requires a synchronously replayed "
+                    "SAMStruct + OVCDistill teacher_pack"
                 )
 
             # --------------------------------------------------------------
-            # IMPORTANT:
-            #
-            # Only decoder_features[0] is OBSERVED by the training auxiliary.
-            #
-            # Nothing from training_auxiliary is fed back into:
-            #   backbone
-            #   SWA
-            #   TFM
-            #   Decoder
-            #   main predictions
-            #
-            # The auxiliary can influence student parameters ONLY through its
-            # loss during backward().
+            # Critical deployment / gradient-isolation contract
             # --------------------------------------------------------------
-            auxiliary["direction_c"] = (
-                self.training_auxiliary(
-                    decoder_features[0],
-                    predictions[0],
-                    target,
-                    teacher_pack,
-                    force_action=force_action,
-                )
+            #
+            # Only decoder_features[0] and predictions[0] are OBSERVED by the
+            # training auxiliary.
+            #
+            # Nothing produced by BTSAMRDT is fed back into:
+            #
+            #     backbone
+            #     SWA
+            #     TFM
+            #     Decoder
+            #     main predictions
+            #
+            # Teacher information therefore cannot alter the forward main
+            # prediction graph.
+            #
+            # The auxiliary may influence deployable student parameters only
+            # through its student-side loss during backward().
+            #
+            # Student/teacher detach boundaries themselves are implemented
+            # inside models/distill/dynamic_teacher.py.
+            # --------------------------------------------------------------
+            auxiliary[
+                "bt_sam_rdt"
+            ] = self.training_auxiliary(
+                feature=decoder_features[0],
+                prediction=predictions[0],
+                target=target,
+                teacher_pack=teacher_pack,
             )
 
         return (
@@ -420,19 +403,29 @@ class A2Net_LWGANet_L0(nn.Module):
 
     def switch_to_deploy(self):
         """
-        Idempotently remove every training-only auxiliary component.
+        Physically remove every Run3 training-only component.
 
-        After this operation the model contains only:
+        After this operation the registered model contains only:
 
             backbone
                 -> SWA
                 -> TFM
                 -> Decoder
 
-        No SAMStruct/OVCDistill cache, router, dynamic teacher, fast teacher,
-        EMA target teacher, or other training-only module remains registered.
+        No component belonging to:
 
-        Calling this function more than once is safe.
+            SAMStruct cache processing
+            OVCDistill cache processing
+            bi-temporal SAM instance matching
+            SAM/OV prior fusion
+            Fast Teacher
+            EMA Target Teacher
+            GT task-space audit
+            auxiliary diagnostics
+
+        remains registered in the model.
+
+        Calling this function repeatedly is safe.
         """
 
         if hasattr(
