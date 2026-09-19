@@ -304,6 +304,24 @@ Run3 的 12 个 run（B0 / R3A / R3 × SYSU / WHU / CDD / LEVIR）已全部完�
 
 按 §8 规则 14：Run3 首轮未能在同协议下证明 Foundation prior / Teacher 的有效性，应优先停止继续堆叠 Teacher / router / loss，回到证据诊断——重点解释「增益为何只出现在 SYSU、在 WHU / LEVIR 反而有害」，可对比日志中的 `foundation_support_ratio`、`pixel_reject_ratio`、`dynamic_teacher_gain` 等诊断量。论文级结论仍需补多 seed（`2333/3407/5871`）。
 
+### R3O 消融：OV-only（seed 2333）
+
+为归因「Teacher 增益为何只在 SYSU」，补了 OV-only 臂 **R3O**（OV semantic prior + 同 Fast/EMA Teacher + 同 advantage audit，无 BT-SAM 结构先验），只跑 SYSU / WHU：
+
+| Dataset | B0 | R3A (SAM) | R3O (OV) | R3 (SAM+OV) |
+| --- | ---: | ---: | ---: | ---: |
+| SYSU | 81.75 | 82.29 | 82.76 | 83.13 |
+| WHU | 94.06 | 93.94 | 93.33 | 93.70 |
+
+结论（单 seed，不构成定稿）：
+
+- **诊断假设 H1「SAM 污染 OV、应去掉 SAM 改 source-selective fusion」被证伪**：去掉 SAM 后（R3O）在 WHU 上不但没恢复，反而**最差**（R3O/WHU -0.73，四臂中最差；R3/WHU 仅 -0.36）。step-3 门「R3O > R3」在两个数据集上均不成立，故不做 Source-Selective Reliability Fusion。
+- **OV 并非普适的好源**：OV-only 在 SYSU 最强（+1.01），但在 WHU 最有害（-0.73）。诊断文档 §5.2「OV 值得保留、优先级高于 BT-SAM」的结论被推翻。
+- **方向性稳健结论**：WHU 上所有教师臂（R3A/R3O/R3）均 ≤ B0，SYSU 上均 > B0——问题不在「哪个 prior」，而在「低变化比 + 小目标的难集上，Foundation-prior 教师机制本身帮倒忙」。
+- R3O 无 SAM，故 WHU 的负增益只能来自 OV prior + residual teacher + audit；结合 `aux_raw≈0`、`dynamic_teacher_gain≈0`、`pixel_reject_ratio≈0.999`，教师在难集上「近乎惰性却带微小有害方向」。
+
+据此，§4 的 Source-Selective Reliability Fusion 前提被推翻、不再优先；下一步回到 §4.5 的 Teacher necessity control（Static vs Dynamic）判断 residual teacher 是否有存在价值，或直接放弃 Foundation-prior Teacher 方向。
+
 ## 5. 模型与部署约束
 
 - 主学生模型是 A2Net-LWGANet-L0；SAM2 Teacher Cache、OV Cache、Fast Teacher、EMA Target Teacher 与所有训练辅助只允许训练期使用。

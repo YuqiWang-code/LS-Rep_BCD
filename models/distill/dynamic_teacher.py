@@ -462,6 +462,7 @@ class BTSAMRDT(nn.Module):
         policy: str = "advantage",
         difficulty: bool = True,
         use_ov: bool = True,
+        use_sam: bool = True,
     ) -> None:
         super().__init__()
 
@@ -568,6 +569,10 @@ class BTSAMRDT(nn.Module):
         # The online teacher capacity remains identical.
         self.use_ov = bool(
             use_ov
+        )
+
+        self.use_sam = bool(
+            use_sam
         )
 
         # ------------------------------------------------------------------
@@ -1041,6 +1046,7 @@ class BTSAMRDT(nn.Module):
                 teacher_pack=teacher_pack,
                 output_size=p.shape[-2:],
                 use_ov=self.use_ov,
+                use_sam=self.use_sam,
             )
 
             sam_prior = (

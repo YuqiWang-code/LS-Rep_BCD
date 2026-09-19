@@ -1752,6 +1752,7 @@ def build_foundation_prior(
     teacher_pack: Dict[str, Dict],
     output_size: Tuple[int, int],
     use_ov: bool = True,
+    use_sam: bool = True,
 ) -> Dict[str, torch.Tensor]:
     """
     Construct Run3 foundation priors without Student or GT access.
@@ -1776,6 +1777,46 @@ def build_foundation_prior(
         raise ValueError(
             "teacher_pack is required for BT-SAM-RDT"
         )
+
+    if not use_sam:
+        # --------------------------------------------------------------
+        # R3O ablation: OV semantic prior only (no BT-SAM structural prior).
+        # The online Fast/EMA teacher and GT audit remain unchanged.
+        # --------------------------------------------------------------
+        if not use_ov:
+            raise ValueError(
+                "use_sam=False requires use_ov=True"
+            )
+
+        if "ov" not in teacher_pack:
+            raise KeyError(
+                "teacher_pack missing 'ov'"
+            )
+
+        ov = build_ov_prior(
+            teacher_pack["ov"],
+            output_size=tuple(int(v) for v in output_size),
+        )
+
+        ov_prior = ov["prior"]
+        ov_reliability = ov["reliability"]
+        zeros = torch.zeros_like(ov_prior)
+
+        return {
+            "sam_prior": zeros,
+            "sam_reliability": zeros,
+            "pair_match_ratio": zeros,
+            "pair_match_iou": zeros,
+            "pair_match_cov12": zeros,
+            "pair_match_cov21": zeros,
+            "pair_match_confidence": zeros,
+            "ov_prior": ov_prior,
+            "ov_reliability": ov_reliability,
+            "fused_prior": ov_prior,
+            "fused_reliability": ov_reliability,
+            "sam_ov_conflict": zeros,
+            "both_available": torch.zeros_like(zeros, dtype=torch.bool),
+        }
 
     if (
         "sam"

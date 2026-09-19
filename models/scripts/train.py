@@ -66,6 +66,7 @@ EXPERIMENTS = {
         "name": "B0_Clean_A2Net_LWGANet_L0",
         "auxiliary_mode": "none",
         "use_ov": False,
+        "use_sam": False,
         "requires_teacher_cache": False,
     },
 
@@ -83,6 +84,7 @@ EXPERIMENTS = {
         "name": "R3A_BT_SAM_RDT_SAM_Only",
         "auxiliary_mode": "bt_sam_rdt",
         "use_ov": False,
+        "use_sam": True,
         "requires_teacher_cache": True,
     },
 
@@ -102,6 +104,20 @@ EXPERIMENTS = {
         "name": "R3_BT_SAM_RDT_Full",
         "auxiliary_mode": "bt_sam_rdt",
         "use_ov": True,
+        "use_sam": True,
+        "requires_teacher_cache": True,
+    },
+
+    # --------------------------------------------------------------
+    # R3O ablation: OV semantic prior only + same Fast/EMA teacher
+    # + same advantage audit. No BT-SAM structural prior.
+    # Answers whether OV alone is useful vs B0 (the missing arm in R3).
+    # --------------------------------------------------------------
+    "R3O": {
+        "name": "R3O_BT_SAM_RDT_OV_Only",
+        "auxiliary_mode": "bt_sam_rdt",
+        "use_ov": True,
+        "use_sam": False,
         "requires_teacher_cache": True,
     },
 }
@@ -109,6 +125,7 @@ EXPERIMENTS = {
 
 AUXILIARY_EXPERIMENTS = {
     "R3A",
+    "R3O",
     "R3",
 }
 
@@ -530,6 +547,12 @@ def parse_args():
     args.use_ov = bool(
         recipe[
             "use_ov"
+        ]
+    )
+
+    args.use_sam = bool(
+        recipe[
+            "use_sam"
         ]
     )
 
@@ -1005,6 +1028,9 @@ def build_model(
             "difficulty": True,
             "use_ov": (
                 args.use_ov
+            ),
+            "use_sam": (
+                args.use_sam
             ),
         }
 
@@ -2397,6 +2423,7 @@ def validate_resume(
         "teacher_weight_decay",
         "teacher_grad_clip",
         "use_ov",
+        "use_sam",
         "teacher_update",
         "requires_teacher_cache",
         "routing_signal",
