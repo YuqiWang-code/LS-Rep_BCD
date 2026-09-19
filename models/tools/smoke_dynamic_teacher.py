@@ -1052,8 +1052,7 @@ def check_task_space_audit(
         [
             [
                 [
-                    0.8,
-                    0.1,
+                    [0.8, 0.1]
                 ]
             ]
         ],
@@ -1065,8 +1064,7 @@ def check_task_space_audit(
         [
             [
                 [
-                    0.0,
-                    0.0,
+                    [0.0, 0.0]
                 ]
             ]
         ],
@@ -1078,8 +1076,7 @@ def check_task_space_audit(
         [
             [
                 [
-                    0.2,
-                    0.9,
+                    [0.2, 0.9]
                 ]
             ]
         ],

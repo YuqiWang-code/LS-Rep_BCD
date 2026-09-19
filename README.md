@@ -1,14 +1,14 @@
-# AGENTS.md — LS-Rep_BCD_RSML_3 / RDT-CD
+# README.md — LS-Rep_BCD_RSML_3 / RDT-CD
 
-> Last updated: 2026-09-17
+> Last updated: 2026-09-19
 > 本文件是当前项目中 AI/Coding Agent 的工作约束。当前唯一活动实验为 `train_scripts/RDT-CD/Run3/`（方向 C），主方法为 **BT-SAM-RDT（Bi-Temporal Structural SAM Reciprocal Dynamic Teacher）**；学生模型 A2Net-LWGANet-L0，部署参数 2,913,094 不变。Run1/RDT-CD 与 Run2/SCGR 均作为历史实验保留，不再作为当前活动实现继续迭代。项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。旧实验（SAM-HSD、DART-R-TS 固定教师、旧 C0 梯度路由、RDT-CD Run1/Run2 等）只能作为历史证据，不得重新混入当前 Run3 代码路径。
 
 ## GitHub 提交流程
 
-完成 `models/`、`AGENTS.md` 或当前 Run3 脚本/说明的修改并通过必要检查后，按以下顺序提交到 GitHub：
+完成 `models/`、`README.md` 或当前 Run3 脚本/说明的修改并通过必要检查后，按以下顺序提交到 GitHub：
 
 ```bash
-git add models AGENTS.md train_scripts/RDT-CD/Run3 docs/experiment_metrics.xlsx "docs/RSML-3_服务器环境与变化检测数据统一说明.md"
+git add models README.md train_scripts/RDT-CD/Run3 docs/experiment_metrics.xlsx "docs/RSML-3_服务器环境与变化检测数据统一说明.md"
 git status
 git commit -m "Update code"
 git push
@@ -283,6 +283,26 @@ Foundation Teacher 一定优于 clean baseline
 ```
 
 这些都必须由同协议正式实验回答。
+
+### Run3 首轮正式结果（seed 2333）
+
+Run3 的 12 个 run（B0 / R3A / R3 × SYSU / WHU / CDD / LEVIR）已全部完成，正式 test F1（%，seed 2333，同协议 40000 steps / batch 64）：
+
+| Dataset | B0 F1 | R3A F1 | R3 F1 | R3A−B0 | R3−B0 |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| SYSU | 81.75 | 82.29 | 83.13 | +0.54 | +1.38 |
+| WHU | 94.06 | 93.94 | 93.70 | -0.12 | -0.36 |
+| CDD | 97.79 | 97.78 | 97.79 | -0.01 | 0.00 |
+| LEVIR | 91.13 | 91.03 | 90.98 | -0.10 | -0.15 |
+
+首轮结论（单 seed，不构成论文级定稿结论）：
+
+- **BT-SAM-RDT 未能在同协议下证明稳定正增益**：只有 SYSU（变化像素比 21.1%，最高）有正信号，R3 相对 B0 +1.38，且 R3 > R3A，说明 OV 语义先验仅在 SYSU 上提供增量。
+- **WHU / LEVIR（建筑小目标 + 类别极不平衡）反而略负**：R3 在 WHU -0.36、LEVIR -0.15。
+- **CDD 持平**（F1 已近 97.8 饱和）。
+- **R3A（仅 BT-SAM 结构先验）在 CDD / WHU / LEVIR 上均无增益或略负**（仅 SYSU +0.54），说明结构先验本身几乎无独立收益。
+
+按 §8 规则 14：Run3 首轮未能在同协议下证明 Foundation prior / Teacher 的有效性，应优先停止继续堆叠 Teacher / router / loss，回到证据诊断——重点解释「增益为何只出现在 SYSU、在 WHU / LEVIR 反而有害」，可对比日志中的 `foundation_support_ratio`、`pixel_reject_ratio`、`dynamic_teacher_gain` 等诊断量。论文级结论仍需补多 seed（`2333/3407/5871`）。
 
 ## 5. 模型与部署约束
 
