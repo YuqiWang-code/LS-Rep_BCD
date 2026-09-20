@@ -1,15 +1,37 @@
-"""Datasets and dataloaders for paired binary change detection."""
+"""Datasets and dataloaders for paired binary change detection.
+
+Clean SCTC data pipeline
+------------------------
+This module serves only the deployable A2Net-LWGANet-L0 + SCTC student.
+
+It contains no:
+    - Teacher Cache
+    - SAM / OV data
+    - cache replay
+    - distillation metadata
+    - training-only auxiliary input
+
+Training samples are returned as:
+    image, label
+
+When ``return_meta=True``:
+    image, label, sample_id
+
+The paired T1/T2 image and binary label always receive identical geometric
+augmentation. ``RandomExchange`` swaps T1/T2 jointly inside the six-channel
+image and leaves the binary change label unchanged.
+"""
 
 from __future__ import annotations
 
 import os
 import random
 from pathlib import Path
+
 import cv2
 import numpy as np
 import torch.utils.data
 
-from .cache_transforms import replay_teacher_pack
 from .transforms import (
     Compose,
     Normalize,
@@ -22,6 +44,8 @@ from .transforms import (
 
 
 class CDDataset(torch.utils.data.Dataset):
+    """Paired binary change-detection dataset."""
+
     def __init__(
         self,
         dataset: str,
@@ -29,42 +53,59 @@ class CDDataset(torch.utils.data.Dataset):
         transform=None,
         dataset_name: str = "LEVIR",
         return_meta: bool = False,
-        teacher_cache=None,
         seed: int = 2333,
-        cache_replay: str = 'legacy',
-    ):
-        self.split = dataset
+    ) -> None:
+        self.split = str(dataset)
         self.root = Path(file_root)
-        list_path = self.root / "list" / f"{dataset}.txt"
-        if not list_path.is_file():
-            raise FileNotFoundError(f"Dataset list not found: {list_path}")
-        self.file_list = [line.strip() for line in list_path.read_text(encoding="utf-8").splitlines() if line.strip()]
         self.transform = transform
-        self.dataset_name = dataset_name
-        self.return_meta = return_meta or teacher_cache is not None
-        self.teacher_cache = teacher_cache
+        self.dataset_name = str(dataset_name).upper()
+        self.return_meta = bool(return_meta)
         self.seed = int(seed)
         self.epoch = 0
-        self.cache_replay = cache_replay
 
-    def __len__(self):
+        list_path = self.root / "list" / f"{self.split}.txt"
+        if not list_path.is_file():
+            raise FileNotFoundError(f"Dataset list not found: {list_path}")
+
+        self.file_list = [
+            line.strip()
+            for line in list_path.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+        if not self.file_list:
+            raise ValueError(f"Dataset split is empty: {list_path}")
+
+        if len(self.file_list) != len(set(self.file_list)):
+            raise ValueError(f"Duplicate sample IDs found in: {list_path}")
+
+    def __len__(self) -> int:
         return len(self.file_list)
 
     def _resolve_path(self, folder: str, entry: str) -> Path:
         relative = Path(entry)
         candidates = [self.root / folder / relative]
+
         if self.dataset_name == "CDD" and not relative.name.startswith("test_"):
-            candidates.append(self.root / folder / relative.with_name(f"test_{relative.name}"))
+            candidates.append(
+                self.root / folder / relative.with_name(f"test_{relative.name}")
+            )
+
         for base in tuple(candidates):
-            if base.suffix.lower() == ".png":
+            suffix = base.suffix.lower()
+            if suffix == ".png":
                 candidates.append(base.with_suffix(".jpg"))
-            elif base.suffix.lower() == ".jpg":
+            elif suffix in {".jpg", ".jpeg"}:
                 candidates.append(base.with_suffix(".png"))
+
         for candidate in candidates:
             if candidate.is_file():
                 return candidate
+
         tried = "\n  - ".join(str(path) for path in candidates)
-        raise FileNotFoundError(f"Unable to resolve {folder} file for '{entry}'. Tried:\n  - {tried}")
+        raise FileNotFoundError(
+            f"Unable to resolve {folder} file for {entry!r}. Tried:\n  - {tried}"
+        )
 
     @staticmethod
     def _read(path: Path, flags: int, kind: str):
@@ -73,12 +114,16 @@ class CDDataset(torch.utils.data.Dataset):
             raise OSError(f"OpenCV failed to read {kind}: {path}")
         return value
 
-    def set_epoch(self, epoch):
+    def set_epoch(self, epoch: int) -> None:
         self.epoch = int(epoch)
+        if self.epoch < 0:
+            raise ValueError("epoch must be non-negative")
 
-    def __getitem__(self, idx):
-        # Per-sample augmentation makes epoch-boundary resume independent of
-        # worker scheduling and auxiliary RNG consumption.
+    def __getitem__(self, idx: int):
+        idx = int(idx)
+        if idx < 0 or idx >= len(self.file_list):
+            raise IndexError(idx)
+
         state = random.getstate()
         random.seed(self.seed + self.epoch * 1_000_003 + idx)
         try:
@@ -86,8 +131,9 @@ class CDDataset(torch.utils.data.Dataset):
         finally:
             random.setstate(state)
 
-    def _get_sample(self, idx):
+    def _get_sample(self, idx: int):
         sample_id = self.file_list[idx]
+
         pre_path = self._resolve_path("A", sample_id)
         post_path = self._resolve_path("B", sample_id)
         label_path = self._resolve_path("label", sample_id)
@@ -95,59 +141,76 @@ class CDDataset(torch.utils.data.Dataset):
         pre = self._read(pre_path, cv2.IMREAD_COLOR, "T1 image")
         post = self._read(post_path, cv2.IMREAD_COLOR, "T2 image")
         label = self._read(label_path, cv2.IMREAD_GRAYSCALE, "label")
-        if pre.shape != post.shape or pre.shape[:2] != label.shape[:2]:
+
+        if pre.shape != post.shape:
             raise ValueError(
-                f"Shape mismatch for '{sample_id}': T1={pre.shape}, T2={post.shape}, label={label.shape}"
+                f"T1/T2 shape mismatch for {sample_id!r}: "
+                f"T1={pre.shape}, T2={post.shape}"
             )
+
+        if pre.shape[:2] != label.shape[:2]:
+            raise ValueError(
+                f"Image/label shape mismatch for {sample_id!r}: "
+                f"image={pre.shape[:2]}, label={label.shape[:2]}"
+            )
+
         image = np.concatenate((pre, post), axis=2)
 
-        aug_state = {}
-        if self.transform:
+        if self.transform is not None:
             transformed = self.transform(image, label)
-            if len(transformed) == 3:
-                image, label, aug_state = transformed
-            else:
-                image, label = transformed
+            if not isinstance(transformed, (tuple, list)) or len(transformed) != 2:
+                raise RuntimeError(
+                    "Clean SCTC transform pipeline must return exactly (image, label)"
+                )
+            image, label = transformed
 
-        if self.teacher_cache is not None:
-            pack = self.teacher_cache.load(sample_id)
-            pack = replay_teacher_pack(pack, aug_state, self.cache_replay)
-            return image, label, sample_id, pack
         if self.return_meta:
             return image, label, sample_id
+
         return image, label
 
-    def get_img_info(self, idx):
-        path = self._resolve_path("A", self.file_list[idx])
+    def get_img_info(self, idx: int):
+        path = self._resolve_path("A", self.file_list[int(idx)])
         image = self._read(path, cv2.IMREAD_COLOR, "T1 image")
-        return {"height": image.shape[0], "width": image.shape[1]}
+        return {
+            "height": int(image.shape[0]),
+            "width": int(image.shape[1]),
+        }
 
 
 def _dataset_name(file_root: str) -> str:
-    upper = file_root.upper()
-    for name in ("SYSU", "WHU", "CDD"):
-        if name in upper:
-            return name
+    upper = str(file_root).upper()
+    if "SYSU" in upper:
+        return "SYSU"
+    if "WHU" in upper:
+        return "WHU"
+    if "CDD" in upper:
+        return "CDD"
+    if "LEVIR" in upper:
+        return "LEVIR"
     return "LEVIR"
+
+
+def _normalization():
+    mean = [0.406, 0.456, 0.485, 0.406, 0.456, 0.485]
+    std = [0.225, 0.224, 0.229, 0.225, 0.224, 0.229]
+    return mean, std
 
 
 def get_loader(
     file_root,
     list_file,
-    img_ext=".png",
-    file_prefix="",
     batchsize=32,
     trainsize=256,
     shuffle=True,
     num_workers=4,
     pin_memory=True,
     return_meta=False,
-    teacher_cache=None,
     seed=2333,
-    cache_replay='legacy',
 ):
-    mean = [0.406, 0.456, 0.485, 0.406, 0.456, 0.485]
-    std = [0.225, 0.224, 0.229, 0.225, 0.224, 0.229]
+    """Build the clean SCTC training DataLoader."""
+    mean, std = _normalization()
+
     transform = Compose(
         [
             Normalize(mean=mean, std=std),
@@ -157,27 +220,29 @@ def get_loader(
             RandomExchange(),
             ToTensor(),
         ],
-        return_state=teacher_cache is not None,
+        return_state=False,
     )
-    split = "train" if "train" in os.path.basename(list_file) else "val"
+
+    split_name = os.path.basename(str(list_file)).lower()
+    split = "train" if "train" in split_name else "val"
+
     dataset = CDDataset(
         split,
         file_root=file_root,
         transform=transform,
         dataset_name=_dataset_name(file_root),
         return_meta=return_meta,
-        teacher_cache=teacher_cache,
         seed=seed,
-        cache_replay=cache_replay,
     )
+
     return torch.utils.data.DataLoader(
         dataset,
-        batch_size=batchsize,
-        shuffle=shuffle,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
+        batch_size=int(batchsize),
+        shuffle=bool(shuffle),
+        num_workers=int(num_workers),
+        pin_memory=bool(pin_memory),
         drop_last=split == "train",
-        generator=torch.Generator().manual_seed(seed),
+        generator=torch.Generator().manual_seed(int(seed)),
         persistent_workers=False,
     )
 
@@ -185,18 +250,27 @@ def get_loader(
 def get_test_loader(
     file_root,
     list_file,
-    img_ext=".png",
-    file_prefix="",
     batchsize=32,
     testsize=256,
     num_workers=4,
     pin_memory=True,
     return_meta=False,
 ):
-    mean = [0.406, 0.456, 0.485, 0.406, 0.456, 0.485]
-    std = [0.225, 0.224, 0.229, 0.225, 0.224, 0.229]
-    transform = Compose([Normalize(mean=mean, std=std), Scale(testsize, testsize), ToTensor()])
-    split = "val" if "val" in os.path.basename(list_file) else "test"
+    """Build deterministic validation/test DataLoader."""
+    mean, std = _normalization()
+
+    transform = Compose(
+        [
+            Normalize(mean=mean, std=std),
+            Scale(testsize, testsize),
+            ToTensor(),
+        ],
+        return_state=False,
+    )
+
+    split_name = os.path.basename(str(list_file)).lower()
+    split = "val" if "val" in split_name else "test"
+
     dataset = CDDataset(
         split,
         file_root=file_root,
@@ -204,11 +278,19 @@ def get_test_loader(
         dataset_name=_dataset_name(file_root),
         return_meta=return_meta,
     )
+
     return torch.utils.data.DataLoader(
         dataset,
-        batch_size=batchsize,
+        batch_size=int(batchsize),
         shuffle=False,
-        num_workers=num_workers,
-        pin_memory=pin_memory,
+        num_workers=int(num_workers),
+        pin_memory=bool(pin_memory),
         persistent_workers=False,
     )
+
+
+__all__ = [
+    "CDDataset",
+    "get_loader",
+    "get_test_loader",
+]
