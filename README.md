@@ -1,14 +1,14 @@
-# README.md — LS-Rep_BCD_RSML_3 / RDT-CD
+# README.md — LS-Rep_BCD_RSML_3 / SCTC
 
-> Last updated: 2026-09-19
-> 本文件是当前项目中 AI/Coding Agent 的工作约束。当前唯一活动实验为 `train_scripts/RDT-CD/Run3/`（方向 C），主方法为 **BT-SAM-RDT（Bi-Temporal Structural SAM Reciprocal Dynamic Teacher）**；学生模型 A2Net-LWGANet-L0，部署参数 2,913,094 不变。Run1/RDT-CD 与 Run2/SCGR 均作为历史实验保留，不再作为当前活动实现继续迭代。项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。旧实验（SAM-HSD、DART-R-TS 固定教师、旧 C0 梯度路由、RDT-CD Run1/Run2 等）只能作为历史证据，不得重新混入当前 Run3 代码路径。
+> Last updated: 2026-09-20
+> 本文件是当前项目中 AI/Coding Agent 的工作约束。当前唯一活动实验为 `train_scripts/SCTC/Run1/`（方向 C 换机制），主方法为 **SCTC（Unchanged-Aware Symmetric Cross-Temporal Calibration，不变区域感知的对称跨时相校准）**；学生模型 A2Net-LWGANet-L0，部署参数 2,913,094 不变。原方向 C 的 RDT-CD（BT-SAM-RDT 教师/蒸馏）系列与更早的 Run1/Run2/SCGR/SAM-HSD/DART-R 均作为历史实验归档（见 §6），不再作为当前活动实现继续迭代。项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。
 
 ## GitHub 提交流程
 
-完成 `models/`、`README.md` 或当前 Run3 脚本/说明的修改并通过必要检查后，按以下顺序提交到 GitHub：
+完成 `models/`、`README.md` 或当前 SCTC Run1 脚本/说明的修改并通过必要检查后，按以下顺序提交到 GitHub：
 
 ```bash
-git add models README.md train_scripts/RDT-CD/Run3 docs/experiment_metrics.xlsx "docs/RSML-3_服务器环境与变化检测数据统一说明.md"
+git add models README.md train_scripts/SCTC/Run1 docs/experiment_metrics.xlsx "docs/RSML-3_服务器环境与变化检测数据统一说明.md"
 git status
 git commit -m "Update code"
 git push
@@ -30,15 +30,15 @@ git push
 当前唯一活动实验族：
 
 ```text
-train_scripts/RDT-CD/Run3/      # 方向 C：BT-SAM-RDT（B0 / R3A / R3）
+train_scripts/SCTC/Run1/      # 方向 C 换机制：SCTC（S0 / S1 / S2，Student-only）
 ```
 
-（`train_scripts/RDT-CD/Run1/`、`train_scripts/RDT-CD/Run2/`、`train_scripts/SAM-HSD/`、`train_scripts/DART-R/` 等均为历史实验；其中 Run2/SCGR、旧 Direction-C/gradient routing 等已停止，不再活动。）
+（`train_scripts/RDT-CD/`、`train_scripts/SAM-HSD/`、`train_scripts/DART-R/` 等均为历史实验，已归档，不再活动。）
 
 按以下优先级判断事实：
 
-1. 当前 `models/` 代码与当前 Run3 shell 参数；
-2. `train_scripts/RDT-CD/Run3/README.md`（当前实验协议）；
+1. 当前 `models/` 代码与当前 SCTC shell 参数；
+2. `train_scripts/SCTC/Run1/README.md`（当前实验协议）；
 3. `docs/RSML-3_服务器环境与变化检测数据统一说明.md`（环境/数据/路径）；
 4. 本文件中的摘要。
 
@@ -85,254 +85,97 @@ cd /home/yqwang/projects/LS-Rep_BCD_RSML_3
 |---|---|
 | 项目代码 | `/home/yqwang/projects/LS-Rep_BCD_RSML_3` |
 | 数据集 | `/share_datasets/CD` |
-| Teacher Cache | `/share_datasets/CD_teacher_cache` |
-| RDT-CD checkpoint | `/share_datasets/yqwang/checkpoints/LS-Rep_BCD_RSML_3/RDT-CD`（当前 Run3 使用 `RDT-CD/Run3/<实验>/<数据集>/`） |
-| RDT-CD 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/RDT-CD`（当前 Run3 使用 `RDT-CD/Run3/<实验>/<数据集>/`） |
-| 预训练权重 | `/home/yqwang/projects/LS-Rep_BCD_RSML_3/pre-trained_weights` |
+| SCTC checkpoint | `/share_datasets/yqwang/checkpoints/LS-Rep_BCD_RSML_3/SCTC/Run1/<实验>/<数据集>/` |
+| SCTC 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/SCTC/Run1/<实验>/<数据集>/train_log.txt` |
+| 预训练权重 | `/home/yqwang/projects/LS-Rep_BCD_RSML_3/pre-trained_weights/lwganet_l0_e299.pth` |
 
-（旧 Run1/Run2、SAM-HSD、DART-R-TS 的 checkpoint/log 仅作归档，不再活动。当前 RDT-CD 实验目录不使用 `steps_40000/seed_2333` 中间目录，这两项写进训练日志配置头。）
+（旧 RDT-CD/SAM-HSD/DART-R 的 checkpoint/log 仅作归档，不再活动。当前 SCTC 实验目录不使用 `steps_40000/seed_2333` 中间目录，这两项写进训练日志配置头。SCTC 无 Teacher/Cache，因此不使用 `/share_datasets/CD_teacher_cache`。）
 
 `.vscode/sftp.json` 用于手动上传代码，自动上传保持关闭；该配置忽略 `pre-trained_weights/` 和常见权重文件。
 
-## 4. RDT-CD（方向 C）
+## 4. SCTC（当前活动实验，方向 C 换机制）
 
-方向 C 主方法经历过多次迭代：C0（旧梯度路由）、C1（DART-R-TS 固定教师）、Run1 RDT-CD 与 Run2 SCGR 均提供了历史诊断证据，但没有形成稳定、可归因的 Teacher 增益。当前活动实现为 **Run3 BT-SAM-RDT**。
+方向 C 经历了「教师/蒸馏」到「机制级校准」的转变：C0（旧梯度路由）、C1（DART-R-TS 固定教师）、RDT-CD Run1/Run2/Run3（BT-SAM-RDT 动态教师）均未能在同协议下证明稳定、可归因的正增益（详见 §6）。据此停止继续堆叠 Teacher/router/loss，转向诊断定位到的 Student 主路径瓶颈。
 
-学生模型始终为 A2Net-LWGANet-L0。Run3 的全部 Foundation Teacher Cache、Fast Teacher、EMA Target Teacher、difficulty diagnostics 与 GT audit 都是纯训练期机制，不进入部署期主预测路径。
+### 4.1 诊断与动机
 
-`models/scripts/train.py` 当前只保留以下实验入口：
+A2Net 当前主图在 SWA 输出后直接做 `|F1 - F2|` 绝对差分，此前**没有任何显式跨时相分布校准**。一旦光照/季节/纹理/成像条件差异进入 `F1/F2`，就会和真实变化一起被编码成「差分能量」，后续 TFM 只能学「这个差值像不像变化」，无法区分跨时相域偏移与语义变化。对于 WHU/LEVIR 这类变化像素仅 3%–4% 的数据，少量伪变化 FP 就足以抵消大量 TP。
 
-| ID | 机制 | 说明 |
-| -- | -------------------------- | ---------------------------------------------------------------------------- |
-| B0 | none | **统一 clean baseline**，无 Teacher、无 Cache |
-| R3A | bt_sam_rdt + SAM-only | **最小机制消融**：BT-SAM structural prior + 单个 Fast/EMA Teacher，关闭 OV 信息 |
-| R3 | bt_sam_rdt + SAM+OV | **当前主方法**：BT-SAM structural prior + OV semantic prior + reliability fusion + 单个 Fast/EMA Teacher |
+SCTC 的解法只有一句：**先利用双时相自身的高一致区域估计「成像域偏移」，把 T1/T2 对称映射到同一个公共特征域，再交给原有 TFM 做差分。**
 
-当前实现版本：
+### 4.2 机制（零参数、交换对称）
 
-```text
-implementation_version=bt_sam_rdt_run3_v1
-cache_replay=aligned
-routing_signal=pixel_positive_brier_gain
-reject_unit=pixel
-```
+对 SWA 输出的第 s 个尺度（64 通道）：
 
-### Run3 BT-SAM-RDT 机制
+1. **不变可信度**：每个空间位置的跨时相 channel vector 的 cosine agreement
+   `a = (1 + cos(F1, F2)) / 2 ∈ [0,1]`，高值=稳定区域；权重 `w = stopgrad(a)`（detach，防止 backbone 钻空子）。
+2. **稳定区域统计量**：用 `w` 加权估计两时相每通道的 `μ_t, σ_t²`（区别于整图等权的 InstanceNorm）。
+3. **公共中点域**：`μ_* = (μ1+μ2)/2`，`σ_* = sqrt((σ1²+σ2²)/2 + ε)`，然后
+   `F̃_t = σ_* · (F_t − μ_t)/σ_t + μ_*`。
+4. 只把 `F̃1, F̃2` 送入**原样不改的 TFM**：`D = |F̃1 − F̃2|`；后续 dilation=7/5/3/1 分支与 Decoder 全不变。
 
-Run3 的核心实现在：
+SCTC 只有 cosine、加权 mean/std 与 affine 运算，**ΔParams=0**；严格时间交换对称（`swap(F1,F2) → swap(F̃1,F̃2)`，因此 `|F̃1−F̃2|` 不变）。SCTC 是部署主图的一部分，训练/验证/测试/部署同一图，**不是训练辅助、不进 `switch_to_deploy()` 删除**。
 
-```text
-models/distill/task_space.py
-models/distill/dynamic_teacher.py
-models/distill/diagnostics.py
-models/distill/teacher_cache.py
-```
+### 4.3 实验矩阵（Student-only，无 Teacher/Cache/Foundation Model）
 
-Run1 维护 SAM 与 OV 两个独立动态教师并进行像素级竞争/路由；Run3 删除该设计，先在教师上游构造一个真正的双时相 Foundation prior，再使用一个统一的 residual teacher：
+| ID | Difference 前操作 | temporal_calibration_mode | 目的 |
+|---|---|---|---|
+| S0 | 无（原始 A2Net 直接 `abs(F1-F2)`） | `none` | clean anchor |
+| S1 | 全像素对称统计校准 | `symmetric` | 排除「普通 normalization 就够了」 |
+| S2 | **Unchanged-Aware SCTC**（agreement 加权统计） | `sctc` | 完整主方法 |
 
-```text
-SAMStruct T1/T2
-        ↓
-显式跨时相实例对应
-        ↓
-BT-SAM structural-change prior ───────┐
-                                      ├─ reliability fusion
-OVCDistill semantic soft-change prior ┘
-        ↓
-Fused Foundation Prior
-        ↓
-One Fast Residual Teacher
-        ↓ EMA
-One Target Teacher
-        ↓
-GT Positive-Brier-Gain Audit
-        ↓
-Student KD
-```
+三臂只差 `--experiment S0|S1|S2`，其余参数一致。`models/scripts/train.py` 中 `implementation_version=sctc_v1`，`checkpoint format_version=4`。
 
-其中：
-
-* **BT-SAM structural prior**：仅由 T1/T2 SAM instance、quality、boundary 构造，不读取 Student prediction、Student feature 或 GT；
-* **OV semantic prior**：由 OVCDistill 的 `soft_change` / `confidence` 提供互补语义变化证据；
-* **Fast Teacher**：参与梯度优化，根据当前 Student 状态与训练监督学习 residual correction；
-* **EMA Target Teacher**：由 Fast Teacher 通过 EMA 更新，`requires_grad=False`，用于产生 Student 实际接收的蒸馏 proposal；
-* **Student KD loss (`total`)**：只允许更新 Student；
-* **Teacher fitting loss (`teacher_total`)**：只允许更新 Fast Teacher，Student feature / prediction 在该路径必须 detach；
-* **Foundation prior**：Student-independent、GT-independent；
-* **GT**：只允许用于 positive-gain safety audit、Fast Teacher fitting 与 detached Student-difficulty weighting。
-
-Run3 不再维护两个互相竞争的 SAM/OV residual experts，也不再使用 Run2 的 regional routing、gradient-concordance gate 或 SCGR。
-
-### BT-SAM 双时相结构先验
-
-当前 `models/distill/task_space.py` 显式匹配 T1/T2 SAM instances。
-
-对于 T1 instance `i` 与 T2 instance `j`：
+### 4.4 训练协议（固定）
 
 ```text
-I_ij   = |M_i^1 ∩ M_j^2|
-
-IoU_ij = I_ij / (|M_i^1| + |M_j^2| - I_ij)
-
-C12_ij = I_ij / |M_i^1|
-
-C21_ij = I_ij / |M_j^2|
+input           256×256
+batch_size      64
+max_steps       40000
+seed            2333
+student lr      5e-4
+student wd      1e-4
+backbone lr mult 1.0
+dice reduction  batch
+main loss       BCE + Dice（四尺度权重 1,1,1,1）
+optimizer       Adam
+Teacher         OFF
+Cache           OFF
 ```
 
-核心原则：
+### 4.5 可证伪假设与失败判据
 
-1. SAM `instance_id` 仅视为单时相内部的 opaque ID，**不得跨时相直接按 ID 相减或 XOR**；
-2. counterpart 按最大 IoU 选择；
-3. IoU / directional coverage 用于匹配与可靠性分析，**不直接当作 pixel-level change probability**；
-4. 匹配实例的重叠稳定 core → structural change ≈ 0；
-5. T1-only 区域 → disappearance / shrinkage ≈ 1；
-6. T2-only 区域 → appearance / expansion ≈ 1；
-7. 非对应实例的重叠 → structural disagreement ≈ 1；
-8. SAM quality、boundary 与 correspondence confidence 主要调节 reliability，而不是直接改写结构标签。
+- **H1 伪变化抑制**：S2 应主要降背景 FP（Precision↑），Recall 下降 ≤ 0.20；WHU 上要求 ΔF1 ≥ +0.30。
+- **H2 稀疏变化特异性**：低变化比 WHU 应比高变化比 SYSU 获益更明显（若再现「SYSU 明显升、WHU 明显降」则停止）。
+- **H3 unchanged-aware 必要性**：`|F1(S2) − F1(S1)| < 0.10` 则 unchanged-aware 无独立贡献。
+- **H4 多数据集一致性**：4 数据集 ≥3 个正增益，且任一 ΔF1 ≥ −0.20。
 
-这是 Run3 相对旧实现的重要修正：expansion/shrinkage 的变化必须空间局部化，不能因为 directional coverage 不对称而给稳定 overlap core 分配非零变化概率。
+失败判据（任一成立即停止扩展，不再加模块）：WHU `S2 ≤ S0`；SYSU 正 / WHU/LEVIR 负（重现教师方向性）；Precision↑ 但 Recall 明显↓ 致 F1 无提升；`S2≈S1`；部署参数 ≠ 2,913,094；256×256 FLOPs 超出契约。
 
-### Foundation Prior Fusion
-
-Run3 将 SAM structural prior 与 OV semantic prior 在 task space 中融合：
+### 4.6 启动顺序
 
 ```text
-q_prior =
-    (R_S * S + R_O * O)
-    /
-    (R_S + R_O + eps)
+第一阶段：S0/S1/S2 × WHU + SYSU（机制门）
+        ↓ 通过
+第二阶段：S0/S1/S2 × LEVIR + CDD
+        ↓ 四数据集通过
+多 seed：2333 / 3407 / 5871
 ```
 
-其中：
-
-```text
-S   = BT-SAM structural prior
-O   = OV semantic soft-change prior
-R_S = SAM structural reliability
-R_O = OV semantic reliability
-```
-
-当两种 prior 同时可用时，`|S - O|` 作为 conflict，降低 fused reliability；只有单一来源可用时不人为施加 disagreement penalty。
-
-R3A 与 R3 使用相同的 residual teacher 容量和训练链：
-
-```text
-R3A: use_ov=False
-R3 : use_ov=True
-```
-
-因此 R3 vs R3A 用于检验 OV semantic prior 在相同 Teacher 容量下是否提供增量信息。
-
-### GT Positive-Brier-Gain Audit
-
-对于 Student prediction `p`、Target Teacher proposal `q` 与 GT `y`：
-
-```text
-Student Brier error:   E_s = (p - y)^2
-Teacher Brier error:   E_t = (q - y)^2
-Teacher gain:          gain = E_s - E_t
-```
-
-当前正式 policy 为 `advantage`：
-
-```text
-reliability > 0
-AND
-gain > numerical tolerance
-    → accept
-
-otherwise
-    → reject
-```
-
-GT audit 只做训练安全门，不参与 Foundation prior 构造；不得把该 audit 描述为 Foundation Teacher 本身的变化知识。
-
-### Run1 / Run2 历史证据与当前解释
-
-Run1 单 seed 2333 的历史结果曾出现：
-
-| Dataset | B0 F1 | D1 F1 | ΔF1 |
-| --- | ---: | ---: | ---: |
-| SYSU | 80.81 | 83.23 | +2.42 |
-| WHU | 94.03 | 94.21 | +0.18 |
-| CDD | 97.79 | 97.80 | +0.01 |
-| LEVIR | 91.27 | 91.16 | -0.11 |
-
-但后续统一 clean B0 在 SYSU 达到约 83.24，与 Run1 D1 的 83.23 几乎一致，因此 Run1 的 SYSU +2.42 正信号存在明显 baseline/protocol 混杂，不能继续作为 Teacher 有效性的独立证据。
-
-Run2/SCGR 又引入 regional routing、error-mass normalization 与 gradient-concordance gate，但 SYSU/WHU 等结果没有形成可信正增益，因此已停止。当前代码中不再保留 Direction-C、SCGR router、D1NG、D1/D2、region gate、gradient gate 等活动实现。
-
-Run3 的研究问题因此收缩为：
-
-```text
-先证明：
-经过显式双时相实例对应与结构变化重构后，
-Foundation knowledge 本身是否能稳定帮助固定的极轻量 Student。
-
-再讨论：
-是否值得继续更复杂的 Teacher Agent / routing。
-```
-
-当前不能默认宣称：
-
-```text
-BT-SAM 一定有效
-SAM + OV 一定互补
-Foundation Teacher 一定优于 clean baseline
-提升一定来自 Foundation prior 而非 residual teacher 容量
-```
-
-这些都必须由同协议正式实验回答。
-
-### Run3 首轮正式结果（seed 2333）
-
-Run3 的 12 个 run（B0 / R3A / R3 × SYSU / WHU / CDD / LEVIR）已全部完成，正式 test F1（%，seed 2333，同协议 40000 steps / batch 64）：
-
-| Dataset | B0 F1 | R3A F1 | R3 F1 | R3A−B0 | R3−B0 |
-| --- | ---: | ---: | ---: | ---: | ---: |
-| SYSU | 81.75 | 82.29 | 83.13 | +0.54 | +1.38 |
-| WHU | 94.06 | 93.94 | 93.70 | -0.12 | -0.36 |
-| CDD | 97.79 | 97.78 | 97.79 | -0.01 | 0.00 |
-| LEVIR | 91.13 | 91.03 | 90.98 | -0.10 | -0.15 |
-
-首轮结论（单 seed，不构成论文级定稿结论）：
-
-- **BT-SAM-RDT 未能在同协议下证明稳定正增益**：只有 SYSU（变化像素比 21.1%，最高）有正信号，R3 相对 B0 +1.38，且 R3 > R3A，说明 OV 语义先验仅在 SYSU 上提供增量。
-- **WHU / LEVIR（建筑小目标 + 类别极不平衡）反而略负**：R3 在 WHU -0.36、LEVIR -0.15。
-- **CDD 持平**（F1 已近 97.8 饱和）。
-- **R3A（仅 BT-SAM 结构先验）在 CDD / WHU / LEVIR 上均无增益或略负**（仅 SYSU +0.54），说明结构先验本身几乎无独立收益。
-
-按 §8 规则 14：Run3 首轮未能在同协议下证明 Foundation prior / Teacher 的有效性，应优先停止继续堆叠 Teacher / router / loss，回到证据诊断——重点解释「增益为何只出现在 SYSU、在 WHU / LEVIR 反而有害」，可对比日志中的 `foundation_support_ratio`、`pixel_reject_ratio`、`dynamic_teacher_gain` 等诊断量。论文级结论仍需补多 seed（`2333/3407/5871`）。
-
-### R3O 消融：OV-only（seed 2333）
-
-为归因「Teacher 增益为何只在 SYSU」，补了 OV-only 臂 **R3O**（OV semantic prior + 同 Fast/EMA Teacher + 同 advantage audit，无 BT-SAM 结构先验），只跑 SYSU / WHU：
-
-| Dataset | B0 | R3A (SAM) | R3O (OV) | R3 (SAM+OV) |
-| --- | ---: | ---: | ---: | ---: |
-| SYSU | 81.75 | 82.29 | 82.76 | 83.13 |
-| WHU | 94.06 | 93.94 | 93.33 | 93.70 |
-
-结论（单 seed，不构成定稿）：
-
-- **诊断假设 H1「SAM 污染 OV、应去掉 SAM 改 source-selective fusion」被证伪**：去掉 SAM 后（R3O）在 WHU 上不但没恢复，反而**最差**（R3O/WHU -0.73，四臂中最差；R3/WHU 仅 -0.36）。step-3 门「R3O > R3」在两个数据集上均不成立，故不做 Source-Selective Reliability Fusion。
-- **OV 并非普适的好源**：OV-only 在 SYSU 最强（+1.01），但在 WHU 最有害（-0.73）。诊断文档 §5.2「OV 值得保留、优先级高于 BT-SAM」的结论被推翻。
-- **方向性稳健结论**：WHU 上所有教师臂（R3A/R3O/R3）均 ≤ B0，SYSU 上均 > B0——问题不在「哪个 prior」，而在「低变化比 + 小目标的难集上，Foundation-prior 教师机制本身帮倒忙」。
-- R3O 无 SAM，故 WHU 的负增益只能来自 OV prior + residual teacher + audit；结合 `aux_raw≈0`、`dynamic_teacher_gain≈0`、`pixel_reject_ratio≈0.999`，教师在难集上「近乎惰性却带微小有害方向」。
-
-据此，§4 的 Source-Selective Reliability Fusion 前提被推翻、不再优先；下一步回到 §4.5 的 Teacher necessity control（Static vs Dynamic）判断 residual teacher 是否有存在价值，或直接放弃 Foundation-prior Teacher 方向。
+当前（2026-09-20）第一阶段与第二阶段已按用户指示**并行**跑在 GPU 0（两个 tmux 队列：`sctc1_gpu0`=WHU/SYSU、`sctc1_phase2_gpu0`=LEVIR/CDD，每队列串行 S0→S1→S2）。「门」不再是启动门槛，而是解释已跑结果的判据。
 
 ## 5. 模型与部署约束
 
-- 主学生模型是 A2Net-LWGANet-L0；SAM2 Teacher Cache、OV Cache、Fast Teacher、EMA Target Teacher 与所有训练辅助只允许训练期使用。
+- 主学生模型是 A2Net-LWGANet-L0；SCTC 是零参数 temporal 操作，属于部署主图，**不是训练辅助、不被 `switch_to_deploy()` 移除**。
 - 部署参数量固定为 `2,913,094`。
-- 当前 `train.py` 的 256×256 部署 FLOPs 契约为约 `2.7475G`，允许工程校验误差 `±0.03G`。
-- 打开或关闭训练辅助不得改变主预测；`switch_to_deploy()` 必须移除训练辅助参数，部署前后主预测最大误差 `< 1e-6`。
-- 不得把 Teacher map / Foundation prior 注入部署期主特征路径。
-- A/B/label 与 Teacher Cache 必须重放完全一致的 crop、resize、flip 和时相交换。
-- Student optimizer 不得包含 `training_auxiliary.*` 参数；Fast Teacher 使用独立 teacher optimizer；EMA Target Teacher 不进入任何 optimizer。
-- 实验语义集中在 `models/scripts/train.py`；wrapper 只负责选择实验、数据集、GPU 和运行目录。
-- 当前 checkpoint 仅支持 **Run3 format v3**；不得静默恢复旧 format-v2 / Direction-C checkpoint。
+- 256×256 部署 FLOPs 实测约 `2.7676G`（`train.py` 契约 2.7475G ± 0.03G；SCTC 新增的是 element-wise reduction/affine，可忽略）。正式报告需同时给 THOP 实测与 functional-op 手工审计。
+- SCTC 三种模式 `none/symmetric/sctc` 下部署参数量恒等；`mode=none` 是精确恒等路径。
+- 时间交换对称是硬性质：`max |Model(A,B) − Model(B,A)| < 1e-6`（smoke 强制验证）。
+- `switch_to_deploy()` 为 no-op（返回 self），部署前后主预测最大误差 `< 1e-6`。
+- 无 Teacher map / Foundation prior / Cache 注入主特征路径；S0/S1/S2 都不用 SAM/OV Cache。
+- 训练、验证、测试、部署使用同一 SCTC 图。
+- checkpoint 仅支持 **SCTC format v4**；不得静默恢复旧 Run3 format-v3 的 Teacher checkpoint 到 SCTC 实验（`validate_resume` 会拒绝）。
+- SCTC 无 state_dict 参数，旧 B0 权重理论上可无新增 missing/unexpected 加载，但实验模式必须写入 checkpoint/log，恢复时核验 `temporal_calibration_mode`，禁止 B0 与 SCTC checkpoint 静默互换实验语义。
 
 当前核心代码：
 
@@ -341,107 +184,60 @@ models/__init__.py
 models/a2net.py
 models/backbone/lwganet.py
 models/decoder/a2net_decoder.py
+models/decoder/temporal_calibration.py
 models/datasets/cd_dataset.py
-models/datasets/cache_transforms.py
 models/datasets/transforms.py
-models/distill/__init__.py
-models/distill/dynamic_teacher.py
-models/distill/diagnostics.py
-models/distill/task_space.py
-models/distill/teacher_cache.py
 models/losses/combined_loss.py
 models/scripts/train.py
-models/utils/checkpoint.py
-models/utils/logger.py
 models/utils/metrics.py
 models/utils/scheduler.py
-models/tools/smoke_dynamic_teacher.py
-models/tools/validate_teacher_cache.py
-models/tools/export_deploy.py
+models/tools/smoke_temporal_calibration.py
 ```
 
-`models/distill/losses.py`、旧 routing/Direction-C/SCGR 源码及 `__pycache__/*.pyc` 已从当前 `models/` 清理，不得因历史引用重新恢复，除非用户明确改变研究方向。
+`models/distill/`（Teacher/KD）、`cache_transforms.py`、旧 `checkpoint.py`/`logger.py`（已内联进 `train.py`）及旧 `smoke_dynamic_teacher.py`/`validate_teacher_cache.py`/`export_deploy.py` 已从当前 `models/` 清理，不得因历史引用重新恢复，除非用户明确改变研究方向。
 
-## 6. Teacher Cache 规则
+## 6. 历史实验归档（不再活动）
 
-- 根目录为 `/share_datasets/CD_teacher_cache/`，当前使用 SAMStruct + OVCDistill 两套 paired cache。
-- SAM cache manifest 必须满足当前 `TeacherCache` schema，且 `teacher_type=sam2_struct_v2`。
-- `PairedTeacherCache` 要求 cache entries 与当前 `list/train.txt` **精确全覆盖**：不得缺样本、不得多样本、不得重复 sample ID。
-- 每个 cache sample 的 `sample_id` 与 `config_hash` 必须与 manifest 一致。
-- SAM cache：
-  - `t1/t2.instance_id` 为非负 int32/int64 `[1,H,W]`；
-  - `boundary/quality` finite 且在 `[0,1]`；
-  - T1/T2 三类字段空间 shape 必须一致。
-- OV cache：
-  - `soft_change` / `confidence` 包含 `l1/l2`，单通道且 bounded；
-  - `relation` 仍属于 cache schema，但当前 Run3 task-space 主机制只使用 semantic soft-change / confidence；
-  - 同一 level 内空间 shape 必须一致。
-- R3A 与 R3 当前都走相同 paired-cache loading path，因此即使 R3A `use_ov=False`，`train.py` 仍要求同时提供 `--sam_cache_root` 与 `--ov_cache_root`；R3A 只是在 BTSAMRDT 内不使用 OV prior。
-- 正式训练前先跑 `models/tools/validate_teacher_cache.py`；该工具是只读验证器，不得重建、改写或覆盖 Cache。
-- 不得删除或覆盖数据集、Teacher Cache、checkpoint，除非用户明确授权并已核对绝对路径。
-- Cache 文件可用 ≠ Teacher 有效；「Teacher 是否提升 Student」必须由 B0/R3A/R3 同协议正式对照回答。
+以下实验仅作为论文叙事的历史证据，不再活动、不得重新混入当前 SCTC 代码路径。
+
+### 6.1 RDT-CD（方向 C 教师/蒸馏，Run1→Run3）
+
+**Run3 BT-SAM-RDT**（Bi-Temporal Structural SAM Reciprocal Dynamic Teacher）：BT-SAM 双时相实例对应构造结构先验 + OVCDistill 语义先验 → reliability fusion → 单个 Fast/EMA residual teacher → GT positive-Brier-gain audit。学生仍为 A2Net-LWGANet-L0。全部 Foundation Cache / Fast Teacher / EMA / audit 都是纯训练期机制，不进部署主预测路径。
+
+Run3 首轮（seed 2333，同协议 40000 steps / batch 64）正式 test F1（%）：
+
+| Dataset | B0 | R3A (SAM) | R3O (OV) | R3 (SAM+OV) |
+| --- | ---: | ---: | ---: | ---: |
+| SYSU | 81.75 | 82.29 | 82.76 | 83.13 |
+| WHU | 94.06 | 93.94 | 93.33 | 93.70 |
+| CDD | 97.79 | 97.78 | — | 97.79 |
+| LEVIR | 91.13 | 91.03 | — | 90.98 |
+
+**结论（单 seed，不构成定稿）**：所有教师臂在 WHU/LEVIR/CDD 均 ≤ 干净 B0，只有变化像素比最高（21.1%）的 SYSU 有正增益；R3O(OV-only) 在 WHU 最差（−0.73），推翻「SAM 污染 OV」。日志诊断 `aux_raw≈0`、`dynamic_teacher_gain≈0`、`pixel_reject_ratio≈0.999`，说明 Fast Teacher 经「初始 residual=0 → 接近 Student → gain≈0 → 99.6%~99.9% 像素被 audit 拒绝」后近乎惰性。据此判定 Teacher/蒸馏方向不可继续堆叠，转向 §4 的机制级校准。
+
+**Run1/Run2**：Run1 双教师竞争、Run2/SCGR（regional routing + gradient-concordance gate）均无可信正增益，已停止；对应 `train_scripts/RDT-CD/Run1/`、`Run2/`、`Run3/` 与 `models/distill/` 均已归档。
+
+### 6.2 其它历史
+
+`train_scripts/SAM-HSD/`（CR-SRD）、`train_scripts/DART-R/`（DART-R-TS 固定教师）等亦为历史实验，仅作对照证据，不再活动。
 
 ## 7. 启动、恢复与结果纪律
 
 推荐顺序：
 
 1. 激活 `lsrep` 并进入项目目录；
-2. 跑 `models/tools/smoke_dynamic_teacher.py`，验证 BT-SAM expansion/shrinkage、fusion、GT audit、梯度隔离、EMA、auxiliary ON/OFF、deploy 删除与参数契约；
-3. 对计划训练的数据集跑 `models/tools/validate_teacher_cache.py`；
-4. 用真实数据 + 真实 Cache 对最复杂的 `R3/SYSU` 做短 dry run，检查数据/缓存同步、loss、Teacher update、checkpoint/resume 与吞吐；
-5. 用 Run3 v3 checkpoint 跑一次 `models/tools/export_deploy.py`，确认只导出 Student、部署参数正确；
-6. 优先启动 SYSU / WHU 的 B0 → R3A → R3；有效性通过后再扩展 CDD / LEVIR；
-7. 从 `train_log.txt` 收集正式 test 指标。
-
-当前正式默认协议由 `models/scripts/train.py` 定义：
-
-```text
-input              256×256
-batch_size         64
-max_steps          40000
-seed               2333
-student lr         5e-4
-student wd         1e-4
-backbone lr mult   1.0
-dice reduction     batch
-main loss weights  1,1,1,1
-kd_lambda          0.06
-```
-
-R3A / R3 默认 Teacher 参数：
-
-```text
-teacher_lr            5e-4
-teacher_hidden        24
-teacher_ema           0.99
-max_logit_delta       2.0
-teacher_weight_decay  1e-4
-teacher_grad_clip     5.0
-boundary_radius       2
-small_area            64
-```
+2. 跑 `python -m models.tools.smoke_temporal_calibration --device cuda --gpu_id 0`，验证 S0 恒等、S1/S2 零参数、时间交换对称、梯度隔离、部署参数 2,913,094 与 `switch_to_deploy()` 不变性；
+3. 对 S2 做短 dry run（`--max_steps 5`，真实数据）核验数据 pipeline、checkpoint 与 256×256 FLOPs 契约；
+4. 启动队列：`tmux new -s sctc1_gpu0 -d 'bash train_scripts/SCTC/Run1/run_gpu0_whu_sysu.sh'`（Phase 2 同理 `run_gpu0_levir_cdd.sh`）；
+5. 从 `train_log.txt` 收集正式 test 指标。
 
 每个实验目录使用：
 
-- `last_checkpoint.pth`：Run3 format-v3 精确恢复；
+- `last_checkpoint.pth`：SCTC format-v4 精确恢复；
 - `best_model_F1=*.pth`：验证集选择出的最佳模型；
 - `train_log.txt`：训练、恢复和最终测试记录。
 
-Run3 v3 checkpoint 至少包含：
-
-```text
-format_version=3
-model
-optimizer
-teacher_optimizer   # R3A/R3；B0 为 None
-epoch
-global_step
-best_val_f1
-args
-rng
-```
-
-R3A/R3 的 Fast Teacher 与 EMA Target Teacher 已注册在 `model.training_auxiliary`，因此随 `model.state_dict()` 一并保存。
+SCTC v4 checkpoint 至少包含：`format_version=4`、`model`、`optimizer`、`epoch`、`global_step`、`best_val_f1`、`args`、`rng`。
 
 只有 `train_log.txt` 中最后一个完整：
 
@@ -459,25 +255,22 @@ R3A/R3 的 Fast Teacher 与 EMA Target Teacher 已注册在 `model.training_auxi
 - 报告 Recall、Precision、OA、F1、IoU、Kappa，以及训练/部署参数量和 FLOPs。
 - 比较前检查 dataset、batch、max_steps、seed、Student 初始化、参数量、数据增强与评估协议是否一致。
 - 单数据集、单种子、微小差异不能被表述为普适提升。
-- seed 2333 只用于首轮有效性；论文级主比较需要补多 seed（当前计划 `2333/3407/5871`）。
-- 当前 Run3 首要比较：
-  - `B0 vs R3A`：BT-SAM structural prior + residual teacher 是否有独立增量；
-  - `R3A vs R3`：OV semantic prior 在相同 Teacher 容量下是否提供额外增量；
-  - `B0 vs R3`：完整 BT-SAM-RDT 是否在同协议下改善固定 Student。
+- seed 2333 只用于首轮有效性；论文级主比较需补多 seed（`2333/3407/5871`）。
+- 当前 SCTC 首要比较：`S0 vs S2`（SCTC 是否改善固定 Student）、`S0 vs S1`（基础 pair calibration 是否足够）、`S1 vs S2`（unchanged-aware weighting 是否有独立贡献）。
 
 ## 8. Agent 工作规则
 
-1. 修改前读取当前代码、Run3 README 与实际日志，不依赖旧项目记忆；若 Run3 README 与代码冲突，以当前代码/shell 为准。
+1. 修改前读取当前代码、SCTC Run1 README 与实际日志，不依赖旧项目记忆；若文档与代码冲突，以当前代码/shell 为准。
 2. 方法创新优先，但每项主张必须对应明确机制、与已有工作的实质区别、可证伪假设、最小消融和失败判据。
-3. 保持部署主图、Teacher Cache replay 顺序、Student/Teacher 梯度隔离和 `switch_to_deploy()` 约束不变。
-4. 不得重新引入旧 Direction-C、SCGR、Run1 双教师竞争、旧 SAM transport 或历史 router，除非用户明确要求重新开启该方向。
-5. 修改 shell 后执行 `bash -n` 语法检查；修改后重新检查 shell 中 dataset/cache/pretrained/checkpoint/log 路径。
-6. 修改模型后至少跑 synthetic smoke；涉及真实数据/Cache 时再跑只读 cache validation 与 real-cache dry run。
-7. 修改 checkpoint/resume 逻辑时保持 Run3 format-v3、Student optimizer、teacher optimizer、model state、训练进度和 RNG 的精确恢复能力。
+3. 保持部署主图、SCTC 零参数/交换对称、`switch_to_deploy()` no-op、时间交换一致性 `<1e-6` 等约束不变。
+4. 不得重新引入旧 Teacher/蒸馏、Direction-C、SCGR、Run1 双教师竞争、SAM transport 或历史 router，除非用户明确要求重新开启该方向。
+5. 修改 shell 后执行 `bash -n` 语法检查并确认 LF 换行（不是 CRLF）；修改后重新检查 shell 中 dataset/pretrained/checkpoint/log 路径。
+6. 修改模型后至少跑 synthetic smoke（`smoke_temporal_calibration.py`）；涉及真实数据时再跑短 dry run。
+7. 修改 checkpoint/resume 逻辑时保持 SCTC format-v4、optimizer、model state、训练进度和 RNG 的精确恢复能力。
 8. `models/scripts/train.py` 中旧 best checkpoint 的主动删除/替换策略是当前有意保留的行为；除非用户明确要求，不要擅自移除。
-9. 不恢复已删除的 `models/distill/losses.py`、历史 routing 文件或任何 `__pycache__/*.pyc`；这些不属于当前 Run3 源码。
+9. 不恢复已删除的 `models/distill/`、历史 routing 文件或任何 `__pycache__/*.pyc`；这些不属于当前 SCTC 源码。
 10. 不在 `cd_base` 中安装项目专属依赖，不擅自更换 PyTorch/CUDA 栈。
-11. 任何删除数据、Teacher Cache 或 checkpoint 的操作都需要用户明确授权和精确路径校验。
+11. 任何删除数据、checkpoint 或预训练权重的操作都需要用户明确授权和精确路径校验。
 12. Git 提交前必须检查暂存区；不得提交权重、Cache、数据集、checkpoint、训练日志、临时 dry-run 产物或 Python 字节码。
-13. 当前仍处于有效性探寻阶段：不得因为模块来自强论文、Foundation Model 或单次实验有提升，就默认该机制适用于本项目。
-14. 若 Run3 不能在同协议下证明 Foundation prior / Teacher 的有效性，应优先停止并回到证据诊断，而不是继续堆叠 router、loss 或额外模块。
+13. 当前仍处于有效性探寻阶段：不得因为模块来自强论文或单次实验有提升，就默认该机制适用于本项目。
+14. 若 SCTC 在 WHU/SYSU 上不能通过 §4.5 的机制门，应停止扩展、回到证据诊断，而不是继续加模块或换 loss。
