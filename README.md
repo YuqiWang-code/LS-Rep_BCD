@@ -7,14 +7,16 @@
 
 ## GitHub 提交流程
 
-完成 `models/`、`README.md` 或当前 SCTC Run1 脚本/说明的修改并通过必要检查后，按以下顺序提交到 GitHub：
+完成 `models/`、`README.md`、`others/`（参考代码）或当前脚本/说明的修改并通过必要检查后，按以下顺序提交到 GitHub：
 
 ```bash
-git add models README.md train_scripts/SCTC/Run1 docs/experiment_metrics.xlsx "docs/RSML-3_服务器环境与变化检测数据统一说明.md"
+git add models README.md train_scripts/SCTC/Run1 docs/experiment_metrics.xlsx "docs/RSML-3_服务器环境与变化检测数据统一说明.md" others
 git status
 git commit -m "Update code"
 git push
 ```
+
+`others/` 只保留精简后的参考代码（供网页 GPT 阅读），不提交其中的权重、`__pycache__/`、`*.pyc`、`work_dirs/`、数据集或完整框架副本。
 
 执行 `git commit` 前必须先检查 `git status`，确认暂存区只包含本次准备提交的文件；不要把权重、缓存、数据集、日志、`__pycache__/`、`*.pyc` 或无关改动加入提交。
 
