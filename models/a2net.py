@@ -50,6 +50,7 @@ class A2Net_LWGANet_L0(nn.Module):
         pretrained: bool = True,
         pretrained_path: Optional[str] = None,
         temporal_calibration_mode: str = "none",
+        joint_temporal_bn: bool = False,
     ) -> None:
         super().__init__()
 
@@ -62,6 +63,7 @@ class A2Net_LWGANet_L0(nn.Module):
             )
 
         self.temporal_calibration_mode = temporal_calibration_mode
+        self.joint_temporal_bn = bool(joint_temporal_bn)
 
         self.backbone = LWGANet_L0_1242_e32_k11_GELU(
             pretrained=pretrained,
@@ -88,7 +90,17 @@ class A2Net_LWGANet_L0(nn.Module):
         x1: torch.Tensor,
         x2: torch.Tensor,
     ):
-        """Extract shared-backbone features independently for T1 and T2."""
+        """Extract shared-backbone features for T1 and T2.
+
+        With ``joint_temporal_bn=True`` the two temporal views are processed as
+        one joint batch so the shared backbone's BatchNorm statistics are
+        computed jointly over T1+T2 (a normalization control).
+        """
+        if self.joint_temporal_bn:
+            x = torch.cat([x1, x2], dim=0)
+            feats = tuple(self.backbone(x))
+            b = x1.shape[0]
+            return tuple(f[:b] for f in feats), tuple(f[b:] for f in feats)
         return tuple(self.backbone(x1)), tuple(self.backbone(x2))
 
     def _forward_main_path(
@@ -97,6 +109,7 @@ class A2Net_LWGANet_L0(nn.Module):
         features2,
         output_size,
         return_decoder_features: bool = False,
+        return_change_features: bool = False,
     ):
         aggregated1 = self.swa(*features1)
         aggregated2 = self.swa(*features2)
@@ -124,6 +137,9 @@ class A2Net_LWGANet_L0(nn.Module):
             for logits in raw_logits
         )
 
+        if return_change_features:
+            # change = (c2, c3, c4, c5): the TFM change features used for KD.
+            return predictions, change
         if return_decoder_features:
             return predictions, decoder_features
         return predictions
@@ -133,6 +149,7 @@ class A2Net_LWGANet_L0(nn.Module):
         x1: torch.Tensor,
         x2: torch.Tensor,
         return_decoder_features: bool = False,
+        return_change_features: bool = False,
     ):
         if x1.ndim != 4 or x2.ndim != 4:
             raise ValueError("x1 and x2 must be [B,3,H,W]")
@@ -150,6 +167,7 @@ class A2Net_LWGANet_L0(nn.Module):
             features2,
             x1.shape[-2:],
             return_decoder_features=return_decoder_features,
+            return_change_features=return_change_features,
         )
 
     def switch_to_deploy(self):

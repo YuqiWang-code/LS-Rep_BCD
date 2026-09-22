@@ -53,6 +53,7 @@ class CDDataset(torch.utils.data.Dataset):
         transform=None,
         dataset_name: str = "LEVIR",
         return_meta: bool = False,
+        return_state: bool = False,
         seed: int = 2333,
     ) -> None:
         self.split = str(dataset)
@@ -60,6 +61,7 @@ class CDDataset(torch.utils.data.Dataset):
         self.transform = transform
         self.dataset_name = str(dataset_name).upper()
         self.return_meta = bool(return_meta)
+        self.return_state = bool(return_state)
         self.seed = int(seed)
         self.epoch = 0
 
@@ -158,14 +160,17 @@ class CDDataset(torch.utils.data.Dataset):
 
         if self.transform is not None:
             transformed = self.transform(image, label)
-            if not isinstance(transformed, (tuple, list)) or len(transformed) != 2:
-                raise RuntimeError(
-                    "Clean SCTC transform pipeline must return exactly (image, label)"
-                )
-            image, label = transformed
+            if self.return_state:
+                image, label, state = transformed
+            else:
+                image, label = transformed
 
+        if self.return_meta and self.return_state:
+            return image, label, sample_id, state
         if self.return_meta:
             return image, label, sample_id
+        if self.return_state:
+            return image, label, state
 
         return image, label
 
@@ -206,9 +211,15 @@ def get_loader(
     num_workers=4,
     pin_memory=True,
     return_meta=False,
+    return_state=False,
     seed=2333,
 ):
-    """Build the clean SCTC training DataLoader."""
+    """Build the clean training DataLoader.
+
+    When ``return_state=True``, each item is ``(image, label, sample_id, state)``
+    where ``state`` records the geometric augmentation (crop / flip / exchange)
+    so a teacher cache can be replayed identically.
+    """
     mean, std = _normalization()
 
     transform = Compose(
@@ -220,7 +231,7 @@ def get_loader(
             RandomExchange(),
             ToTensor(),
         ],
-        return_state=False,
+        return_state=bool(return_state),
     )
 
     split_name = os.path.basename(str(list_file)).lower()
@@ -231,7 +242,8 @@ def get_loader(
         file_root=file_root,
         transform=transform,
         dataset_name=_dataset_name(file_root),
-        return_meta=return_meta,
+        return_meta=bool(return_state),
+        return_state=bool(return_state),
         seed=seed,
     )
 
