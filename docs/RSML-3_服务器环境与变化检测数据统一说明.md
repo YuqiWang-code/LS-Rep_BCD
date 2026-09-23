@@ -1,7 +1,7 @@
 # RSML-3 服务器环境与变化检测数据统一说明
 
 > 用途：该服务器上所有变化检测（CD）项目共享的环境与数据参考。写 DataLoader、配路径、加载 Teacher Cache 前先读本文件。
-> 更新：2026-09-13（数据集与 Cache 已迁移到 `/share_datasets/`）。
+> 更新：2026-09-22（数据集与 Cache 已迁移到 `/share_datasets/`；新增 FA-SCRD DINOv3 teacher cache）。
 
 ## 1. 服务器环境
 
@@ -60,7 +60,7 @@
 
 ## 5. Teacher Cache
 
-- 根：`/share_datasets/CD_teacher_cache/`，两套 teacher：**OVCDistill**（DINOv2 ViT-B/14）与 **SAMStruct**（SAM 2.1 Hiera Large）。
+- 根：`/share_datasets/CD_teacher_cache/`，三套 teacher：**OVCDistill**（DINOv2 ViT-B/14）、**SAMStruct**（SAM 2.1 Hiera Large）与 **FA_SCRD_DINOv3_CD**（DINOv3 ViT-B/16）。
 - 覆盖：**四数据集 train 全部 100%**。SYSU/WHU 为历史生成；CDD/LEVIR 由 `train_scripts/DART-R/cache_gen/` 重建（config_hash 与历史不同，数值不保证严格一致）。
 - 读取：`manifest.json` 的 `entries[sample_name]` → `<root>/train/<name>.pt`；只读 train，无 val/test cache。
 - 字段：
@@ -68,6 +68,20 @@
   - SAM：`t1/t2` 各含 `instance_id`(int) / `boundary` / `quality`(float16)，`teacher_type=sam2_struct_v2`。
 - **不要用 cache meta 里的旧绝对路径**（如 `/data/CD/...`）打开文件；用当前 split 的 sample name + 当前 root 构造。
 - SAMStruct 全量约 36 GB，不要常驻 RAM，DataLoader 按 sample 逐个读。
+
+### FA_SCRD_DINOv3_CD（FA-SCRD 实验，方向已归档）
+
+- 根：`/share_datasets/CD_teacher_cache/FA_SCRD_DINOv3_CD/`。
+- Teacher：DINOv3 ViT-B/16（frozen + LoRA Q/V r=8 + 轻量 change head），在 SYSU 上微调一次（2000 步），再用于生成四数据集 cache。
+- 覆盖（train，无 val/test）：SYSU 12000 / WHU 5947 / CDD 10000 / LEVIR 7120（`.done` 标记在 `<root>/<DS>/train/.done`）。
+- 目录结构：`<root>/<DATASET>/train/<sample_id>.pt`，其中 `DATASET ∈ {SYSU, WHU, CDD, LEVIR}`（**不带 `-CD-256`**），`sample_id` 来自 `list/train.txt` 且**含扩展名**（如 `00000.png`、`train_00000.jpg`）。
+- 每 sample 一个 `.pt`（全部 FP16，无 manifest）：
+  - `t1_mid` / `t2_mid`：DINOv3 block 6 特征 `[768,16,16]`。
+  - `t1_deep` / `t2_deep`：DINOv3 block 11 特征 `[768,16,16]`。
+  - `teacher_change_logit`：teacher change head 的 sigmoid 概率 `[1,256,256]`（仅用于可靠性）。
+  - `meta`：`dataset` / `checkpoint_hash` / `resolution=256` / `normalization=imagenet`。
+- 特征在 **ImageNet 归一化**下生成（DINOv3 官方归一化）；训练期 KD 重放几何增强（crop/flip/exchange）用 `models/distill/cache_dataset.py::apply_cache_state`。
+- 生成脚本：`models/tools/train_teacher.py`（微调）、`models/tools/generate_teacher_cache.py`（cache）。
 
 ## 6. 权威来源优先级
 

@@ -1,7 +1,7 @@
 # README.md — LS-Rep_BCD_RSML_3
 
-> Last updated: 2026-09-22
-> 本文件是当前项目中 AI/Coding Agent 的工作约束。当前**无活动实验**——上一轮 FA-SCRD Run1（固定 DINOv3 教师 + 变化关系 KD）已归档：固定教师在 SYSU/CDD 上教师迁移为负（A1−C1 = −0.33，非单数据集 trick、而是直接拉低），下一步改进方向（联合 SAM2 教师 / 互选互促 / 模块优化）正在调研中。学生模型恒为 A2Net-LWGANet-L0，部署参数 2,913,094 不变。RDT-CD（BT-SAM-RDT）、SCGR、SAM-HSD、DART-R、SCTC、FA-SCRD 均作为历史实验归档（见 §6）。项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。
+> Last updated: 2026-09-23
+> 本文件是当前项目中 AI/Coding Agent 的工作约束。当前唯一活动方向为 **SAGE-CD（Student-Aware Gated Expert Distillation）**：Run1「Safe-DINO」门（G0/G1/G2）已完成——WHU +0.46 / SYSU −0.25，门未过（SYSU 负），但 KD 机制已修对（kd 12–15→0.6、gradient budget 有效 KD 梯度 ~25% 主损失）；正在调研 Run2 的激进改进（SAM2 结构专家协同 / 教师-学生互促 / 模块与 KD 形式优化 / 学生模型结构深挖）。学生模型恒为 A2Net-LWGANet-L0，部署参数 2,913,094 不变。RDT-CD、SCGR、SAM-HSD、DART-R、SCTC、FA-SCRD 均作为历史实验归档（见 §6）。项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。
 >
 > **实验约定（固定）：永远不做多 seed。** 每个机制只跑一组同协议（seed 2333、batch 64、40000 steps）的消融表实验，用 S 臂对 clean anchor 的逐数据集差值证明「机制是否有效」即可；不补 3407/5871、不做多 seed 复现、不做显著性检验。
 
@@ -10,7 +10,7 @@
 完成 `models/`、`README.md`、`others/`（参考代码）或当前脚本/说明的修改并通过必要检查后，按以下顺序提交到 GitHub：
 
 ```bash
-git add models README.md train_scripts/FA-SCRD/Run1 train_scripts/SCTC/Run1 docs/experiment_metrics.xlsx "docs/RSML-3_服务器环境与变化检测数据统一说明.md" others
+git add models README.md train_scripts/SAGE-CD/Run1 docs/experiment_metrics.xlsx "docs/RSML-3_服务器环境与变化检测数据统一说明.md" others
 git status
 git commit -m "Update code"
 git push
@@ -34,7 +34,7 @@ git push
 当前唯一活动实验族：
 
 ```text
-（无活动实验；下一步改进方向调研中）
+train_scripts/SAGE-CD/Run1/      # SAGE-CD（G0 / G1 / G2，教师+蒸馏）
 ```
 
 （`train_scripts/RDT-CD/`、`train_scripts/SCTC/`、`train_scripts/FA-SCRD/`、`train_scripts/SAM-HSD/`、`train_scripts/DART-R/` 等均为历史实验，已归档，不再活动。）
@@ -89,80 +89,76 @@ cd /home/yqwang/projects/LS-Rep_BCD_RSML_3
 |---|---|
 | 项目代码 | `/home/yqwang/projects/LS-Rep_BCD_RSML_3` |
 | 数据集 | `/share_datasets/CD` |
-| SCTC checkpoint | `/share_datasets/yqwang/checkpoints/LS-Rep_BCD_RSML_3/SCTC/Run1/<实验>/<数据集>/` |
-| SCTC 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/SCTC/Run1/<实验>/<数据集>/train_log.txt` |
+| SAGE-CD checkpoint | `/share_datasets/yqwang/checkpoints/LS-Rep_BCD_RSML_3/SAGE-CD/Run1/<实验>/<数据集>/` |
+| SAGE-CD 训练/测试日志 | `/home/yqwang/outputs/LS-Rep_BCD_RSML_3/SAGE-CD/Run1/<实验>/<数据集>/train_log.txt` |
 | 预训练权重 | `/home/yqwang/projects/LS-Rep_BCD_RSML_3/pre-trained_weights/lwganet_l0_e299.pth` |
 
-（旧 RDT-CD/SAM-HSD/DART-R 的 checkpoint/log 仅作归档，不再活动。当前 SCTC 实验目录不使用 `steps_40000/seed_2333` 中间目录，这两项写进训练日志配置头。SCTC 无 Teacher/Cache，因此不使用 `/share_datasets/CD_teacher_cache`。）
+（旧 RDT-CD/SCTC/FA-SCRD/SAM-HSD/DART-R 的 checkpoint/log 仅作归档，不再活动。当前 SAGE-CD 实验目录不使用 `steps_40000/seed_2333` 中间目录，这两项写进训练日志配置头。SAGE-CD 的教师 cache 在 `/share_datasets/CD_teacher_cache/SAGE_DINO3_CD/`。）
 
 `.vscode/sftp.json` 用于手动上传代码，自动上传保持关闭；该配置忽略 `pre-trained_weights/` 和常见权重文件。
 
-## 4. FA-SCRD（已归档）
+## 4. SAGE-CD（当前活动实验）
 
-> **首轮结果与结论（seed 2333，8/16 run 完成，2026-09-22）**：SYSU/CDD 四臂全跑完——C0=82.28/97.79、C1=82.34/97.80、A1=82.01/97.47、M1=81.76/97.79。**A1（固定 DINOv3 教师 relation KD）在 SYSU、CDD 均 −0.33pp**，M1 未能救回（SYSU 更差 −0.58，CDD 仅回基线）。首轮 KD loss 很大（kd≈12–15 vs main≈3.6），`kd_lambda=0.5` 下 KD 压过分割主损失、把学生带偏。**判定：固定教师迁移无效（非单数据集 trick，而是直接负迁移）**；WHU/LEVIR 已停训（只到 C0）。据此归档、不再扩展该 KD 形式，下一步转向「联合 SAM2 教师 / 教师-学生互选互促 / 模块与 KD 形式优化」。
+方向 C 经历「教师/蒸馏（RDT-CD，SYSU-only）→ 机制级校准（SCTC，WHU-only）→ 固定教师 relation KD（FA-SCRD，负迁移）」三次失败后，根因收敛为：**Teacher 监督没有被限制在「Teacher 真正比 Student 可靠且 Student 有容量吸收」的知识子空间**，且 FA-SCRD 的 KD 尺度失衡 + 16×16 relation feature 与增强视图错位。SAGE-CD 据此换掉 relation imitation，第一阶段只做 G0/G1/G2「Safe-DINO」。
 
-方向 C 经历「教师/蒸馏（RDT-CD Run1–3，SYSU-only）→ 机制级校准（SCTC，WHU-only）」两次单数据集 trick 失败后，回到教师方向但改用**固定、独立、任务适配**的 Foundation Teacher，绕开旧动态教师「围绕 student 做 residual + 末层零初始化 + EMA 跟随 → 被学生拉平 → 99% 像素被 hard gate 拒绝」的死区。以下 §4.1–4.6 保留作归档证据。
+> **Run1 结果与结论（seed 2333，6 run 完成，2026-09-22）**：G0/G1/G2 × SYSU/WHU 全跑完——SYSU 82.48/82.72/**82.47**、WHU 92.78/93.77/**94.22**。**G2−G1 = WHU +0.46 / SYSU −0.25** → Safe-DINO 门未过（SYSU 负）。但关键：**KD 机制修对了**——kd loss 从 FA-SCRD 的 12–15 降到 **0.6**（logit standardization 生效），gradient budget 把有效 KD 梯度钳在 ~25% 主损失（`lambda_kd × grad_ratio ≈ 0.25`）。DINO 语义教师仍只帮低变化 WHU（Recall +0.83）、伤高变化 SYSU。据此 Run2 转向：SAM2 结构专家协同 + 教师-学生互促 + 模块/KD 激进优化。
 
 ### 4.1 核心思想
 
-用一个固定、CD 适配的 DINOv3 ViT-B/16 教师（LoRA Q/V + 轻量 change head）离线生成双时相特征 cache；训练 A2Net 时只蒸馏「对称变化关系」，并由 student difficulty × teacher reliability 对局部区域软加权。教师/cache/router/KD 全训练期，推理时拆除。
+DINOv3 语义专家只蒸馏 **full-res 变化 target**（256×256 change logit），不蒸馏 raw Foundation feature relation；KD 走训练期 auxiliary head（CrossKD 式解耦），并做 logit standardization + gradient budget，从机制上防止 KD 压过主损失。第二阶段（G2 过门后）才加入 SAM2 结构专家 + DINO/SAM/Reject 软路由。
 
 ```text
-训练图：T1,T2 → DINOv3 Teacher(+LoRA) → F_T1,F_T2 → C_T=|Norm(F_T1)-Norm(F_T2)|
-        T1,T2 → A2Net Student → SWA → TFM → C_S
-        C_T, C_S → Relation KD（+failure-aware 加权）→ 只更新 student
+训练图：T1,T2 → Student → TFM → c4 → AuxSemanticHead → z_S
+        T1,T2 → DINOv3(离线) → 256×256 change logit z_D（cache）
+        z_S, z_D → logit standardization + soft BCE + gradient budget → 只更新 student
 
-部署图：T1,T2 → LWGANet-L0 → SWA → TFM → Decoder → Change map
+部署图：T1,T2 → LWGANet-L0 → SWA → TFM → Decoder → Change map（2,913,094 参数）
 ```
 
-### 4.2 教师（离线）
+### 4.2 教师（离线，复用 FA-SCRD 教师）
 
-- Backbone：DINOv3 ViT-B/16（frozen，86M），取 mid（block 6）与 deep（block 11）特征，均 [B,768,16,16]。
-- LoRA：r=8，注入 attention 的 Q/V 投影（K 不动）、零初始化，trainable <0.5M。
-- Change head：mid/deep 双时相差 → 轻量卷积 → 256×256 change logit（仅用于可靠性 e_T）。
-- 教师微调 + cache 生成：`models/tools/train_teacher.py`、`models/tools/generate_teacher_cache.py`；cache 存 t1/t2 mid/deep 特征（FP16）+ teacher_change_logit。
+- DINOv3 ViT-B/16（frozen + LoRA Q/V + change head），SYSU 微调一次，产出 full-res change logit。
+- SAGE cache 只存 `dino_change_logit` + `dino_change_prob`（均 [1,256,256]，FP16），**不存 16×16 feature**（修掉 FA-SCRD 的 crop 错位 P0）。
 
-### 4.3 KD 与 router
+### 4.3 KD 与梯度预算
 
-- 关系 KD：`C_T = |Norm(F_T1) − Norm(F_T2)|`，`C_S` = TFM 的 c4（1/16）；逐局部 patch 空间 affinity，`L_rel = KL(A_T ∥ A_S)`，mid/deep 各 λ=1.0。
-- failure-aware 软权重：`d_r=|p_S−y|`（detach）、`a_r=σ((e_S−e_T)/τ_a)`、`w_r=stopgrad(d_r·a_r)`，替代旧 hard gate。
+- 训练期 `AuxSemanticHead`：1×1 Conv(64→1) 于 c4（1/16）→ 上采样 256×256。
+- Logit standardization：对 teacher/student logit 各做逐样本空间 z-score，再做温度 + soft BCE，解耦容量差。
+- Gradient budget：`λ_D = clip(ρ·‖∇_c4 L_main‖ / ‖∇_c4 L_KD‖, 0, λ_max)`，`ρ=0.25`，保证任一 KD 梯度 ≤ 主损失 25%。
 
-### 4.4 实验矩阵（最小消融，seed 2333）
+### 4.4 实验矩阵（第一阶段门，seed 2333）
 
 | ID | 唯一变量 | 目的 |
 |---|---|---|
-| C0 | 无（clean A2Net） | clean anchor |
-| C1 | C0 + joint temporal BN | 归一化/BN 控制 |
-| A1 | C1 + 固定教师 relation KD（均匀权重） | 独立教师是否有效 |
-| M1 | A1 + failure-aware 软加权 | 完整 FA-SCRD |
+| G0 | 无（clean A2Net） | clean anchor |
+| G1 | G0 + joint temporal BN | 归一化/BN 控制 |
+| G2 | G1 + full-res DINO 语义 target + aux head + logit standardization + gradient budget | Safe-DINO 生死门 |
 
 ### 4.5 训练协议（固定）
 
 ```text
 input 256×256 / batch 64 / max_steps 40000 / seed 2333
-student lr 5e-4 / wd 1e-4 / backbone lr mult 1.0 / dice batch
-main loss BCE+Dice（1,1,1,1）
-KD: lambda_KD=0.5, lambda_mid=lambda_deep=1.0, tau=0.07, tau_a=0.5
+student lr 5e-4 / wd 1e-4 / dice batch / main loss BCE+Dice（1,1,1,1）
+KD: temperature=1.0, rho=0.25, lambda_max=1.0
 ```
 
-### 4.6 可证伪假设与失败判据
+### 4.6 门判据
 
-成功：`M1 > C1` 于 SYSU 与 WHU。失败判据：A1 失败=教师迁移无效；A1 成但 M1 败=删 router；只单数据集提升=数据集特化 trick（同 Run3 教师 / SCTC）。
+`G2 − G1 ≥ +0.15 F1` 于 SYSU 与 WHU，且无 Recall/Precision 单边崩塌、`grad_ratio_dino ≤ 0.25`。否则停止 SAGE-CD，不上 SAM2、不做多教师。
 
-（SCTC 已归档，机制细节见 §6.2。）
+（FA-SCRD 已归档，机制与结果见 §6.3。）
 
 ## 5. 模型与部署约束
 
-- 主学生模型是 A2Net-LWGANet-L0；SCTC 是零参数 temporal 操作，属于部署主图，**不是训练辅助、不被 `switch_to_deploy()` 移除**。
+- 主学生模型是 A2Net-LWGANet-L0；教师/cache/aux-head/KD 全是训练期辅助，**不进部署主图、不被 `switch_to_deploy()` 带出**。
 - 部署参数量固定为 `2,913,094`。
-- 256×256 部署 FLOPs 实测约 `2.7676G`（`train.py` 契约 2.7475G ± 0.03G；SCTC 新增的是 element-wise reduction/affine，可忽略）。正式报告需同时给 THOP 实测与 functional-op 手工审计。
-- SCTC 三种模式 `none/symmetric/sctc` 下部署参数量恒等；`mode=none` 是精确恒等路径。
+- 256×256 部署 FLOPs 实测约 `2.7676G`（`train_sage.py` 契约 2.7475G ± 0.03G）。正式报告需同时给 THOP 实测与 functional-op 手工审计。
 - 时间交换对称是硬性质：`max |Model(A,B) − Model(B,A)| < 1e-6`（smoke 强制验证）。
 - `switch_to_deploy()` 为 no-op（返回 self），部署前后主预测最大误差 `< 1e-6`。
-- 无 Teacher map / Foundation prior / Cache 注入主特征路径；S0/S1/S2 都不用 SAM/OV Cache。
-- 训练、验证、测试、部署使用同一 SCTC 图。
-- checkpoint 仅支持 **SCTC format v4**；不得静默恢复旧 Run3 format-v3 的 Teacher checkpoint 到 SCTC 实验（`validate_resume` 会拒绝）。
-- SCTC 无 state_dict 参数，旧 B0 权重理论上可无新增 missing/unexpected 加载，但实验模式必须写入 checkpoint/log，恢复时核验 `temporal_calibration_mode`，禁止 B0 与 SCTC checkpoint 静默互换实验语义。
+- 无 Teacher map / Foundation prior / Cache 注入主特征路径；G0/G1/G2 都不改部署 forward。
+- 训练、验证、测试、部署使用同一 A2Net 部署图。
+- checkpoint 仅支持 **SAGE-CD format v6**；不得静默恢复旧 FA-SCRD format-v5 / SCTC format-v4 checkpoint。
+- 教师/cache/aux-head 不进部署 checkpoint；部署导出只保留 `student.state_dict()`。
 
 当前核心代码：
 
@@ -171,24 +167,23 @@ models/__init__.py
 models/a2net.py
 models/backbone/lwganet.py
 models/decoder/a2net_decoder.py
-models/decoder/temporal_calibration.py      # SCTC 遗留（已归档，FA-SCRD 恒用 none）
+models/decoder/temporal_calibration.py      # SCTC 遗留（已归档，SAGE-CD 恒用 none）
 models/datasets/cd_dataset.py
 models/datasets/transforms.py
 models/losses/combined_loss.py
-models/distill/fa_scrd_teacher.py
-models/distill/relation_kd.py
-models/distill/failure_router.py
+models/distill/fa_scrd_teacher.py           # DINOv3 教师（SAGE-CD 复用）
 models/distill/cache_dataset.py
+models/distill/sage_heads.py
+models/distill/sage_kd.py
 models/thirdparty/dinov3/                   # DINOv3 ViT-B/16 最小抽取
-models/scripts/train.py
-models/tools/train_teacher.py
-models/tools/generate_teacher_cache.py
-models/tools/smoke_fa_scrd.py
+models/scripts/train_sage.py
+models/tools/generate_sage_cache.py
+models/tools/smoke_sage.py
 models/utils/metrics.py
 models/utils/scheduler.py
 ```
 
-`models/thirdparty/dinov3/` 是从 Meta DINOv3 抽取的最小 teacher backbone（只读参考，不改）。`models/tools/smoke_temporal_calibration.py` 随 SCTC 归档不再使用。教师/cache/router/KD 模块（`models/distill/`）只训练期使用、不进部署图；`models/scripts/train.py` 中 `implementation_version=fa_scrd_v1`、`checkpoint format_version=5`。
+`models/thirdparty/dinov3/` 是从 Meta DINOv3 抽取的最小 teacher backbone（只读参考，不改）。`models/distill/relation_kd.py`、`failure_router.py`（FA-SCRD）、`models/tools/smoke_temporal_calibration.py`（SCTC）、`models/scripts/train.py`（FA-SCRD）随旧方向归档不再使用。教师/cache/aux-head/KD 模块（`models/distill/`）只训练期使用、不进部署图；`models/scripts/train_sage.py` 中 `implementation_version=sage_cd_v1`、`checkpoint format_version=6`。
 
 ## 6. 历史实验归档（不再活动）
 
@@ -217,7 +212,7 @@ Run3 首轮（seed 2333，同协议 40000 steps / batch 64）正式 test F1（%�
 
 ### 6.3 FA-SCRD（方向 C 第三次尝试）
 
-`train_scripts/FA-SCRD/Run1/`：固定 DINOv3 ViT-B/16 教师（LoRA Q/V + change head）+ 对称变化关系 KD + failure-aware 软加权。结果 A1−C1 = SYSU −0.33 / CDD −0.33（教师迁移为负），M1 未救回 → 归档为「固定教师迁移无效」。机制细节见 §4。
+`train_scripts/FA-SCRD/Run1/`：固定 DINOv3 ViT-B/16 教师（LoRA Q/V + change head）+ 对称变化关系 KD + failure-aware 软加权。结果 A1−C1 = SYSU −0.33 / CDD −0.33（教师迁移为负），M1 未救回 → 归档为「固定教师迁移无效」。机制细节见 `docs/temporary/FA-SCRD_Implementation_Specification.md`。
 
 ### 6.4 其它历史
 
@@ -228,18 +223,18 @@ Run3 首轮（seed 2333，同协议 40000 steps / batch 64）正式 test F1（%�
 推荐顺序：
 
 1. 激活 `lsrep` 并进入项目目录；
-2. 跑 `python -m models.tools.smoke_fa_scrd --device cuda --gpu_id 0 --weight_path <dinov3_vitb16.pth>`，验证学生参数 2,913,094、swap/deploy 不变性、relation KD / failure router / teacher 特征提取；
-3. 准备教师：`bash train_scripts/FA-SCRD/Run1/prepare_teacher_cache.sh`（教师微调 + 生成 SYSU/WHU cache）；
-4. 启动队列：`tmux new -s fascrd1_gpu0 -d 'bash train_scripts/FA-SCRD/Run1/run_gpu0_sysu_whu.sh'`；
+2. 跑 `python -m models.tools.smoke_sage --device cuda --gpu_id 0`，验证学生参数 2,913,094、swap/deploy 不变性、aux head / semantic KD / gradient budget；
+3. 准备教师 cache：`bash train_scripts/SAGE-CD/Run1/prepare_sage_cache.sh`（复用 FA-SCRD 教师，生成 SYSU/WHU full-res DINO 语义 cache）；
+4. 启动队列（SYSU/WHU 并行）：`tmux new -s sage1_gpu0_sysu -d 'bash train_scripts/SAGE-CD/Run1/run_gpu0_sysu.sh'` + `sage1_gpu0_whu`（`run_gpu0_whu.sh`）；
 5. 从 `train_log.txt` 收集正式 test 指标。
 
 每个实验目录使用：
 
-- `last_checkpoint.pth`：FA-SCRD format-v5 精确恢复；
+- `last_checkpoint.pth`：SAGE-CD format-v6 精确恢复；
 - `best_model_F1=*.pth`：验证集选择出的最佳模型；
 - `train_log.txt`：训练、恢复和最终测试记录。
 
-FA-SCRD v5 checkpoint 至少包含：`format_version=5`、`model`、`optimizer`、`epoch`、`global_step`、`best_val_f1`、`args`、`rng`。教师/cache/KD 不进部署 checkpoint。
+SAGE-CD v6 checkpoint 至少包含：`format_version=6`、`model`、`aux_head`、`optimizer`、`aux_optimizer`、`epoch`、`global_step`、`best_val_f1`、`args`、`rng`。教师/cache/aux-head 不进部署 checkpoint。
 
 只有 `train_log.txt` 中最后一个完整：
 
@@ -262,14 +257,14 @@ FA-SCRD v5 checkpoint 至少包含：`format_version=5`、`model`、`optimizer`�
 
 ## 8. Agent 工作规则
 
-1. 修改前读取当前代码、SCTC Run1 README 与实际日志，不依赖旧项目记忆；若文档与代码冲突，以当前代码/shell 为准。
+1. 修改前读取当前代码、SAGE-CD Run1 README 与实际日志，不依赖旧项目记忆；若文档与代码冲突，以当前代码/shell 为准。
 2. 方法创新优先，但每项主张必须对应明确机制、与已有工作的实质区别、可证伪假设、最小消融和失败判据。
-3. 保持部署主图、SCTC 零参数/交换对称、`switch_to_deploy()` no-op、时间交换一致性 `<1e-6` 等约束不变。
-4. 不得重新引入旧 Direction-C、SCGR、Run1 双教师竞争、SAM transport 或历史 router，除非用户明确要求重新开启该方向（FA-SCRD 是当前唯一活动的教师方向）。
+3. 保持部署主图、时间交换一致性 `<1e-6`、`switch_to_deploy()` no-op、部署参数 2,913,094 / FLOPs ~2.77G 等约束不变。
+4. 不得重新引入旧 Direction-C、SCGR、Run1 双教师竞争、SAM transport 或历史 router，除非用户明确要求重新开启该方向（SAGE-CD 是当前唯一活动的教师方向）。
 5. 修改 shell 后执行 `bash -n` 语法检查并确认 LF 换行（不是 CRLF）；修改后重新检查 shell 中 dataset/pretrained/checkpoint/log 路径。
-6. 修改模型后至少跑 synthetic smoke（`smoke_fa_scrd.py`）；涉及真实数据/Cache 时再跑短 dry run。
-7. 修改 checkpoint/resume 逻辑时保持 FA-SCRD format-v5、optimizer、model state、训练进度和 RNG 的精确恢复能力。
-8. `models/scripts/train.py` 中旧 best checkpoint 的主动删除/替换策略是当前有意保留的行为；除非用户明确要求，不要擅自移除。
+6. 修改模型后至少跑 synthetic smoke（`smoke_sage.py`）；涉及真实数据/Cache 时再跑短 dry run。
+7. 修改 checkpoint/resume 逻辑时保持 SAGE-CD format-v6、optimizer、aux optimizer、model state、训练进度和 RNG 的精确恢复能力。
+8. `models/scripts/train_sage.py` 中旧 best checkpoint 的主动删除/替换策略是当前有意保留的行为；除非用户明确要求，不要擅自移除。
 9. 不恢复已删除的历史 routing 文件或任何 `__pycache__/*.pyc`；`models/thirdparty/dinov3/` 只读参考、不改。
 10. 不在 `cd_base` 中安装项目专属依赖，不擅自更换 PyTorch/CUDA 栈。
 11. 任何删除数据、checkpoint 或预训练权重的操作都需要用户明确授权和精确路径校验。
