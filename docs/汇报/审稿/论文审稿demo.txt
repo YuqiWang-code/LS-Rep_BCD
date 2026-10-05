@@ -1,0 +1,134 @@
+论文审稿Demo
+（1）第一段：一句话概括文章工作。【客观描述，不要评价，不要加形容词/副词。】
+However, The main issues are as follows:  
+（2）后面comments：
+●从创新性、方法动机、技术原理、实现细节、实验设置、实验结果与分析、单词语法、排版格式等角度；
+●意见要具体、明确；
+●意见4~6条，最多不超过6条；
+●每条意见不要覆盖面太广、不要复合问题，聚焦一个具体问题点；
+●不要使用公式编辑器，使用符号或者字母来表达变量、公式；
+●如果使用大模型，意见要结合文章重新整理，去掉AI味，核对相关内容，转化成人类语言。（不要使用：冒号、括号、破折号、长句、for instance/for example等AI要素）
+
+
+
+大修（Major/Reject and Resubmit）版
+Demo1
+This paper addresses the self-labeling bias issue in parametric classifiers for the Generalized Category Discovery (GCD) task by proposing a Decoupled Self-labeling (DSL) method. However, there are still some problems in the paper.
+1. The paper mentions that the pseudo-classification head (h^P) is only used for feature learning of unlabeled data and does not affect the predictive head (h^C), but it does not clarify whether the parameters of the two are shared or optimized independently. If they are completely independent, there may be a risk of inconsistent feature spaces; if parameters are shared, it is necessary to explain how to prevent pseudo-label bias from being transmitted to the predictive head.  
+2. In the GCD task, novel categories have no real labels during training, yet the LER formula (10) uses "real label encoding (e_k)". This setting is only applicable to old categories. It is necessary to clarify whether LER is calculated only for old categories or how label encoding estimation for novel categories is handled.  
+3. Recent GCD methods such as OpenCDA or D2GCD are not compared, especially in terms of incremental category discovery capabilities in open-world scenarios.
+4. There are terminology inconsistencies and formula errors. "self-labeling" and "self-training" are mixed: The abstract states that "self-labeling introduces training biases", but the methodology section refers to pseudo-label generation as "self-training" (e.g., "self-training on unlabeled data"). The terminology definitions need to be unified.
+The relevant work can be further improved, and adding the following work can enhance the completeness and comprehensiveness of the research field: Position-aware Relation Learning for RGB-thermal Salient Object Detection, M2FNet: Mask-guided Multi-level Fusion for RGB-T Pedestrian Detection, Remote Sensing Image Dehazing: A Systematic Review of Progress, Challenges, and Prospects
+
+
+Demo2
+This paper proposes a dual-branch architecture consisting of a denoising network and a target search network, and collaboratively solves the problem of underwater image turbidity and noise and foreground-background similarity through a feature consistency mutual learning mechanism. After revision, the paper's quality has improved, but I still have the following concerns:
+1) Although the Mutual Learning section is lengthy, the core idea remains feature alignment and output distribution alignment, falling under the category of DML/MMD-KL distillation, and not a significant breakthrough. To enhance the credibility of the contribution, I suggest a more rigorous analysis of the performance improvement brought by mutual learning: how much performance difference would there be if it were replaced with simple KL distillation?
+2) The graph convolution design of the DSM module lacks rigorous motivational support. The authors use GCN to construct the adjacency matrix A (Eq.2) and process it with temperature scaling, but the text does not explain why underwater noise and salient foreground are separable in graph space. This needs to be supported by visualization or theoretical explanation.
+3) The Ablation Study has presentation flaws. In Table IV, the maxF value of "0.9620" for the EMLoss-only entry of DenoisedNet is significantly anomalous (other results are around 0.92), requiring investigation into potential formatting or experimental errors.
+4) While the Failure case analysis (Fig. 7) is presented, it lacks in-depth discussion of the underlying causes. For example: Does DSM incorrectly filter details of small objects? Is the pseudo-boundary unreliable in small object regions? More visualizations, such as attention maps and feature activation, are recommended.
+
+
+Demo3
+This paper presents DoG-SLAM, an RGB-D SLAM system based on 3D Gaussian Splatting for dynamic environments, which improves camera localization and map reconstruction performance through adaptive weight tracking and a covisibility-complement keyframe strategy. However, there are still many problems in the manuscript.
+1)Although the paper uses semantic segmentation (Oneformer) in motion masking, it does not fully leverage semantic priors such as object categories to optimize tracking and mapping. It is recommended to explore deeper integration of semantic information into adaptive weights or keyframe selection to enhance the algorithm’s utilization efficiency of prior knowledge.
+2)In the 3DGS mapping section, while the Gaussian point insertion and pruning strategies improve reconstruction quality, the paper does not explain how to balance computational efficiency and reconstruction accuracy. Please provide the theoretical basis for the adaptive adjustment strategy.
+3)The paper mentions that motion masks rely on the fusion of photometric semantic segmentation and geometric depth information, but it does not demonstrate segmentation results in extreme dynamic scenarios such as textureless dynamic objects or interactions of multiple moving targets. Could you supplement experimental analysis and theoretical explanations for low-texture dynamic targets or high-speed moving objects?
+4) The paper would benefit from citing and discussing recent works, such as deformation-resilient multigranularity learning for unaligned rgb-t semantic segmentation, and position-aware relation learning for rgb-thermal salient object detection. incorporating such perspectives would further strengthen the connection between the proposed method and the broader literature.
+
+
+DEMO
+This paper proposes a unified framework called DTLP-Net. However, there are still many problems in the manuscript.
+1) Some key operations in Section 3 of the paper are not clearly described.  The specific parameter settings of Gumbel-Softmax in formula (4), the noise addition method, and its impact on pseudo-label quality are not explained.
+2) Currently, only ablation experiments on the masking ratio are provided, failing to fully evaluate the independent contributions of core components such as the dual-teacher mechanism, label propagation module, and global-local consistency. It is suggested to add ablation experiments for each module, for example:
+Removing either of the teacher models in the dual-teacher mechanism;
+Removing the label propagation module;
+Evaluating the independent contributions of CutMix and masking modeling.
+This will more strongly demonstrate the necessity and effectiveness of each module.
+3) Some of the comparison methods were published earlier. It is suggested to include comparison results with the latest SOTA methods from recent years (2024-2025) to demonstrate the competitiveness of the proposed method.
+4) In addition, the paper mainly verifies the method on 3D medical image segmentation tasks, but does not discuss its applicability to 2D images or other modalities (ultrasound and pathological images). It is suggested to briefly discuss the generalization potential of the method in the discussion or future work section to enhance the broad value of the paper.
+
+Demo4
+Author propose a Multi-Attention Guided Hierarchical Fusion Network (MGHFNet), for robust RGB-T semantic segmentation in complex urban environments. However, I still have the following concerns:
+- DLTP is similar to a combination of CBAM + gating + shallow fusion, but claims originality without sufficient comparison.
+- SCF uses depthwise separable convolutions (DWConv) + self-attention (SA) + skip connections, but lacks clear theoretical justification for why semantic guidance is the "driving" factor for cross-modal fusion. Explain what unique new capabilities it achieves.
+- MHRD is similar to previous multi-scale decoders (e.g., LASNet, MMSMCNet, MCNet). Explain the differences.
+- Although four datasets are evaluated, key experiments are missing:
+Cross-dataset generalization （Train on MFNet → test on SemanticRT / train on SemanticRT → test on SUS ）to verify robustness under distribution shift.
+The relevant work can be further improved. The following works can be considered to enhance the completeness of the current research status: 10.1109/TNNLS.2025.3585105, 10.1109/LGRS.2022.3179721.
+- The related work is incomplete; the following tasks may be considered: 10.1109/TNNLS.2025.3585105, 10.1109/LGRS.2022.3179721.
+
+
+
+Demo5
+This paper proposes a monocular depth estimation framework IID-RDepth based on diffusion models, which solves the deviation problem in feature restoration through the InvT-IndDiffusion module with invertible transform, and optimizes details using the AV-LFE (Auxiliary Viewpoint-based Low-level Feature Enhancement) module, improving the performance of depth estimation.
+The main issues are as follows:  
+1. The paper relies on the bi-Lipschitz condition to align the optimization directions of the feature space and depth prediction space through invertible transforms. However, the expressive power of invertible neural networks (such as affine coupling layers) is generally weaker than that of traditional CNNs or Transformers. Does this lead to insufficient feature restoration capability in complex scenes? The experiments only compare Transformer, Conv, and Inv decoders—can they be compared with more efficient invertible structures (e.g., Glow, RealNVP)?
+2. There is a lack of visual verification for the "feature deviation" mechanism of InvT-IndDiffusion (e.g., the distribution changes of the feature space under different diffusion steps, visualization of the assumed ground-truth feature (F_gt)).  
+3. Can the practical constraints of the bi-Lipschitz condition be analyzed theoretically and validated through ablation experiments in more depth?
+ 
+
+Demo6
+This manuscript addresses the integration of the infrared modality into an RGB-based framework. The authors adopt a "Collect-then-Select" strategy in DETR-based RGB-IR detectors. In the Collect phase, they propose a differential compensation
+(DDC) and consistency constraint (S3C) module to ensure consistency across the two modalities. In the Select phase, they incorporate salience-CIoU to enhance query selection and a geometric relation encoding for the transformer decoder.
+The experimental results show the effectiveness of the proposed CS-MDETR. I have the following specific concerns:
+
+(1) The difference between "Collect-Then-Select" (CTS) and "Collect-While-Select" (CWS) is not clearly explained in the Introduction. In Fig. 1, both CWS (b) and CTS (c) appear to follow a similar architecture: modality-specific encoding, followed by fusion, and then query selection and decoding. In Fig. 1 (b), the query selection is also performed after the multimodal features have been collected. The authors should clarify the fundamental difference between CTS and CWS.
+
+(2) From the methodology, the proposed DDC, S3C, SCQS, and GRE seem to work in-place, without changing the model-level structure or the overall pipeline. For instance, the "Collect" phase in Fig. 2 adopts a similar structure to Fig. 1 in reference [20], while the "Select" phase basically follows an optimized DETR selection and decoding process. Therefore, it is confusing why CS-MDETR belongs to CTS while other DETR methods are considered CWS.
+
+(3) The presentation needs to be enhanced and carefully checked for consistency and rigor. For example:
+   a. On page 2 (lines 15-18), the authors claim CNRI adopts a strong feature part but a simple head, which is different from DTIR. However, this is also the common paradigm of DETR: a strong transformer body for feature enhancement and a simple 3-layer MLP or a Linear layer as the detection head.
+   b. On page 3 (lines 6-9), the authors state "GRE is embedded in adjacent decoder layers to jointly model inter- and intra-layer geometric relations," but according to Section III-D, GRE appears to only model the inter-layer geometric relation. The intra-layer relation is modeled by self-attention and not geometric.
+   c. The introduction to Section III-E (Loss Function) is somewhat verbose. Lcc, Lpa, and Lmir are basically common loss functions for masks, detection, and denoising used in DETR-based methods like Mask-DINO and Mask2Former. The only difference appears to be the CIoU-based VFL. Therefore, introducing the motivation behind these well-known losses is unnecessary.
+
+(4) Some related DETR-based works are not included in comparison. For instance, S3C constructs a ground truth mask by setting the target region to 1 and others to 0, which is similar to Focus-DETR and Salience-DETR. In addition, GRE is motivated by Relation-DETR. The authors should include these methods for comparison.
+
+(5) Some claims need further verification. DDC and S3C work by improving the consistency between the RGB and infrared modality features, but there are no quantitative or qualitative results to support this consistency improvement.
+
+(6) In Section III-B, it is unclear how enforcing Frc to be a vector of all ones enhances the similarity between multi-scale features and the predicted masks. Instead, this operation raises concerns about feature degeneration. To force the final sigmoid output towards 1, the model can learn a trivial solution by training the convolutional layer before the sigmoid to output a large constant value (e.g., using near-zero weights and a large bias). In this case, information from the input features would be ignored, but the model could still easily achieve an all-1 Frc. The authors should provide an analysis of this potential risk.
+
+(7) CS-MDETR adopts dual ResNet-50 backbones to extract features from the RGB and infrared modalities, respectively. In addition to performance improvement, this also leads to an increase in computational cost. The authors should include a comparison of FLOPs and inference efficiency to better illustrate the good trade-off of CS-MDETR.
+
+
+Demo7
+This paper proposed a multispectral detection Transformer with collaborative aggregation and progressive refinement. I have the following comments.
+1. Many of the introduced modules, e.g., DDC, S3C, SCQS, GRE, resemble existing designs in multimodal fusion and DETR variants, e.g., deformable attention, query selection with priors, geometric encodings. How do these differ fundamentally from prior methods, especially considering many DETR variants, including GM-DETR, MS-DETR, Relation-DETR, etc.
+2. The proposed Collect-then-Select (CTS) strategy seems to an incremental rearrangement of existing Collect-while-Select (CWS) approaches. Please elaborate and justify the novelty in a solid scientific manner, along with comparison to prior works and current state-of-the-art.
+3. It is not evident which part of DDC, S3C, SCQS, GRE contributes most to performance. Ablation studies can be improved by quantifying individual vs. synergistic effects.
+4. Can you explain why does separating Collect and Select reduce interference more effectively than joint optimization? Is there a formal proof, convergence analysis, or information-theoretic justification?
+5. The contributions section is somewhat vague. For example, "mitigating modality discrepancies" and "improving interpretability" are general claims.
+6. The paper only evaluates on KAIST, LLVIP, and FLIR which are relatively small-scale. Verification on larger RGB-T benchmarks can better evaluate the generalization of the proposed model.
+7. Comparisons cover many CNN-based detectors, but DETR-based baselines are limited. Can you add more DETR-based models with SOTA performance?
+8. Considering the model introduces multiple heavy modules, What is the inference speed vs. baseline models. This is important for the practical application.
+9. How sensitive is the model to hyperparameters, e.g., the number of queries, loss weights, etc.
+
+
+
+拒稿（Reject）
+Demo1
+This paper proposes SELF-DRAW, a self-degradation-aware unified architecture for unpaired multi-weather image restoration. However, the manuscript suffers from several critical issues. The claimed innovations (WaDaNet and CAG) are essentially incremental extensions of existing CycleGAN-based attention frameworks, lacking theoretical novelty or rigorous justification. The notion of “self-degradation awareness” is only demonstrated empirically through heuristic attention blocks without any analysis of information gain or representation disentanglement, resulting in weak interpretability. The experimental validation is limited and unconvincing: the so-called unified restoration is only tested on three simple weather types (rain, haze, snow), with marginal performance gaps (e.g., PSNR differences <0.3 dB), and no evidence of cross-domain generalization or compound-weather robustness. Moreover, the comparisons omit many recent transformer- and diffusion-based methods, which undermines the fairness and relevance of the evaluation. The writing is lengthy and repetitive, with redundant discussions of external vs. self-guided approaches and overlapping figure descriptions. Overall, while the work is competently implemented, it lacks sufficient originality, theoretical depth, and convincing experimental evidence.
+
+
+Demo2
+The paper presents a framework, SELF-DRAW, for unpaired adverse weather image restoration, leveraging a unified architecture with degradation-aware attention mechanisms. The work is well-motivated, addressing key challenges in multi-weather generalization and self-guided degradation estimation. The experimental results are comprehensive, demonstrating superior performance across diverse datasets. However, several technical and methodological aspects warrant clarification and further exploration.
+1. The paper claims WaDaNet extracts "weather-agnostic" degradation features. However, Fig. 5 shows activation maps for rain, snow, and haze, but how does WaDaNet handle mixed or transitional weather conditions (e.g., rain with fog)?  Include ablation studies on synthetic mixed-weather datasets to validate that feature adaptability is needed.
+2. Eq. (3)–(4) describes CAGs’ feature fusion, but the role of the temperature parameter τ and scaling factor γ is unclear. How are these parameters optimized?  
+3. The paper claims WaDaNet provides "weather-agnostic" degradation features, but it is unclear how the model distinguishes between different degradation types (e.g., rain vs. haze) without explicit supervision.  
+4. The paper combines multiple losses (adversarial, cycle-consistency, contrastive), but it is unclear how they interact during training.  
+5. Test on a held-out real-world dataset to assess whether generalization is needed.  
+6. Lack of comparison with state-of-the-art methods.
+
+
+接收（Accept）
+The authors have improved the paper, and I have no further revision suggestions.
+
+The authors have well addressed the reviewers' concerns in my point of view, and the paper is somewhat ready for acceptance.
+
+The authors have adequately addressed my concerns, and I recommend acceptance.
+
+The authors have addressed my concerns well, and the manuscript is publishable.
+
+
+
+

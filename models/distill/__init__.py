@@ -1,15 +1,28 @@
-"""FA-SCRD distillation modules (training-only, removed at deploy time).
+"""CATA-CD distillation modules (training-only; never part of the deploy graph)."""
 
-Contains the fixed DINOv3 teacher, the symmetric change-relation KD, the
-failure-aware soft router, and the teacher-cache dataset.
-"""
-
-from .fa_scrd_teacher import FASCRDTeacher
-from .failure_router import compute_failure_weight
-from .relation_kd import symmetric_relation_kd
+from .cache_v2 import CACHE_CHANNELS, CACHE_SCHEMA_VERSION, TeacherCacheReaderV2, apply_cache_state
+from .kd import ChangeEvidenceHead, dense_change_kd, gradient_budget_lambda
+from .teacher_package import (
+    TEACHER_REGISTRY,
+    WAVE_A,
+    WAVE_B,
+    DenseChangeTeacherPackage,
+    build_teacher_package,
+    normalize_rgb,
+)
 
 __all__ = [
-    "FASCRDTeacher",
-    "compute_failure_weight",
-    "symmetric_relation_kd",
+    "CACHE_CHANNELS",
+    "CACHE_SCHEMA_VERSION",
+    "TeacherCacheReaderV2",
+    "apply_cache_state",
+    "ChangeEvidenceHead",
+    "dense_change_kd",
+    "gradient_budget_lambda",
+    "TEACHER_REGISTRY",
+    "WAVE_A",
+    "WAVE_B",
+    "DenseChangeTeacherPackage",
+    "build_teacher_package",
+    "normalize_rgb",
 ]

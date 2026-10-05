@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Weights / models (never commit)
+pre-trained_weights/
+saved_models/
+*.pth
+*.pt
+*.safetensors
+*.ckpt
+work_dirs/
+
+# Training outputs / logs / cache
+outputs/
+*.log
+checkpoints/
+
+# Datasets
+share_datasets/
+*.npy
+
+# IDE / OS
+.vscode/
+.idea/
+.claude/
+.DS_Store
+Thumbs.db
