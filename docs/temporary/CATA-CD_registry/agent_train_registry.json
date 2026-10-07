@@ -1,0 +1,308 @@
+{
+  "sam2": {
+    "SYSU": {
+      "experiment_id": "TV-SAM",
+      "has_val": true,
+      "val_f1": 0.812413,
+      "val_iou": 0.684087,
+      "val_delta_f1": -0.0031279999999999086,
+      "val_delta_iou": -0.0044480000000000075
+    },
+    "WHU": {
+      "experiment_id": "TV-SAM",
+      "has_val": true,
+      "val_f1": 0.944861,
+      "val_iou": 0.895485,
+      "val_delta_f1": -0.003370000000000095,
+      "val_delta_iou": -0.006072999999999995
+    },
+    "CDD": {
+      "experiment_id": "TV-SAM",
+      "has_val": true,
+      "val_f1": 0.977294,
+      "val_iou": 0.955597,
+      "val_delta_f1": -9.99999999995449e-06,
+      "val_delta_iou": -1.8999999999991246e-05
+    },
+    "LEVIR": {
+      "experiment_id": "TV-SAM",
+      "has_val": true,
+      "val_f1": 0.914065,
+      "val_iou": 0.84173,
+      "val_delta_f1": -0.0008930000000000327,
+      "val_delta_iou": -0.0015169999999999906
+    }
+  },
+  "dinov2": {
+    "SYSU": {
+      "experiment_id": "TV-D2",
+      "has_val": true,
+      "val_f1": 0.811646,
+      "val_iou": 0.683,
+      "val_delta_f1": -0.003894999999999982,
+      "val_delta_iou": -0.005534999999999957
+    },
+    "WHU": {
+      "experiment_id": "TV-D2",
+      "has_val": true,
+      "val_f1": 0.944007,
+      "val_iou": 0.893952,
+      "val_delta_f1": -0.0042240000000000055,
+      "val_delta_iou": -0.007606000000000002
+    },
+    "CDD": {
+      "experiment_id": "TV-D2",
+      "has_val": true,
+      "val_f1": 0.977152,
+      "val_iou": 0.955324,
+      "val_delta_f1": -0.00015199999999992997,
+      "val_delta_iou": -0.00029200000000007
+    },
+    "LEVIR": {
+      "experiment_id": "TV-D2",
+      "has_val": true,
+      "val_f1": 0.914032,
+      "val_iou": 0.841674,
+      "val_delta_f1": -0.0009260000000000934,
+      "val_delta_iou": -0.0015729999999999356
+    }
+  },
+  "dinov3_lvd": {
+    "SYSU": {
+      "experiment_id": "TV-D3N",
+      "has_val": true,
+      "val_f1": 0.814596,
+      "val_iou": 0.687188,
+      "val_delta_f1": -0.0009449999999999736,
+      "val_delta_iou": -0.001346999999999987
+    },
+    "WHU": {
+      "experiment_id": "TV-D3N",
+      "has_val": true,
+      "val_f1": 0.945136,
+      "val_iou": 0.895978,
+      "val_delta_f1": -0.00309500000000007,
+      "val_delta_iou": -0.005579999999999918
+    },
+    "CDD": {
+      "experiment_id": "TV-D3N",
+      "has_val": true,
+      "val_f1": 0.97683,
+      "val_iou": 0.95471,
+      "val_delta_f1": -0.00047399999999997444,
+      "val_delta_iou": -0.0009060000000000734
+    },
+    "LEVIR": {
+      "experiment_id": "TV-D3N",
+      "has_val": true,
+      "val_f1": 0.916282,
+      "val_iou": 0.845499,
+      "val_delta_f1": 0.0013239999999999919,
+      "val_delta_iou": 0.0022520000000000318
+    }
+  },
+  "dinov3_sat": {
+    "SYSU": {
+      "experiment_id": "TV-D3S",
+      "has_val": true,
+      "val_f1": 0.812549,
+      "val_iou": 0.68428,
+      "val_delta_f1": -0.0029919999999999947,
+      "val_delta_iou": -0.004255000000000009
+    },
+    "WHU": {
+      "experiment_id": "TV-D3S",
+      "has_val": true,
+      "val_f1": 0.94622,
+      "val_iou": 0.89793,
+      "val_delta_f1": -0.002011000000000096,
+      "val_delta_iou": -0.0036279999999999646
+    },
+    "CDD": {
+      "experiment_id": "TV-D3S",
+      "has_val": true,
+      "val_f1": 0.976948,
+      "val_iou": 0.954936,
+      "val_delta_f1": -0.00035599999999991194,
+      "val_delta_iou": -0.0006800000000000139
+    },
+    "LEVIR": {
+      "experiment_id": "TV-D3S",
+      "has_val": true,
+      "val_f1": 0.914708,
+      "val_iou": 0.842822,
+      "val_delta_f1": -0.0002500000000000835,
+      "val_delta_iou": -0.0004250000000000087
+    }
+  },
+  "remoteclip": {
+    "SYSU": {
+      "experiment_id": "TV-RCLIP",
+      "has_val": true,
+      "val_f1": 0.80981,
+      "val_iou": 0.680404,
+      "val_delta_f1": -0.005730999999999931,
+      "val_delta_iou": -0.008131
+    },
+    "WHU": {
+      "experiment_id": "TV-RCLIP",
+      "has_val": true,
+      "val_f1": 0.948187,
+      "val_iou": 0.901479,
+      "val_delta_f1": -4.4000000000044004e-05,
+      "val_delta_iou": -7.899999999994023e-05
+    },
+    "CDD": {
+      "experiment_id": "TV-RCLIP",
+      "has_val": true,
+      "val_f1": 0.9771,
+      "val_iou": 0.955226,
+      "val_delta_f1": -0.00020399999999998197,
+      "val_delta_iou": -0.00039000000000000146
+    },
+    "LEVIR": {
+      "experiment_id": "TV-RCLIP",
+      "has_val": true,
+      "val_f1": 0.915023,
+      "val_iou": 0.843357,
+      "val_delta_f1": 6.499999999998174e-05,
+      "val_delta_iou": 0.0001100000000000545
+    }
+  },
+  "mars": {
+    "SYSU": {
+      "experiment_id": "TV-MARS",
+      "has_val": true,
+      "val_f1": 0.814317,
+      "val_iou": 0.686791,
+      "val_delta_f1": -0.0012240000000000029,
+      "val_delta_iou": -0.0017439999999999678
+    },
+    "WHU": {
+      "experiment_id": "TV-MARS",
+      "has_val": true,
+      "val_f1": 0.946726,
+      "val_iou": 0.898841,
+      "val_delta_f1": -0.0015050000000000896,
+      "val_delta_iou": -0.0027169999999999694
+    },
+    "CDD": {
+      "experiment_id": "TV-MARS",
+      "has_val": true,
+      "val_f1": 0.97712,
+      "val_iou": 0.955264,
+      "val_delta_f1": -0.00018399999999996197,
+      "val_delta_iou": -0.00035200000000001896
+    },
+    "LEVIR": {
+      "experiment_id": "TV-MARS",
+      "has_val": true,
+      "val_f1": 0.915914,
+      "val_iou": 0.844872,
+      "val_delta_f1": 0.0009559999999999569,
+      "val_delta_iou": 0.0016249999999999876
+    }
+  },
+  "anysat": {
+    "SYSU": {
+      "experiment_id": "TV-ANYSAT",
+      "has_val": true,
+      "val_f1": 0.804776,
+      "val_iou": 0.673327,
+      "val_delta_f1": -0.010764999999999914,
+      "val_delta_iou": -0.015208
+    },
+    "WHU": {
+      "experiment_id": "TV-ANYSAT",
+      "has_val": true,
+      "val_f1": 0.94939,
+      "val_iou": 0.903655,
+      "val_delta_f1": 0.00115899999999991,
+      "val_delta_iou": 0.0020970000000000155
+    },
+    "CDD": {
+      "experiment_id": "TV-ANYSAT",
+      "has_val": true,
+      "val_f1": 0.977121,
+      "val_iou": 0.955266,
+      "val_delta_f1": -0.00018299999999993322,
+      "val_delta_iou": -0.0003500000000000725
+    },
+    "LEVIR": {
+      "experiment_id": "TV-ANYSAT",
+      "has_val": true,
+      "val_f1": 0.916418,
+      "val_iou": 0.84573,
+      "val_delta_f1": 0.0014599999999999058,
+      "val_delta_iou": 0.002483000000000013
+    }
+  },
+  "universat": {
+    "SYSU": {
+      "experiment_id": "TV-UNISAT",
+      "has_val": true,
+      "val_f1": 0.811179,
+      "val_iou": 0.682339,
+      "val_delta_f1": -0.004361999999999977,
+      "val_delta_iou": -0.006195999999999979
+    },
+    "WHU": {
+      "experiment_id": "TV-UNISAT",
+      "has_val": true,
+      "val_f1": 0.943961,
+      "val_iou": 0.89387,
+      "val_delta_f1": -0.004269999999999996,
+      "val_delta_iou": -0.007687999999999917
+    },
+    "CDD": {
+      "experiment_id": "TV-UNISAT",
+      "has_val": true,
+      "val_f1": 0.977256,
+      "val_iou": 0.955524,
+      "val_delta_f1": -4.799999999993698e-05,
+      "val_delta_iou": -9.199999999998099e-05
+    },
+    "LEVIR": {
+      "experiment_id": "TV-UNISAT",
+      "has_val": true,
+      "val_f1": 0.913202,
+      "val_iou": 0.840268,
+      "val_delta_f1": -0.0017560000000000908,
+      "val_delta_iou": -0.002978999999999954
+    }
+  },
+  "radio": {
+    "SYSU": {
+      "experiment_id": "TV-RADIO",
+      "has_val": true,
+      "val_f1": 0.813126,
+      "val_iou": 0.685099,
+      "val_delta_f1": -0.002414999999999945,
+      "val_delta_iou": -0.0034359999999999946
+    },
+    "WHU": {
+      "experiment_id": "TV-RADIO",
+      "has_val": true,
+      "val_f1": 0.945204,
+      "val_iou": 0.896102,
+      "val_delta_f1": -0.003027000000000002,
+      "val_delta_iou": -0.005456000000000016
+    },
+    "CDD": {
+      "experiment_id": "TV-RADIO",
+      "has_val": true,
+      "val_f1": 0.977167,
+      "val_iou": 0.955353,
+      "val_delta_f1": -0.00013699999999994272,
+      "val_delta_iou": -0.0002630000000000132
+    },
+    "LEVIR": {
+      "experiment_id": "TV-RADIO",
+      "has_val": true,
+      "val_f1": 0.916384,
+      "val_iou": 0.845672,
+      "val_delta_f1": 0.0014259999999999273,
+      "val_delta_iou": 0.0024250000000000105
+    }
+  }
+}

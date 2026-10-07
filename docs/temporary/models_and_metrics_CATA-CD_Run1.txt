@@ -2041,21 +2041,28 @@ import torch
 import torch.nn.functional as F
 
 
+def _to_4d(x: torch.Tensor) -> torch.Tensor:
+    """Normalize [H,W] / [1,H,W] / [N,1,H,W] to 4D."""
+    if x.dim() == 2:
+        return x.unsqueeze(0).unsqueeze(0)
+    if x.dim() == 3:
+        return x.unsqueeze(0)
+    return x
+
+
 @torch.no_grad()
 def separability_scores(local_change: torch.Tensor, label: torch.Tensor):
     """Change vs unchanged separability of cached teacher evidence.
 
-    ``local_change``: [N, C, H, W] (or [C,H,W]); ``label``: [N,1,H,W] binary.
-    Returns a dict with change_mean, unchanged_mean, ratio, and pooled AUC proxy.
+    ``local_change``: [N, C, H, W] (or [C,H,W]); ``label``: [H,W] / [N,1,H,W] binary.
     """
     if local_change.dim() == 3:
         local_change = local_change.unsqueeze(0)
-    if label.dim() == 3:
-        label = label.unsqueeze(0)
-    label = F.interpolate(label.float(), size=local_change.shape[-2:], mode="nearest")
+    label = _to_4d(label)
+    label = F.interpolate(label.float(), size=local_change.shape[-2:], mode="nearest").squeeze(1)
 
     mag = local_change.abs().mean(dim=1)  # [N,H,W]
-    pos = label.bool()
+    pos = label.bool()                     # [N,H,W]
     neg = ~pos
     change_mean = mag[pos].mean().item() if pos.any() else 0.0
     unchanged_mean = mag[neg].mean().item() if neg.any() else 0.0
@@ -2072,14 +2079,14 @@ def confidence_calibration(confidence: torch.Tensor, label: torch.Tensor):
     """Mean confidence on changed vs unchanged pixels."""
     if confidence.dim() == 3:
         confidence = confidence.unsqueeze(0)
-    if label.dim() == 3:
-        label = label.unsqueeze(0)
-    label = F.interpolate(label.float(), size=confidence.shape[-2:], mode="nearest")
+    label = _to_4d(label)
+    label = F.interpolate(label.float(), size=confidence.shape[-2:], mode="nearest").squeeze(1)
+    conf = confidence.mean(dim=1)  # [N,H,W]
     pos = label.bool()
     neg = ~pos
     return {
-        "conf_change": confidence[pos].mean().item() if pos.any() else 0.0,
-        "conf_unchanged": confidence[neg].mean().item() if neg.any() else 0.0,
+        "conf_change": conf[pos].mean().item() if pos.any() else 0.0,
+        "conf_unchanged": conf[neg].mean().item() if neg.any() else 0.0,
     }
 
 
@@ -8359,6 +8366,144 @@ if __name__ == "__main__":
 
 
 ====================================================================
+  tools  |  models/tools/build_capability_registry.py
+====================================================================
+
+#!/usr/bin/env python3
+"""Build the Teacher Capability Registry (Stage 3) from completed train_log.txt files.
+
+Outputs two strictly separated JSON files:
+  research_report.json       -- formal TEST deltas (paper evidence only; never Agent input)
+  agent_train_registry.json  -- VAL deltas only (Agent training input; no test leakage)
+
+Usage:
+    python -m models.tools.build_capability_registry \
+        --logs_root outputs/CATA-CD/teacher_adaptation --registry_dir outputs/CATA-CD/registry
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+# teacher_package -> experiment_id
+TEACHERS = {
+    "sam2": "TV-SAM",
+    "dinov2": "TV-D2",
+    "dinov3_lvd": "TV-D3N",
+    "dinov3_sat": "TV-D3S",
+    "remoteclip": "TV-RCLIP",
+    "mars": "TV-MARS",
+    "anysat": "TV-ANYSAT",
+    "universat": "TV-UNISAT",
+    "radio": "TV-RADIO",
+}
+DATASETS = ["SYSU", "WHU", "CDD", "LEVIR"]
+EPOCH_RE = re.compile(r"Epoch \[\d+/\d+\].*?F1=([\d.]+) IoU=([\d.]+)")
+TEST_RE = re.compile(r"=== TEST RESULTS ===\n(.*?)=== END TEST RESULTS ===", re.S)
+
+
+def best_val(text: str):
+    f1s, ious = [], []
+    for m in EPOCH_RE.finditer(text):
+        f1s.append(float(m.group(1)))
+        ious.append(float(m.group(2)))
+    if not f1s:
+        return None
+    i = max(range(len(f1s)), key=lambda k: f1s[k])
+    return {"f1": f1s[i], "iou": ious[i]}
+
+
+def test_metrics(text: str):
+    m = TEST_RE.search(text)
+    if not m:
+        return None
+    vals = {}
+    for line in m.group(1).splitlines():
+        if ":" in line:
+            k, v = line.split(":", 1)
+            k = k.strip()
+            if k in ("F1", "IoU", "Recall", "Precision", "OA", "Kappa"):
+                try:
+                    vals[k] = float(v.strip())
+                except ValueError:
+                    pass
+    return vals or None
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--logs_root", required=True)
+    ap.add_argument("--registry_dir", required=True)
+    args = ap.parse_args()
+
+    logs_root = Path(args.logs_root)
+    reg_dir = Path(args.registry_dir)
+    reg_dir.mkdir(parents=True, exist_ok=True)
+
+    def read(exp: str, ds: str) -> str:
+        p = logs_root / exp / ds / "train_log.txt"
+        return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
+
+    # anchors
+    c1_val = {ds: best_val(read("C1", ds)) for ds in DATASETS}
+    c1_test = {ds: test_metrics(read("C1", ds)) for ds in DATASETS}
+    c0_test = {ds: test_metrics(read("C0", ds)) for ds in DATASETS}
+
+    research = {"_anchors": {"C0_test": c0_test, "C1_test": c1_test, "C1_val": c1_val}}
+    agent = {}
+
+    for teacher, exp in TEACHERS.items():
+        research[teacher] = {}
+        agent[teacher] = {}
+        for ds in DATASETS:
+            txt = read(exp, ds)
+            tv = best_val(txt)
+            tt = test_metrics(txt)
+            cv = c1_val[ds]
+            ct = c1_test[ds]
+            entry_r = {"experiment_id": exp, "has_test": tt is not None}
+            entry_a = {"experiment_id": exp, "has_val": tv is not None}
+            if tv and cv:
+                entry_a["val_f1"] = tv["f1"]
+                entry_a["val_iou"] = tv["iou"]
+                entry_a["val_delta_f1"] = tv["f1"] - cv["f1"]
+                entry_a["val_delta_iou"] = tv["iou"] - cv["iou"]
+            if tt and ct:
+                entry_r["test_f1"] = tt["F1"]
+                entry_r["test_iou"] = tt["IoU"]
+                entry_r["test_delta_f1"] = tt["F1"] - ct["F1"]
+                entry_r["test_delta_iou"] = tt["IoU"] - ct["IoU"]
+            research[teacher][ds] = entry_r
+            agent[teacher][ds] = entry_a
+
+    (reg_dir / "research_report.json").write_text(json.dumps(research, indent=2), encoding="utf-8")
+    (reg_dir / "agent_train_registry.json").write_text(json.dumps(agent, indent=2), encoding="utf-8")
+
+    print(f"[registry] wrote {reg_dir/'research_report.json'} and {reg_dir/'agent_train_registry.json'}")
+    print("\n== VAL utility (best val F1 relative to C1), Agent input ==")
+    for ds in DATASETS:
+        row = [f"{ds}: C1={c1_val[ds]['f1']*100:.2f}" if c1_val[ds] else f"{ds}: C1=?"]
+        for teacher in TEACHERS:
+            e = agent[teacher][ds]
+            if "val_delta_f1" in e:
+                row.append(f"{teacher}={e['val_delta_f1']*100:+.2f}")
+        print(" ".join(row))
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+====================================================================
   tools  |  models/tools/build_dataset_signature.py
 ====================================================================
 
@@ -8782,9 +8927,12 @@ if __name__ == "__main__":
 #!/usr/bin/env python3
 """Train the offline contextual bandit Agent with Leave-One-Dataset-Out (Stage 4).
 
-Builds (dataset, teacher) pair features from dataset signatures + teacher probes,
-fits the tiny MLP on validation utilities, and runs LODO selection. Test metrics
-are never used.
+State x(D,T) = [dataset signature s_D, teacher train-only probe c(D,T)].
+Reward = validation utility relative to C1 (never test). Action = one Teacher
+Package or None (abstention when all predicted utilities <= 0).
+
+Compared against baselines A-H (change-ratio heuristic), A-F (best global fixed
+teacher) and A-REG (oracle-val, upper bound).
 
 Usage:
     python -m models.tools.train_teacher_agent \
@@ -8800,11 +8948,13 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import torch
+import torch.nn as nn
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models.agent.offline_bandit import train_policy  # noqa: E402
+from models.agent.offline_bandit import TeacherAgentPolicy  # noqa: E402
 
 DATASETS = ["SYSU", "WHU", "CDD", "LEVIR"]
 
@@ -8815,6 +8965,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--probes_dir", required=True)
     p.add_argument("--registry_dir", required=True)
     p.add_argument("--output_dir", required=True)
+    p.add_argument("--epochs", type=int, default=800)
     return p.parse_args()
 
 
@@ -8822,58 +8973,140 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
 
 
-def main() -> None:
-    args = parse_args()
-    sig_dir = Path(args.signatures_dir)
-    probe_dir = Path(args.probes_dir)
-    reg_dir = Path(args.registry_dir)
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    # Agent-train registry: {teacher_id: {dataset: {val_delta_f1, ...}}}
-    registry = load_json(reg_dir / "agent_train_registry.json")
-
-    rows = []  # (dataset, teacher_id, pair_feature, val_utility)
-    teacher_ids = sorted(registry.keys())
-    for teacher in teacher_ids:
-        entries = registry[teacher]
+def build_rows(sig_dir, probe_dir, registry):
+    rows = []
+    for teacher in sorted(registry.keys()):
         for ds in DATASETS:
-            e = entries.get(ds)
-            if not e:
+            e = registry[teacher].get(ds) or {}
+            if "val_delta_f1" not in e:
                 continue
             sig = load_json(sig_dir / f"{ds}.json").get("vector", [])
             probe = load_json(probe_dir / f"{ds}_{teacher}.json")
-            p_sep = probe.get("separability", {})
-            p_cal = probe.get("calibration", {})
-            probe_vec = [p_sep.get("change_mean", 0.0), p_sep.get("unchanged_mean", 0.0),
-                         p_sep.get("ratio", 0.0), p_cal.get("conf_change", 0.0), p_cal.get("conf_unchanged", 0.0)]
-            pair = list(sig) + probe_vec
-            utility = float(e.get("val_delta_f1", 0.0)) + 0.5 * float(e.get("val_delta_iou", 0.0))
-            rows.append((ds, teacher, pair, utility))
+            sep = probe.get("separability", {})
+            cal = probe.get("calibration", {})
+            pv = [sep.get("change_mean", 0.0), sep.get("unchanged_mean", 0.0), sep.get("ratio", 0.0),
+                  cal.get("conf_change", 0.0), cal.get("conf_unchanged", 0.0)]
+            utility = float(e["val_delta_f1"]) + 0.5 * float(e.get("val_delta_iou", 0.0))
+            rows.append({"ds": ds, "teacher": teacher, "x": list(sig) + pv, "y": utility})
+    return rows
 
+
+def fit_mlp(X, y, epochs, seed=0):
+    torch.manual_seed(seed)
+    policy = TeacherAgentPolicy(X.shape[1])
+    opt = torch.optim.Adam(policy.parameters(), lr=3e-3, weight_decay=1e-2)
+    xt = torch.tensor(X, dtype=torch.float32)
+    yt = torch.tensor(y, dtype=torch.float32)
+    for _ in range(epochs):
+        opt.zero_grad()
+        loss = nn.functional.mse_loss(policy(xt), yt)
+        loss.backward()
+        opt.step()
+    return policy
+
+
+def fit_ridge(X, y, lam=1.0):
+    Xa = np.concatenate([X, np.ones((len(X), 1), dtype=np.float32)], axis=1)
+    A = Xa.T @ Xa + lam * np.eye(Xa.shape[1], dtype=np.float32)
+    w = np.linalg.solve(A, Xa.T @ y)
+    return lambda Z: np.concatenate([Z, np.ones((len(Z), 1), dtype=np.float32)], axis=1) @ w
+
+
+def main() -> None:
+    args = parse_args()
+    sig_dir, probe_dir = Path(args.signatures_dir), Path(args.probes_dir)
+    reg_dir, out_dir = Path(args.registry_dir), Path(args.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    registry = load_json(reg_dir / "agent_train_registry.json")
+    rows = build_rows(sig_dir, probe_dir, registry)
     if not rows:
-        raise SystemExit("No agent-train registry entries found")
+        raise SystemExit("no agent-train registry rows")
 
-    # LODO: leave one dataset out, train, then predict selection on held-out dataset.
+    X_all = np.stack([r["x"] for r in rows]).astype(np.float32)
+    y_all = np.stack([r["y"] for r in rows]).astype(np.float32)
+
     report = {}
     for holdout in DATASETS:
-        tr = [r for r in rows if r[0] != holdout]
-        te = [r for r in rows if r[0] == holdout]
+        tr = [i for i, r in enumerate(rows) if r["ds"] != holdout]
+        te = [i for i, r in enumerate(rows) if r["ds"] == holdout]
         if not tr or not te:
-            report[holdout] = "skipped (no data)"
+            report[holdout] = "skipped"
             continue
-        X = np.stack([r[2] for r in tr]).astype(np.float32)
-        y = np.stack([r[3] for r in tr]).astype(np.float32)
-        policy, loss = train_policy(X, y, epochs=2000, lr=1e-3, weight_decay=1e-4)
-        import torch
-        Xt = torch.tensor(np.stack([r[2] for r in te]), dtype=torch.float32)
-        scores = policy(Xt).detach().numpy()
-        best = int(scores.argmax())
-        chosen = te[best][1] if scores[best] > 0 else "None"
-        report[holdout] = {"chosen": chosen, "score": float(scores[best]), "train_loss": loss}
 
-    out_dir.joinpath("lodo_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
-    print("[agent] LODO report:", json.dumps(report, indent=2))
+        Xtr, ytr = X_all[tr], y_all[tr]
+        Xte, yte = X_all[te], y_all[te]
+        mu, sd = Xtr.mean(0), Xtr.std(0) + 1e-6
+        ym, ys = ytr.mean(), ytr.std() + 1e-9
+        Xtr_n, Xte_n = (Xtr - mu) / sd, (Xte - mu) / sd
+        ytr_n = (ytr - ym) / ys
+
+        # --- A-LODO: MLP (scaled targets) ---
+        policy = fit_mlp(Xtr_n, ytr_n, args.epochs)
+        with torch.no_grad():
+            score_mlp = policy(torch.tensor(Xte_n, dtype=torch.float32)).numpy() * ys + ym
+        # --- A-LODO-linear: ridge ---
+        ridge = fit_ridge(Xtr_n, ytr_n, lam=1.0)
+        score_ridge = ridge(Xte_n) * ys + ym
+
+        teachers_te = [rows[i]["teacher"] for i in te]
+        util_te = [float(rows[i]["y"]) for i in te]
+
+        def pick(scores):
+            k = int(np.argmax(scores))
+            return (teachers_te[k], float(scores[k])) if scores[k] > 0 else (None, 0.0)
+
+        mlp_pick = pick(score_mlp)
+        ridge_pick = pick(score_ridge)
+        oracle_k = int(np.argmax(util_te))
+        oracle = (teachers_te[oracle_k], util_te[oracle_k]) if util_te[oracle_k] > 0 else (None, 0.0)
+
+        # A-F: best fixed teacher by mean val utility on the training datasets
+        train_teachers = sorted({rows[i]["teacher"] for i in tr})
+        mean_util = {t: float(np.mean([rows[i]["y"] for i in tr if rows[i]["teacher"] == t])) for t in train_teachers}
+        fixed_t = max(mean_util, key=mean_util.get)
+        fixed_util = float(np.mean([rows[i]["y"] for i in te if rows[i]["teacher"] == fixed_t]))
+
+        # A-H: change-ratio heuristic -> highest change_ratio dataset picks the teacher with the
+        # highest change_mean probe; simplest implementable rule.
+        sig = load_json(sig_dir / f"{holdout}.json").get("details", {})
+        change_ratio = sig.get("change_ratio", 0.0)
+        h_idx = int(np.argmax([rows[i]["x"][len(rows[i]["x"]) - 5] for i in te]))  # probe change_mean
+        heuristic = (teachers_te[h_idx], util_te[h_idx]) if change_ratio > 0 else (None, 0.0)
+
+        def util_of(pick_tuple):
+            t = pick_tuple[0]
+            if t is None:
+                return 0.0
+            vals = [rows[i]["y"] for i in te if rows[i]["teacher"] == t]
+            return float(vals[0]) if vals else 0.0
+
+        report[holdout] = {
+            "change_ratio": change_ratio,
+            "oracle_val": {"teacher": oracle[0], "val_utility": oracle[1]},
+            "A_LODO_mlp": {"teacher": mlp_pick[0], "pred": mlp_pick[1], "val_utility": util_of(mlp_pick)},
+            "A_LODO_ridge": {"teacher": ridge_pick[0], "pred": ridge_pick[1], "val_utility": util_of(ridge_pick)},
+            "A_F_fixed": {"teacher": fixed_t, "val_utility": fixed_util},
+            "A_H_heuristic": {"teacher": heuristic[0], "val_utility": util_of(heuristic)},
+        }
+
+    (out_dir / "lodo_report.json").write_text(json.dumps(report, indent=2), encoding="utf-8")
+
+    print("=== LODO report (validation utility, percentage points) ===")
+    for ds in DATASETS:
+        r = report.get(ds)
+        if not isinstance(r, dict):
+            print(f"{ds}: {r}")
+            continue
+        print(f"\n{ds} (change_ratio={r['change_ratio']:.4f})")
+        for key in ("oracle_val", "A_LODO_mlp", "A_LODO_ridge", "A_F_fixed", "A_H_heuristic"):
+            v = r[key]
+            print(f"  {key:14s} teacher={str(v['teacher']):10s} val_utility={v['val_utility']*100:+.3f}pp")
+        oracle_t = r["oracle_val"]["teacher"]
+        for key in ("A_LODO_mlp", "A_LODO_ridge", "A_F_fixed", "A_H_heuristic"):
+            match = "MATCH" if r[key]["teacher"] == oracle_t else "miss"
+            gap = (r["oracle_val"]["val_utility"] - r[key]["val_utility"]) * 100
+            print(f"  -> {key:14s} {match}, gap_vs_oracle={gap:+.3f}pp")
 
 
 if __name__ == "__main__":
@@ -9109,7 +9342,7 @@ def adjust_learning_rate(args, optimizer, epoch, iter, max_batches, lr_factor=1)
 
 
 
-(Total: 60 Python files)
+(Total: 61 Python files)
 
 
 
@@ -9121,12 +9354,12 @@ def adjust_learning_rate(args, optimizer, epoch, iter, max_batches, lr_factor=1)
 --- Sheet: README ---
 LS-Rep_BCD_RSML_3 — Experiment Metrics (DART-R / RDT-CD / SCTC / FA-SCRD / SAGE-CD)	
 	
-Generated	2026-10-07 18:09:40 +0800
+Generated	2026-10-07 22:04:01 +0800
 Extraction rule	Last complete formal TEST RESULTS block per train_log.txt
 Metric unit	Percentage points; source log fractions multiplied by 100
 Sources	outputs/DirectionC (DART-R) + outputs/DART-R-TS + outputs/RDT-CD + outputs/SCTC + outputs/SAGE-CD; launcher logs excluded
-Completed rows	129
-Rows by run	CATA-CD=44, DART-R=8, DART-R-TS=4, FA-SCRD-Run1=8, RDT-CD-Run1=12, RDT-CD-Run2=11, RDT-CD-Run3=14, SAGE-CD-Run1=6, SAGE-CD-Run2=10, SCTC-Run1=12
+Completed rows	133
+Rows by run	CATA-CD=48, DART-R=8, DART-R-TS=4, FA-SCRD-Run1=8, RDT-CD-Run1=12, RDT-CD-Run2=11, RDT-CD-Run3=14, SAGE-CD-Run1=6, SAGE-CD-Run2=10, SCTC-Run1=12
 DART-R scope	DART-R=C0 gradient routing (failed); DART-R-TS=C1 fixed teacher (failed, B0 only); RDT-CD-Run1=D1 dynamic teacher (B0/D1/D2); RDT-CD-Run2=SCGR (B0/D1NG/D1/D2, ineffective). All 40k, seed 2333 — not a multi-seed paper result.
 SCTC scope	SCTC-Run1: S0=clean A2Net, S1=full-pixel symmetric calibration, S2=unchanged-aware SCTC. S2-S0 = WHU +0.43 / SYSU -0.25 / CDD -0.20 / LEVIR -0.10 → WHU-only single-dataset trick, H4 failed. 40k, seed 2333 only.
 FA-SCRD scope	FA-SCRD-Run1: C0=clean, C1=joint temporal BN, A1=fixed DINOv3 teacher relation KD, M1=+failure-aware weighting. A1-C1 = SYSU -0.33 / CDD -0.33 → teacher transfer negative (not a trick, a straight loss). WHU/LEVIR stopped early (C0 only). 40k, seed 2333 only.
@@ -9144,6 +9377,10 @@ CATA-CD	Full	C1	C1	CDD-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mo
 CATA-CD	Full	C1	C1	LEVIR-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	90.2249	91.8630	99.0949	91.0366	83.5479	90.5600		0	2:23:42.905316	outputs/CATA-CD	outputs/CATA-CD/teacher_adaptation/C1/LEVIR/train_log.txt
 CATA-CD	Full	C1	C1	SYSU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	80.6873	84.5474	91.9677	82.5722	70.3175	77.3572		0	4:24:38.139017	outputs/CATA-CD	outputs/CATA-CD/teacher_adaptation/C1/SYSU/train_log.txt
 CATA-CD	Full	C1	C1	WHU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	93.6310	94.4464	99.5289	94.0369	88.7450	93.7917		0	4:20:49.389235	outputs/CATA-CD	outputs/CATA-CD/teacher_adaptation/C1/WHU/train_log.txt
+CATA-CD	Full	M1	M1	CDD-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=True; dca=moe128; teacher_pkg=dinov3_lvd	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	97.7094	97.7804	99.4435	97.7449	95.5893	97.4275		0	3:23:54.477446	outputs/CATA-CD	outputs/CATA-CD/Run1/CDD/train_log.txt
+CATA-CD	Full	M1	M1	LEVIR-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=True; dca=moe128; teacher_pkg=anysat	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	89.6602	92.3689	99.0959	90.9944	83.4769	90.5186		0	3:24:51.468164	outputs/CATA-CD	outputs/CATA-CD/Run1/LEVIR/train_log.txt
+CATA-CD	Full	M1	M1	SYSU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	80.3025	85.3756	92.1109	82.7614	70.5923	77.6526		0	3:22:52.371079	outputs/CATA-CD	outputs/CATA-CD/Run1/SYSU/train_log.txt
+CATA-CD	Full	M1	M1	WHU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	91.8516	94.1891	99.4519	93.0057	86.9258	92.7205		0	3:07:30.744861	outputs/CATA-CD	outputs/CATA-CD/Run1/WHU/train_log.txt
 CATA-CD	Full	TV-ANYSAT	TV-ANYSAT	CDD-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=True; dca=moe128; teacher_pkg=anysat	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	97.6985	97.7966	99.4442	97.7476	95.5944	97.4306		0	4:45:36.359148	outputs/CATA-CD	outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/CDD/train_log.txt
 CATA-CD	Full	TV-ANYSAT	TV-ANYSAT	LEVIR-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=True; dca=moe128; teacher_pkg=anysat	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	90.2226	91.9925	99.1018	91.0990	83.6530	90.6261		0	3:41:10.768721	outputs/CATA-CD	outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/LEVIR/train_log.txt
 CATA-CD	Full	TV-ANYSAT	TV-ANYSAT	SYSU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=True; dca=moe128; teacher_pkg=anysat	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	78.7089	85.3961	91.8047	81.9163	69.3714	76.6294		0	4:54:48.409643	outputs/CATA-CD	outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/SYSU/train_log.txt
@@ -9353,6 +9590,16 @@ outputs/SAGE-CD/Run2	outputs/SAGE-CD/Run2/R3/SYSU/train_log.txt	complete
 outputs/SAGE-CD/Run2	outputs/SAGE-CD/Run2/R3/WHU/train_log.txt	complete
 outputs/SAGE-CD/Run2	outputs/SAGE-CD/Run2/R4/SYSU/train_log.txt	complete
 outputs/SAGE-CD/Run2	outputs/SAGE-CD/Run2/R4/WHU/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/noise/R1/CDD/train_log.txt	missing complete TEST RESULTS block
+outputs/CATA-CD	outputs/CATA-CD/noise/R1/SYSU/train_log.txt	missing complete TEST RESULTS block
+outputs/CATA-CD	outputs/CATA-CD/noise/R1/WHU/train_log.txt	missing complete TEST RESULTS block
+outputs/CATA-CD	outputs/CATA-CD/noise/R2/CDD/train_log.txt	missing complete TEST RESULTS block
+outputs/CATA-CD	outputs/CATA-CD/noise/R2/LEVIR/train_log.txt	missing complete TEST RESULTS block
+outputs/CATA-CD	outputs/CATA-CD/noise/R3/SYSU/train_log.txt	missing complete TEST RESULTS block
+outputs/CATA-CD	outputs/CATA-CD/Run1/CDD/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/Run1/LEVIR/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/Run1/SYSU/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/Run1/WHU/train_log.txt	complete
 outputs/CATA-CD	outputs/CATA-CD/teacher_adaptation/C0/CDD/train_log.txt	complete
 outputs/CATA-CD	outputs/CATA-CD/teacher_adaptation/C0/LEVIR/train_log.txt	complete
 outputs/CATA-CD	outputs/CATA-CD/teacher_adaptation/C0/SYSU/train_log.txt	complete

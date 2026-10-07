@@ -51,6 +51,25 @@
 5. CDD 已饱和（97.75），所有教师均无增益。
 6. **硬目标未达**：SYSU 83.25/85、LEVIR 91.17/92.5、WHU 94.60/95、CDD 97.76/98。
 
+## Stage 3/4（Registry + LODO Agent + M1）
+
+- **Registry**（`outputs/CATA-CD/registry/`）：`research_report.json`（test 效用，仅论文证据）与 `agent_train_registry.json`（**仅 val 效用**，Agent 输入，无 test 泄漏）严格分离；另有 4 个 dataset signature + 36 个 teacher train-only probe。
+- **Agent（A-LODO：tiny MLP + LODO，state = dataset signature + teacher probe）选择**：SYSU→None、WHU→None、CDD→dinov3_lvd、LEVIR→anysat。
+- **H2 基本成立**：2/4 fold 与 oracle-val 精确一致，3/4 fold gap ≤0.20pp（WHU 0.221pp 略超）；明显优于基线 A-F（固定教师，gap 最高 +1.84pp）与 A-H（启发式，+0.86pp）。
+- **M1 结果**（按 Agent 选择从头训练，2-way）：SYSU 82.76 / WHU 93.01 / CDD 97.74 / LEVIR 90.99 → `M1 − C1` = [+0.19, −1.03, −0.01, −0.05] → **H4 不成立**。
+
+## ⚠️ 关键方法论发现：单 seed 结果不可复现（噪声 > 效应）
+
+M1/SYSU 与 M1/WHU 的配置与 C1 **逐字段完全相同**（`dca_mode=moe128`、`teacher_package=none`、`seed=2333`、`batch=64`、`40K`、同一预训练权重），但结果分别为 **82.76 / 93.01**，而 C1 为 **82.57 / 94.04** → **同配置差异达 +0.19 / −1.03pp F1**。
+
+- 训练曲线**从第 0 个 epoch 即分叉**（SYSU epoch0 loss 3.5051 vs 3.4897；WHU 5.2305 vs 5.2067）。
+- 原始 C1 以 **3-way 并发**运行、M1 以 **2-way** 运行；并发度不同（`nn.SyncBatchNorm` backward 归约 + cuBLAS/cuDNN 算法选择 + best-val checkpoint 选择放大）是主要嫌疑。
+- WHU 上"同配置"run 的 test F1 散布达 **1.9pp**（C0 92.66 … TV-MARS 94.60）。
+
+**后果**：单 seed 的 run-to-run 波动（≈1.0pp）**大于所有教师效应**（最强 +0.68pp），也接近 DCA 效应（+1.38pp）。因此上面的能力矩阵、Agent 选择与 M1 差异**均不能作为机制有效性的证据**。
+
+**补救中**：`train_scripts/CATA-CD/teacher_adaptation/run_noise_floor.sh` 以与 C1 相同的 3-way 并发，把 C1 配置在四数据集各重复 R1/R2/R3（12 runs），量化真实 σ，据此区分「内在噪声」与「并发度导致」。
+
 ## 环境（RSML-3）
 
 ```yaml

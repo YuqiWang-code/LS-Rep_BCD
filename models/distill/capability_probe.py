@@ -11,21 +11,28 @@ import torch
 import torch.nn.functional as F
 
 
+def _to_4d(x: torch.Tensor) -> torch.Tensor:
+    """Normalize [H,W] / [1,H,W] / [N,1,H,W] to 4D."""
+    if x.dim() == 2:
+        return x.unsqueeze(0).unsqueeze(0)
+    if x.dim() == 3:
+        return x.unsqueeze(0)
+    return x
+
+
 @torch.no_grad()
 def separability_scores(local_change: torch.Tensor, label: torch.Tensor):
     """Change vs unchanged separability of cached teacher evidence.
 
-    ``local_change``: [N, C, H, W] (or [C,H,W]); ``label``: [N,1,H,W] binary.
-    Returns a dict with change_mean, unchanged_mean, ratio, and pooled AUC proxy.
+    ``local_change``: [N, C, H, W] (or [C,H,W]); ``label``: [H,W] / [N,1,H,W] binary.
     """
     if local_change.dim() == 3:
         local_change = local_change.unsqueeze(0)
-    if label.dim() == 3:
-        label = label.unsqueeze(0)
-    label = F.interpolate(label.float(), size=local_change.shape[-2:], mode="nearest")
+    label = _to_4d(label)
+    label = F.interpolate(label.float(), size=local_change.shape[-2:], mode="nearest").squeeze(1)
 
     mag = local_change.abs().mean(dim=1)  # [N,H,W]
-    pos = label.bool()
+    pos = label.bool()                     # [N,H,W]
     neg = ~pos
     change_mean = mag[pos].mean().item() if pos.any() else 0.0
     unchanged_mean = mag[neg].mean().item() if neg.any() else 0.0
@@ -42,14 +49,14 @@ def confidence_calibration(confidence: torch.Tensor, label: torch.Tensor):
     """Mean confidence on changed vs unchanged pixels."""
     if confidence.dim() == 3:
         confidence = confidence.unsqueeze(0)
-    if label.dim() == 3:
-        label = label.unsqueeze(0)
-    label = F.interpolate(label.float(), size=confidence.shape[-2:], mode="nearest")
+    label = _to_4d(label)
+    label = F.interpolate(label.float(), size=confidence.shape[-2:], mode="nearest").squeeze(1)
+    conf = confidence.mean(dim=1)  # [N,H,W]
     pos = label.bool()
     neg = ~pos
     return {
-        "conf_change": confidence[pos].mean().item() if pos.any() else 0.0,
-        "conf_unchanged": confidence[neg].mean().item() if neg.any() else 0.0,
+        "conf_change": conf[pos].mean().item() if pos.any() else 0.0,
+        "conf_unchanged": conf[neg].mean().item() if neg.any() else 0.0,
     }
 
 

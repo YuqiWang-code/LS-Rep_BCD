@@ -374,8 +374,11 @@ def main() -> None:
     results, audit = collect()
     rejected = [entry for entry in audit if entry["Status"] != "complete"]
     if rejected:
-        detail = "\n".join(f"- {x['Log']}: {x['Status']}" for x in rejected)
-        raise ValueError("Invalid or incomplete logs:\n" + detail)
+        # In-progress runs are expected while a campaign is still training; skip
+        # them with a warning instead of failing the whole extraction.
+        print(f"[warn] {len(rejected)} incomplete/invalid logs skipped:")
+        for entry in rejected[:15]:
+            print(f"  - {entry['Log'] or entry['Source']}: {entry['Status']}")
     if not results:
         raise SystemExit("No complete SAM-HSD test results found")
     build_workbook(results, audit, output)

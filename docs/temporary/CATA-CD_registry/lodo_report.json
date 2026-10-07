@@ -1,0 +1,102 @@
+{
+  "SYSU": {
+    "change_ratio": 0.157732,
+    "oracle_val": {
+      "teacher": null,
+      "val_utility": 0.0
+    },
+    "A_LODO_mlp": {
+      "teacher": null,
+      "pred": 0.0,
+      "val_utility": 0.0
+    },
+    "A_LODO_ridge": {
+      "teacher": null,
+      "pred": 0.0,
+      "val_utility": 0.0
+    },
+    "A_F_fixed": {
+      "teacher": "anysat",
+      "val_utility": -0.018368999999999913
+    },
+    "A_H_heuristic": {
+      "teacher": "sam2",
+      "val_utility": -0.005351999999999912
+    }
+  },
+  "WHU": {
+    "change_ratio": 0.046415,
+    "oracle_val": {
+      "teacher": "anysat",
+      "val_utility": 0.002207499999999918
+    },
+    "A_LODO_mlp": {
+      "teacher": null,
+      "pred": 0.0,
+      "val_utility": 0.0
+    },
+    "A_LODO_ridge": {
+      "teacher": null,
+      "pred": 0.0,
+      "val_utility": 0.0
+    },
+    "A_F_fixed": {
+      "teacher": "dinov3_lvd",
+      "val_utility": -0.005885000000000029
+    },
+    "A_H_heuristic": {
+      "teacher": "sam2",
+      "val_utility": -0.006406500000000093
+    }
+  },
+  "CDD": {
+    "change_ratio": 0.120657,
+    "oracle_val": {
+      "teacher": null,
+      "val_utility": 0.0
+    },
+    "A_LODO_mlp": {
+      "teacher": "dinov3_lvd",
+      "pred": 0.011519582010805607,
+      "val_utility": -0.0009270000000000111
+    },
+    "A_LODO_ridge": {
+      "teacher": "sam2",
+      "pred": 0.001267049228772521,
+      "val_utility": -1.9499999999950113e-05
+    },
+    "A_F_fixed": {
+      "teacher": "mars",
+      "val_utility": -0.00035999999999997145
+    },
+    "A_H_heuristic": {
+      "teacher": "sam2",
+      "val_utility": -1.9499999999950113e-05
+    }
+  },
+  "LEVIR": {
+    "change_ratio": 0.067676,
+    "oracle_val": {
+      "teacher": "anysat",
+      "val_utility": 0.0027014999999999123
+    },
+    "A_LODO_mlp": {
+      "teacher": "anysat",
+      "pred": 0.0016684590373188257,
+      "val_utility": 0.0027014999999999123
+    },
+    "A_LODO_ridge": {
+      "teacher": "sam2",
+      "pred": 0.0029590080957859755,
+      "val_utility": -0.001651500000000028
+    },
+    "A_F_fixed": {
+      "teacher": "mars",
+      "val_utility": 0.0017684999999999507
+    },
+    "A_H_heuristic": {
+      "teacher": "sam2",
+      "val_utility": -0.001651500000000028
+    }
+  }
+}
