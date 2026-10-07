@@ -27,6 +27,7 @@ for DS_FOLDER in SYSU-CD-256 WHU-CD-256 CDD-CD-256 LEVIR-CD-256; do
     --dataset_name "$DS" \
     --cache_root "$CACHE_BASE" \
     --split train \
+    --batch_size 8 \
     --gpu_id "$GPU_ID"
 done
 

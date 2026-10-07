@@ -66,8 +66,8 @@ run_one() {
   if [ "$TEACHER" != "none" ]; then
     CACHE_ARG="--teacher_cache_root $CACHE_BASE/$TEACHER"
     if [ ! -f "$CACHE_BASE/$TEACHER/$DS/train/manifest.json" ]; then
-      echo "[error] missing cache for $TEACHER/$DS; run prepare_teacher_cache.sh $TEACHER first" >&2
-      exit 1
+      echo "[skip] $EXP/$DS: cache not ready for $TEACHER (run prepare_teacher_cache.sh $TEACHER first)"
+      return 0
     fi
   fi
 

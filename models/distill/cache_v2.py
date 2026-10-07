@@ -44,27 +44,38 @@ def _crop_resize(x: torch.Tensor, top: int, left: int, src_h: int, src_w: int) -
     return cropped
 
 
+def _is_spatial(x: torch.Tensor) -> bool:
+    return x.dim() >= 3
+
+
 def apply_cache_state(
     cache: Dict[str, torch.Tensor],
     state: Dict,
     src_h: int = 256,
     src_w: int = 256,
 ) -> Dict[str, torch.Tensor]:
-    """Replay crop/flip onto cached (already exchange-invariant) tensors."""
+    """Replay crop/flip onto cached (already exchange-invariant) tensors.
+
+    Only spatial tensors (ndim >= 3, i.e. [C,H,W] / [B,C,H,W]) are transformed;
+    global descriptors (1D/2D) are passed through unchanged.
+    """
     out = {k: v for k, v in cache.items() if isinstance(v, torch.Tensor)}
 
     crop = state.get("crop_resize")
     if crop and crop.get("enabled"):
         top, left = crop["top"], crop["left"]
         for key in list(out.keys()):
-            out[key] = _crop_resize(out[key], top, left, src_h, src_w)
+            if _is_spatial(out[key]):
+                out[key] = _crop_resize(out[key], top, left, src_h, src_w)
 
     if state.get("flip_v"):
         for key in list(out.keys()):
-            out[key] = torch.flip(out[key], dims=[-2])
+            if _is_spatial(out[key]):
+                out[key] = torch.flip(out[key], dims=[-2])
     if state.get("flip_h"):
         for key in list(out.keys()):
-            out[key] = torch.flip(out[key], dims=[-1])
+            if _is_spatial(out[key]):
+                out[key] = torch.flip(out[key], dims=[-1])
 
     return out
 

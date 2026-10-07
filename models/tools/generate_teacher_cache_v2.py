@@ -2,15 +2,15 @@
 """Generate Compact Teacher Cache v2 for one (teacher, dataset, split).
 
 Reads the canonical 256x256 source image (same as the student's Scale step),
-resizes to the teacher's native input size, runs the frozen teacher encoder, and
-stores the projected symmetric change evidence per sample.
+resizes to the teacher's native input size, runs the frozen teacher encoder in
+batches, and stores the projected symmetric change evidence per sample.
 
 Usage:
     python -m models.tools.generate_teacher_cache_v2 \
         --teacher_package dinov3_sat --weight_dir pre-trained_weights \
         --data_root /share_datasets/CD/SYSU-CD-256 --dataset_name SYSU \
         --cache_root /share_datasets/CD_teacher_cache/CATA_CD_v2 \
-        --split train --gpu_id 0
+        --split train --gpu_id 0 --batch_size 16
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from models.distill.cache_v2 import CACHE_SCHEMA_VERSION  # noqa: E402
-from models.distill.teacher_package import build_teacher_package  # noqa: E402
+from models.distill.teacher_package import TEACHER_REGISTRY, build_teacher_package  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
@@ -42,6 +42,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--split", default="train")
     p.add_argument("--gpu_id", type=int, default=0)
     p.add_argument("--projection_seed", type=int, default=0)
+    p.add_argument("--batch_size", type=int, default=16)
     p.add_argument("--max_samples", type=int, default=None)
     return p.parse_args()
 
@@ -76,47 +77,60 @@ def main() -> None:
         args.teacher_package, args.weight_dir, projection_seed=args.projection_seed, device=device
     )
     package = package.to(device)
+    package.eval()
     teacher_input = meta.input_size
 
-    out_root = Path(args.cache_root) / dataset / split
+    out_root = Path(args.cache_root) / args.teacher_package / dataset / split
     out_root.mkdir(parents=True, exist_ok=True)
 
-    weight_file = Path(args.weight_dir) / package_meta_weight(args.teacher_package, args.weight_dir)
+    weight_file = Path(args.weight_dir) / TEACHER_REGISTRY[args.teacher_package].weight
     weight_hash = hashlib.sha256(weight_file.read_bytes()).hexdigest() if weight_file.is_file() else "n/a"
 
+    bs = args.batch_size
+    n_done = 0
     with torch.no_grad():
-        for i, sample_id in enumerate(sample_ids):
-            pre = _read_rgb_01(data_root / "A" / sample_id, 256)
-            post = _read_rgb_01(data_root / "B" / sample_id, 256)
-            if tuple(teacher_input) != (256, 256):
-                pre = cv2.resize(pre, (teacher_input[1], teacher_input[0]), interpolation=cv2.INTER_LINEAR)
-                post = cv2.resize(post, (teacher_input[1], teacher_input[0]), interpolation=cv2.INTER_LINEAR)
+        for start in range(0, len(sample_ids), bs):
+            batch_ids = sample_ids[start:start + bs]
+            imgs_a, imgs_b = [], []
+            for sid in batch_ids:
+                pre = _read_rgb_01(data_root / "A" / sid, 256)
+                post = _read_rgb_01(data_root / "B" / sid, 256)
+                if tuple(teacher_input) != (256, 256):
+                    pre = cv2.resize(pre, (teacher_input[1], teacher_input[0]), interpolation=cv2.INTER_LINEAR)
+                    post = cv2.resize(post, (teacher_input[1], teacher_input[0]), interpolation=cv2.INTER_LINEAR)
+                imgs_a.append(pre)
+                imgs_b.append(post)
 
-            xa = torch.from_numpy(pre.transpose(2, 0, 1)).float().unsqueeze(0).to(device)
-            xb = torch.from_numpy(post.transpose(2, 0, 1)).float().unsqueeze(0).to(device)
+            xa = torch.from_numpy(np.stack(imgs_a, axis=0).transpose(0, 3, 1, 2)).float().to(device)
+            xb = torch.from_numpy(np.stack(imgs_b, axis=0).transpose(0, 3, 1, 2)).float().to(device)
 
             out = package.encode_pair(xa, xb)
-            entry = {
-                "teacher_id": args.teacher_package,
-                "sample_id": sample_id,
-                "local_change": out["local_change"].squeeze(0).cpu().half(),
-                "confidence": out["confidence"].squeeze(0).cpu().half(),
-                "global_desc": out["global_desc"].squeeze(0).cpu().half(),
-                "meta": {
-                    "weight_hash": weight_hash,
-                    "normalization": {"mean": list(meta.mean), "std": list(meta.std)},
-                    "color_order": meta.color_order,
-                    "teacher_input_size": list(meta.input_size),
-                    "source_size": 256,
-                    "cache_schema_version": CACHE_SCHEMA_VERSION,
-                    "projection_seed": args.projection_seed,
-                    "projection_in": int(cin),
-                },
-            }
-            torch.save(entry, out_root / f"{sample_id}.pt")
+            lc = out["local_change"].cpu().half()
+            conf = out["confidence"].cpu().half()
+            gd = out["global_desc"].cpu().half()
 
-            if (i + 1) % 200 == 0 or i == 0:
-                print(f"[cache-v2] {args.teacher_package}/{dataset}/{split} {i + 1}/{len(sample_ids)}", flush=True)
+            for j, sid in enumerate(batch_ids):
+                entry = {
+                    "teacher_id": args.teacher_package,
+                    "sample_id": sid,
+                    "local_change": lc[j],
+                    "confidence": conf[j],
+                    "global_desc": gd[j],
+                    "meta": {
+                        "weight_hash": weight_hash,
+                        "normalization": {"mean": list(meta.mean), "std": list(meta.std)},
+                        "color_order": meta.color_order,
+                        "teacher_input_size": list(meta.input_size),
+                        "source_size": 256,
+                        "cache_schema_version": CACHE_SCHEMA_VERSION,
+                        "projection_seed": args.projection_seed,
+                        "projection_in": int(cin),
+                    },
+                }
+                torch.save(entry, out_root / f"{sid}.pt")
+            n_done += len(batch_ids)
+            if start == 0 or n_done % 1000 < bs:
+                print(f"[cache-v2] {args.teacher_package}/{dataset}/{split} {n_done}/{len(sample_ids)}", flush=True)
 
     manifest = {
         "teacher_id": args.teacher_package,
@@ -135,11 +149,6 @@ def main() -> None:
     }
     (out_root / "manifest.json").write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(f"[cache-v2] done: {len(sample_ids)} samples -> {out_root}")
-
-
-def package_meta_weight(teacher_id: str, weight_dir: str) -> Path:
-    from models.distill.teacher_package import TEACHER_REGISTRY
-    return Path(weight_dir) / TEACHER_REGISTRY[teacher_id].weight
 
 
 if __name__ == "__main__":
