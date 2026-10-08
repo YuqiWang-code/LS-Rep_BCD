@@ -1,308 +1,349 @@
 {
+  "_meta": {
+    "unit": "pp",
+    "reward_field": "val_delta_f1_pp",
+    "note": "no test_* field by construction"
+  },
   "sam2": {
     "SYSU": {
       "experiment_id": "TV-SAM",
-      "has_val": true,
-      "val_f1": 0.812413,
-      "val_iou": 0.684087,
-      "val_delta_f1": -0.0031279999999999086,
-      "val_delta_iou": -0.0044480000000000075
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-SAM/SYSU/train_log.txt",
+      "log_sha256": "73101fc20669018e",
+      "val_f1_pp": 81.24130000000001,
+      "val_iou_pp": 68.4087,
+      "val_delta_f1_pp": -0.31279999999999086,
+      "val_delta_iou_pp": -0.44480000000000075
     },
     "WHU": {
       "experiment_id": "TV-SAM",
-      "has_val": true,
-      "val_f1": 0.944861,
-      "val_iou": 0.895485,
-      "val_delta_f1": -0.003370000000000095,
-      "val_delta_iou": -0.006072999999999995
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-SAM/WHU/train_log.txt",
+      "log_sha256": "e34f278c87571ff1",
+      "val_f1_pp": 94.4861,
+      "val_iou_pp": 89.5485,
+      "val_delta_f1_pp": -0.3370000000000095,
+      "val_delta_iou_pp": -0.6072999999999995
     },
     "CDD": {
       "experiment_id": "TV-SAM",
-      "has_val": true,
-      "val_f1": 0.977294,
-      "val_iou": 0.955597,
-      "val_delta_f1": -9.99999999995449e-06,
-      "val_delta_iou": -1.8999999999991246e-05
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-SAM/CDD/train_log.txt",
+      "log_sha256": "4dab3abe5cad27fa",
+      "val_f1_pp": 97.7294,
+      "val_iou_pp": 95.5597,
+      "val_delta_f1_pp": -0.000999999999995449,
+      "val_delta_iou_pp": -0.0018999999999991246
     },
     "LEVIR": {
       "experiment_id": "TV-SAM",
-      "has_val": true,
-      "val_f1": 0.914065,
-      "val_iou": 0.84173,
-      "val_delta_f1": -0.0008930000000000327,
-      "val_delta_iou": -0.0015169999999999906
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-SAM/LEVIR/train_log.txt",
+      "log_sha256": "6a2ffd47e7c8eb57",
+      "val_f1_pp": 91.40650000000001,
+      "val_iou_pp": 84.173,
+      "val_delta_f1_pp": -0.08930000000000327,
+      "val_delta_iou_pp": -0.15169999999999906
     }
   },
   "dinov2": {
     "SYSU": {
       "experiment_id": "TV-D2",
-      "has_val": true,
-      "val_f1": 0.811646,
-      "val_iou": 0.683,
-      "val_delta_f1": -0.003894999999999982,
-      "val_delta_iou": -0.005534999999999957
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D2/SYSU/train_log.txt",
+      "log_sha256": "621ffda315197e69",
+      "val_f1_pp": 81.1646,
+      "val_iou_pp": 68.30000000000001,
+      "val_delta_f1_pp": -0.3894999999999982,
+      "val_delta_iou_pp": -0.5534999999999957
     },
     "WHU": {
       "experiment_id": "TV-D2",
-      "has_val": true,
-      "val_f1": 0.944007,
-      "val_iou": 0.893952,
-      "val_delta_f1": -0.0042240000000000055,
-      "val_delta_iou": -0.007606000000000002
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D2/WHU/train_log.txt",
+      "log_sha256": "a33dc81c666ca496",
+      "val_f1_pp": 94.4007,
+      "val_iou_pp": 89.3952,
+      "val_delta_f1_pp": -0.42240000000000055,
+      "val_delta_iou_pp": -0.7606000000000002
     },
     "CDD": {
       "experiment_id": "TV-D2",
-      "has_val": true,
-      "val_f1": 0.977152,
-      "val_iou": 0.955324,
-      "val_delta_f1": -0.00015199999999992997,
-      "val_delta_iou": -0.00029200000000007
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D2/CDD/train_log.txt",
+      "log_sha256": "1cca5d1e66899bf2",
+      "val_f1_pp": 97.7152,
+      "val_iou_pp": 95.5324,
+      "val_delta_f1_pp": -0.015199999999992997,
+      "val_delta_iou_pp": -0.029200000000006998
     },
     "LEVIR": {
       "experiment_id": "TV-D2",
-      "has_val": true,
-      "val_f1": 0.914032,
-      "val_iou": 0.841674,
-      "val_delta_f1": -0.0009260000000000934,
-      "val_delta_iou": -0.0015729999999999356
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D2/LEVIR/train_log.txt",
+      "log_sha256": "7fab3e407f9213d4",
+      "val_f1_pp": 91.4032,
+      "val_iou_pp": 84.1674,
+      "val_delta_f1_pp": -0.09260000000000934,
+      "val_delta_iou_pp": -0.15729999999999356
     }
   },
   "dinov3_lvd": {
     "SYSU": {
       "experiment_id": "TV-D3N",
-      "has_val": true,
-      "val_f1": 0.814596,
-      "val_iou": 0.687188,
-      "val_delta_f1": -0.0009449999999999736,
-      "val_delta_iou": -0.001346999999999987
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3N/SYSU/train_log.txt",
+      "log_sha256": "66876e1b286bb2ae",
+      "val_f1_pp": 81.4596,
+      "val_iou_pp": 68.7188,
+      "val_delta_f1_pp": -0.09449999999999736,
+      "val_delta_iou_pp": -0.1346999999999987
     },
     "WHU": {
       "experiment_id": "TV-D3N",
-      "has_val": true,
-      "val_f1": 0.945136,
-      "val_iou": 0.895978,
-      "val_delta_f1": -0.00309500000000007,
-      "val_delta_iou": -0.005579999999999918
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3N/WHU/train_log.txt",
+      "log_sha256": "1297481e1c2e0dff",
+      "val_f1_pp": 94.5136,
+      "val_iou_pp": 89.5978,
+      "val_delta_f1_pp": -0.309500000000007,
+      "val_delta_iou_pp": -0.5579999999999918
     },
     "CDD": {
       "experiment_id": "TV-D3N",
-      "has_val": true,
-      "val_f1": 0.97683,
-      "val_iou": 0.95471,
-      "val_delta_f1": -0.00047399999999997444,
-      "val_delta_iou": -0.0009060000000000734
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3N/CDD/train_log.txt",
+      "log_sha256": "8e060acbe6d1e338",
+      "val_f1_pp": 97.68299999999999,
+      "val_iou_pp": 95.47099999999999,
+      "val_delta_f1_pp": -0.047399999999997444,
+      "val_delta_iou_pp": -0.09060000000000734
     },
     "LEVIR": {
       "experiment_id": "TV-D3N",
-      "has_val": true,
-      "val_f1": 0.916282,
-      "val_iou": 0.845499,
-      "val_delta_f1": 0.0013239999999999919,
-      "val_delta_iou": 0.0022520000000000318
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3N/LEVIR/train_log.txt",
+      "log_sha256": "0003b292fef64202",
+      "val_f1_pp": 91.6282,
+      "val_iou_pp": 84.5499,
+      "val_delta_f1_pp": 0.13239999999999919,
+      "val_delta_iou_pp": 0.22520000000000318
     }
   },
   "dinov3_sat": {
     "SYSU": {
       "experiment_id": "TV-D3S",
-      "has_val": true,
-      "val_f1": 0.812549,
-      "val_iou": 0.68428,
-      "val_delta_f1": -0.0029919999999999947,
-      "val_delta_iou": -0.004255000000000009
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3S/SYSU/train_log.txt",
+      "log_sha256": "de77bd28bc82c822",
+      "val_f1_pp": 81.25489999999999,
+      "val_iou_pp": 68.428,
+      "val_delta_f1_pp": -0.29919999999999947,
+      "val_delta_iou_pp": -0.4255000000000009
     },
     "WHU": {
       "experiment_id": "TV-D3S",
-      "has_val": true,
-      "val_f1": 0.94622,
-      "val_iou": 0.89793,
-      "val_delta_f1": -0.002011000000000096,
-      "val_delta_iou": -0.0036279999999999646
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3S/WHU/train_log.txt",
+      "log_sha256": "4e8aa5423c75dd18",
+      "val_f1_pp": 94.622,
+      "val_iou_pp": 89.793,
+      "val_delta_f1_pp": -0.2011000000000096,
+      "val_delta_iou_pp": -0.36279999999999646
     },
     "CDD": {
       "experiment_id": "TV-D3S",
-      "has_val": true,
-      "val_f1": 0.976948,
-      "val_iou": 0.954936,
-      "val_delta_f1": -0.00035599999999991194,
-      "val_delta_iou": -0.0006800000000000139
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3S/CDD/train_log.txt",
+      "log_sha256": "458256c050f61903",
+      "val_f1_pp": 97.6948,
+      "val_iou_pp": 95.4936,
+      "val_delta_f1_pp": -0.035599999999991194,
+      "val_delta_iou_pp": -0.06800000000000139
     },
     "LEVIR": {
       "experiment_id": "TV-D3S",
-      "has_val": true,
-      "val_f1": 0.914708,
-      "val_iou": 0.842822,
-      "val_delta_f1": -0.0002500000000000835,
-      "val_delta_iou": -0.0004250000000000087
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3S/LEVIR/train_log.txt",
+      "log_sha256": "914b408484aa15b4",
+      "val_f1_pp": 91.4708,
+      "val_iou_pp": 84.28219999999999,
+      "val_delta_f1_pp": -0.02500000000000835,
+      "val_delta_iou_pp": -0.04250000000000087
     }
   },
   "remoteclip": {
     "SYSU": {
       "experiment_id": "TV-RCLIP",
-      "has_val": true,
-      "val_f1": 0.80981,
-      "val_iou": 0.680404,
-      "val_delta_f1": -0.005730999999999931,
-      "val_delta_iou": -0.008131
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RCLIP/SYSU/train_log.txt",
+      "log_sha256": "9c9c537433034686",
+      "val_f1_pp": 80.98100000000001,
+      "val_iou_pp": 68.0404,
+      "val_delta_f1_pp": -0.5730999999999931,
+      "val_delta_iou_pp": -0.8130999999999999
     },
     "WHU": {
       "experiment_id": "TV-RCLIP",
-      "has_val": true,
-      "val_f1": 0.948187,
-      "val_iou": 0.901479,
-      "val_delta_f1": -4.4000000000044004e-05,
-      "val_delta_iou": -7.899999999994023e-05
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RCLIP/WHU/train_log.txt",
+      "log_sha256": "645d3e9a5bc0e9cb",
+      "val_f1_pp": 94.8187,
+      "val_iou_pp": 90.1479,
+      "val_delta_f1_pp": -0.0044000000000044,
+      "val_delta_iou_pp": -0.007899999999994023
     },
     "CDD": {
       "experiment_id": "TV-RCLIP",
-      "has_val": true,
-      "val_f1": 0.9771,
-      "val_iou": 0.955226,
-      "val_delta_f1": -0.00020399999999998197,
-      "val_delta_iou": -0.00039000000000000146
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RCLIP/CDD/train_log.txt",
+      "log_sha256": "81b183da94580bdf",
+      "val_f1_pp": 97.71,
+      "val_iou_pp": 95.5226,
+      "val_delta_f1_pp": -0.020399999999998197,
+      "val_delta_iou_pp": -0.039000000000000146
     },
     "LEVIR": {
       "experiment_id": "TV-RCLIP",
-      "has_val": true,
-      "val_f1": 0.915023,
-      "val_iou": 0.843357,
-      "val_delta_f1": 6.499999999998174e-05,
-      "val_delta_iou": 0.0001100000000000545
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RCLIP/LEVIR/train_log.txt",
+      "log_sha256": "501dd23536468e1b",
+      "val_f1_pp": 91.5023,
+      "val_iou_pp": 84.3357,
+      "val_delta_f1_pp": 0.006499999999998174,
+      "val_delta_iou_pp": 0.01100000000000545
     }
   },
   "mars": {
     "SYSU": {
       "experiment_id": "TV-MARS",
-      "has_val": true,
-      "val_f1": 0.814317,
-      "val_iou": 0.686791,
-      "val_delta_f1": -0.0012240000000000029,
-      "val_delta_iou": -0.0017439999999999678
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-MARS/SYSU/train_log.txt",
+      "log_sha256": "b9ad8ca0395c5eb5",
+      "val_f1_pp": 81.43169999999999,
+      "val_iou_pp": 68.6791,
+      "val_delta_f1_pp": -0.12240000000000029,
+      "val_delta_iou_pp": -0.17439999999999678
     },
     "WHU": {
       "experiment_id": "TV-MARS",
-      "has_val": true,
-      "val_f1": 0.946726,
-      "val_iou": 0.898841,
-      "val_delta_f1": -0.0015050000000000896,
-      "val_delta_iou": -0.0027169999999999694
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-MARS/WHU/train_log.txt",
+      "log_sha256": "6b089ef80b195f46",
+      "val_f1_pp": 94.67259999999999,
+      "val_iou_pp": 89.8841,
+      "val_delta_f1_pp": -0.15050000000000896,
+      "val_delta_iou_pp": -0.27169999999999694
     },
     "CDD": {
       "experiment_id": "TV-MARS",
-      "has_val": true,
-      "val_f1": 0.97712,
-      "val_iou": 0.955264,
-      "val_delta_f1": -0.00018399999999996197,
-      "val_delta_iou": -0.00035200000000001896
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-MARS/CDD/train_log.txt",
+      "log_sha256": "305b245a1e06e9fb",
+      "val_f1_pp": 97.712,
+      "val_iou_pp": 95.5264,
+      "val_delta_f1_pp": -0.018399999999996197,
+      "val_delta_iou_pp": -0.035200000000001896
     },
     "LEVIR": {
       "experiment_id": "TV-MARS",
-      "has_val": true,
-      "val_f1": 0.915914,
-      "val_iou": 0.844872,
-      "val_delta_f1": 0.0009559999999999569,
-      "val_delta_iou": 0.0016249999999999876
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-MARS/LEVIR/train_log.txt",
+      "log_sha256": "6b752131fab9168f",
+      "val_f1_pp": 91.59140000000001,
+      "val_iou_pp": 84.4872,
+      "val_delta_f1_pp": 0.09559999999999569,
+      "val_delta_iou_pp": 0.16249999999999876
     }
   },
   "anysat": {
     "SYSU": {
       "experiment_id": "TV-ANYSAT",
-      "has_val": true,
-      "val_f1": 0.804776,
-      "val_iou": 0.673327,
-      "val_delta_f1": -0.010764999999999914,
-      "val_delta_iou": -0.015208
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/SYSU/train_log.txt",
+      "log_sha256": "459ee022be25e385",
+      "val_f1_pp": 80.47760000000001,
+      "val_iou_pp": 67.3327,
+      "val_delta_f1_pp": -1.0764999999999914,
+      "val_delta_iou_pp": -1.5208
     },
     "WHU": {
       "experiment_id": "TV-ANYSAT",
-      "has_val": true,
-      "val_f1": 0.94939,
-      "val_iou": 0.903655,
-      "val_delta_f1": 0.00115899999999991,
-      "val_delta_iou": 0.0020970000000000155
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/WHU/train_log.txt",
+      "log_sha256": "6b0a4ba99d9e0f1a",
+      "val_f1_pp": 94.939,
+      "val_iou_pp": 90.3655,
+      "val_delta_f1_pp": 0.11589999999999101,
+      "val_delta_iou_pp": 0.20970000000000155
     },
     "CDD": {
       "experiment_id": "TV-ANYSAT",
-      "has_val": true,
-      "val_f1": 0.977121,
-      "val_iou": 0.955266,
-      "val_delta_f1": -0.00018299999999993322,
-      "val_delta_iou": -0.0003500000000000725
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/CDD/train_log.txt",
+      "log_sha256": "bae3a3ef47075e4c",
+      "val_f1_pp": 97.7121,
+      "val_iou_pp": 95.5266,
+      "val_delta_f1_pp": -0.01829999999999332,
+      "val_delta_iou_pp": -0.03500000000000725
     },
     "LEVIR": {
       "experiment_id": "TV-ANYSAT",
-      "has_val": true,
-      "val_f1": 0.916418,
-      "val_iou": 0.84573,
-      "val_delta_f1": 0.0014599999999999058,
-      "val_delta_iou": 0.002483000000000013
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/LEVIR/train_log.txt",
+      "log_sha256": "8a64f2c77ab50b15",
+      "val_f1_pp": 91.64179999999999,
+      "val_iou_pp": 84.573,
+      "val_delta_f1_pp": 0.14599999999999058,
+      "val_delta_iou_pp": 0.2483000000000013
     }
   },
   "universat": {
     "SYSU": {
       "experiment_id": "TV-UNISAT",
-      "has_val": true,
-      "val_f1": 0.811179,
-      "val_iou": 0.682339,
-      "val_delta_f1": -0.004361999999999977,
-      "val_delta_iou": -0.006195999999999979
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-UNISAT/SYSU/train_log.txt",
+      "log_sha256": "8d26ae3d7be5f44d",
+      "val_f1_pp": 81.11789999999999,
+      "val_iou_pp": 68.2339,
+      "val_delta_f1_pp": -0.4361999999999977,
+      "val_delta_iou_pp": -0.6195999999999979
     },
     "WHU": {
       "experiment_id": "TV-UNISAT",
-      "has_val": true,
-      "val_f1": 0.943961,
-      "val_iou": 0.89387,
-      "val_delta_f1": -0.004269999999999996,
-      "val_delta_iou": -0.007687999999999917
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-UNISAT/WHU/train_log.txt",
+      "log_sha256": "c1ac47bb8a278ae3",
+      "val_f1_pp": 94.3961,
+      "val_iou_pp": 89.387,
+      "val_delta_f1_pp": -0.4269999999999996,
+      "val_delta_iou_pp": -0.7687999999999917
     },
     "CDD": {
       "experiment_id": "TV-UNISAT",
-      "has_val": true,
-      "val_f1": 0.977256,
-      "val_iou": 0.955524,
-      "val_delta_f1": -4.799999999993698e-05,
-      "val_delta_iou": -9.199999999998099e-05
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-UNISAT/CDD/train_log.txt",
+      "log_sha256": "5d80d910a025973e",
+      "val_f1_pp": 97.7256,
+      "val_iou_pp": 95.5524,
+      "val_delta_f1_pp": -0.004799999999993698,
+      "val_delta_iou_pp": -0.009199999999998099
     },
     "LEVIR": {
       "experiment_id": "TV-UNISAT",
-      "has_val": true,
-      "val_f1": 0.913202,
-      "val_iou": 0.840268,
-      "val_delta_f1": -0.0017560000000000908,
-      "val_delta_iou": -0.002978999999999954
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-UNISAT/LEVIR/train_log.txt",
+      "log_sha256": "cbc33a0f39e3cba6",
+      "val_f1_pp": 91.3202,
+      "val_iou_pp": 84.02680000000001,
+      "val_delta_f1_pp": -0.17560000000000908,
+      "val_delta_iou_pp": -0.2978999999999954
     }
   },
   "radio": {
     "SYSU": {
       "experiment_id": "TV-RADIO",
-      "has_val": true,
-      "val_f1": 0.813126,
-      "val_iou": 0.685099,
-      "val_delta_f1": -0.002414999999999945,
-      "val_delta_iou": -0.0034359999999999946
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RADIO/SYSU/train_log.txt",
+      "log_sha256": "acd503cdae32fece",
+      "val_f1_pp": 81.3126,
+      "val_iou_pp": 68.5099,
+      "val_delta_f1_pp": -0.2414999999999945,
+      "val_delta_iou_pp": -0.34359999999999946
     },
     "WHU": {
       "experiment_id": "TV-RADIO",
-      "has_val": true,
-      "val_f1": 0.945204,
-      "val_iou": 0.896102,
-      "val_delta_f1": -0.003027000000000002,
-      "val_delta_iou": -0.005456000000000016
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RADIO/WHU/train_log.txt",
+      "log_sha256": "d2019bc44ce8c122",
+      "val_f1_pp": 94.52040000000001,
+      "val_iou_pp": 89.61019999999999,
+      "val_delta_f1_pp": -0.3027000000000002,
+      "val_delta_iou_pp": -0.5456000000000016
     },
     "CDD": {
       "experiment_id": "TV-RADIO",
-      "has_val": true,
-      "val_f1": 0.977167,
-      "val_iou": 0.955353,
-      "val_delta_f1": -0.00013699999999994272,
-      "val_delta_iou": -0.0002630000000000132
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RADIO/CDD/train_log.txt",
+      "log_sha256": "65ddbe1616e19447",
+      "val_f1_pp": 97.7167,
+      "val_iou_pp": 95.5353,
+      "val_delta_f1_pp": -0.013699999999994272,
+      "val_delta_iou_pp": -0.026300000000001322
     },
     "LEVIR": {
       "experiment_id": "TV-RADIO",
-      "has_val": true,
-      "val_f1": 0.916384,
-      "val_iou": 0.845672,
-      "val_delta_f1": 0.0014259999999999273,
-      "val_delta_iou": 0.0024250000000000105
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RADIO/LEVIR/train_log.txt",
+      "log_sha256": "a0431b86f3398f6d",
+      "val_f1_pp": 91.6384,
+      "val_iou_pp": 84.5672,
+      "val_delta_f1_pp": 0.14259999999999273,
+      "val_delta_iou_pp": 0.24250000000000105
     }
   }
 }

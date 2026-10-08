@@ -1,0 +1,43 @@
+{
+  "arm": "AG-03",
+  "feature_set": "sig_probe_ext_meta",
+  "delta_pp": 0.2,
+  "kappa": 1.0,
+  "seed": 2333,
+  "registry_sha256": "af112057fe1d6270",
+  "feature_names": [
+    "change_ratio",
+    "empty_pair_ratio",
+    "area_p50_g",
+    "small_fraction",
+    "boundary_density",
+    "hard_pseudo_change_fraction",
+    "illumination_unchanged",
+    "probe_change_mean",
+    "hard_negative_gap",
+    "probe_balanced_auroc",
+    "probe_hard_negative_separation",
+    "probe_unchanged_leakage_ratio",
+    "meta_log2_stride",
+    "meta_pyramid",
+    "meta_dom_satellite"
+  ],
+  "actions": {
+    "SYSU": {
+      "teacher": null,
+      "reason": "safe_set_or_none"
+    },
+    "WHU": {
+      "teacher": null,
+      "reason": "safe_set_or_none"
+    },
+    "CDD": {
+      "teacher": null,
+      "reason": "safe_set_or_none"
+    },
+    "LEVIR": {
+      "teacher": null,
+      "reason": "safe_set_or_none"
+    }
+  }
+}

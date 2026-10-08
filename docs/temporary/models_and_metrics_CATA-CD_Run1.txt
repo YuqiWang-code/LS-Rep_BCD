@@ -323,7 +323,193 @@ def compute_dataset_signature(data_root, dataset_name, split: str = "train", max
     return signature.astype(np.float32), {name: float(v) for name, v in zip(SIGNATURE_NAMES, signature)}
 
 
-__all__ = ["compute_dataset_signature", "SIGNATURE_NAMES"]
+# =====================================================================================
+# schema_version = 2  (review 2026-10-08)
+#   - fixes: n_components counts 0 for empty label maps; gradient uses the Sobel
+#     MAGNITUDE sqrt(gx^2+gy^2) instead of the mixed derivative; object-area
+#     quantiles are aggregated GLOBALLY over all components (not per-image means);
+#   - adds : empty_pair_ratio, boundary_density, change_area_cv, global area
+#     quantiles, illumination_unchanged, hard_pseudo_change_fraction;
+#   - path : resolves A/B/label with the same CDD test_/png<->jpg fallback as
+#     models/datasets/cd_dataset.py::CDDataset._resolve_path.
+# v1 is kept untouched for reproducibility; v2 is written to a separate file.
+# =====================================================================================
+
+SIGNATURE_V2_VERSION = 2
+SIGNATURE_V2_NAMES = [
+    # change geometry (8)
+    "change_ratio", "empty_pair_ratio", "n_components_per_img",
+    "small_fraction", "large_fraction", "boundary_density", "compactness", "change_area_cv",
+    # global object-area quantiles (3)
+    "area_p25_g", "area_p50_g", "area_p90_g",
+    # bi-temporal appearance (7)
+    "rgb_mean_shift", "rgb_std_shift", "hist_js", "edge_disagreement",
+    "grad_magnitude_diff", "lowfreq_diff", "highfreq_diff",
+    # registration / pseudo-change (2)
+    "illumination_unchanged", "hard_pseudo_change_fraction",
+]
+
+
+def _resolve(data_root, folder: str, entry: str, dataset_name: str) -> Path:
+    """Same fallback logic as ``CDDataset._resolve_path`` (CDD test_ prefix, png<->jpg)."""
+    relative = Path(entry)
+    candidates = [Path(data_root) / folder / relative]
+    if str(dataset_name).upper() == "CDD" and not relative.name.startswith("test_"):
+        candidates.append(Path(data_root) / folder / relative.with_name(f"test_{relative.name}"))
+    for base in tuple(candidates):
+        suffix = base.suffix.lower()
+        if suffix == ".png":
+            candidates.append(base.with_suffix(".jpg"))
+        elif suffix in {".jpg", ".jpeg"}:
+            candidates.append(base.with_suffix(".png"))
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    raise FileNotFoundError(f"cannot resolve {folder}/{entry} under {data_root}")
+
+
+def _grad_magnitude(gray: np.ndarray) -> np.ndarray:
+    gx = cv2.Sobel(gray, cv2.CV_32F, 1, 0, ksize=3)
+    gy = cv2.Sobel(gray, cv2.CV_32F, 0, 1, ksize=3)
+    return np.sqrt(gx * gx + gy * gy)
+
+
+def _sample_features_v2(data_root, sample_id, dataset_name):
+    pre = _read_rgb(_resolve(data_root, "A", sample_id, dataset_name))
+    post = _read_rgb(_resolve(data_root, "B", sample_id, dataset_name))
+    label = _read_gray(_resolve(data_root, "label", sample_id, dataset_name))
+    if pre.shape[:2] != post.shape[:2] or pre.shape[:2] != label.shape[:2]:
+        raise ValueError(f"shape mismatch for {sample_id}")
+
+    lab = (label >= 128).astype(np.uint8)
+    H, W = lab.shape
+    area = H * W
+    change_ratio = float(lab.mean())
+
+    n, _labmap, stats, _c = cv2.connectedComponentsWithStats(lab, connectivity=8)
+    comp_areas = stats[1:, cv2.CC_STAT_AREA].astype(np.float32)
+    n_components = int(len(comp_areas))  # 0 for an empty (unchanged) label map
+    small_fraction = float((comp_areas < 0.005 * area).sum() / max(len(comp_areas), 1))
+    large_fraction = float((comp_areas > 0.05 * area).sum() / max(len(comp_areas), 1))
+
+    contours, _ = cv2.findContours(lab, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    perimeter = sum(cv2.arcLength(c, True) for c in contours)
+    changed = int(lab.sum())
+    boundary_density = float(perimeter / (changed + 1e-6))
+    compactness = float((perimeter ** 2) / (4 * np.pi * changed + 1e-6)) if changed else 0.0
+
+    pre_f, post_f = pre.astype(np.float32), post.astype(np.float32)
+    absdiff = np.abs(post_f - pre_f)
+    rgb_mean_shift = float(absdiff.mean())
+    rgb_std_shift = float(np.abs(post_f.std(axis=(0, 1)) - pre_f.std(axis=(0, 1))).mean())
+    hist_js = float(np.mean([_hist_js(pre_f[..., c], post_f[..., c]) for c in range(3)]))
+
+    pre_g = cv2.cvtColor(pre, cv2.COLOR_RGB2GRAY)
+    post_g = cv2.cvtColor(post, cv2.COLOR_RGB2GRAY)
+    pre_e = cv2.Canny(pre_g, 50, 150)
+    post_e = cv2.Canny(post_g, 50, 150)
+    edge_disagreement = float(np.abs(pre_e.astype(np.float32) - post_e.astype(np.float32)).mean())
+    grad_magnitude_diff = float(np.abs(_grad_magnitude(post_g) - _grad_magnitude(pre_g)).mean())
+
+    def _freq(img, low=True):
+        f = np.fft.fftshift(np.fft.fft2(img.astype(np.float32)))
+        h, w = img.shape
+        yy, xx = np.ogrid[:h, :w]
+        r = np.sqrt((yy - h // 2) ** 2 + (xx - w // 2) ** 2)
+        mask = (r < 16) if low else (r >= 16)
+        return float(np.abs(f[mask]).mean())
+
+    lowfreq_diff = float(np.abs(_freq(post_g, True) - _freq(pre_g, True)))
+    highfreq_diff = float(np.abs(_freq(post_g, False) - _freq(pre_g, False)))
+
+    unchanged = lab == 0
+    illumination_unchanged = float(absdiff[unchanged].mean() if unchanged.any() else 0.0)
+    changed_mask = lab == 1
+
+    vec = np.array([
+        change_ratio, float(changed == 0), n_components,
+        small_fraction, large_fraction, boundary_density, compactness, 0.0,  # cv filled in aggregate
+        *[0.0, 0.0, 0.0],                                                    # global area filled in aggregate
+        rgb_mean_shift, rgb_std_shift, hist_js,
+        edge_disagreement, grad_magnitude_diff, lowfreq_diff, highfreq_diff,
+        illumination_unchanged, 0.0,                                         # hard-pseudo filled in aggregate
+    ], dtype=np.float32)
+    return vec, comp_areas / float(area), absdiff, changed_mask, unchanged
+
+
+def _global_object_area_quantiles(all_areas: list[np.ndarray]) -> list[float]:
+    if not all_areas:
+        return [0.0, 0.0, 0.0]
+    flat = np.concatenate(all_areas)
+    if flat.size == 0:
+        return [0.0, 0.0, 0.0]
+    q = np.percentile(flat, [25, 50, 90])
+    return [float(v) for v in q]
+
+
+def compute_dataset_signature_v2(data_root, dataset_name, split: str = "train",
+                                 max_samples: int | None = None, pilot: int = 200):
+    """schema_version=2 dataset signature (global object-area quantiles + fixed geometry)."""
+    data_root = Path(data_root)
+    dataset_name = str(dataset_name).upper()
+    ids = [
+        line.strip()
+        for line in (data_root / "list" / f"{split}.txt").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    if max_samples is not None:
+        ids = ids[:max_samples]
+
+    # pilot pass: dataset-level threshold = q90 of |A-B| on changed pixels (TRAIN only)
+    pilot_ids = ids[: min(pilot, len(ids))]
+    changed_diffs = []
+    for sid in pilot_ids:
+        pre = _read_rgb(_resolve(data_root, "A", sid, dataset_name)).astype(np.float32)
+        post = _read_rgb(_resolve(data_root, "B", sid, dataset_name)).astype(np.float32)
+        lab = (_read_gray(_resolve(data_root, "label", sid, dataset_name)) >= 128)
+        if lab.any():
+            changed_diffs.append(np.abs(post - pre)[lab].mean())
+    thr = float(np.percentile(changed_diffs, 90)) if changed_diffs else 0.0
+
+    vecs, area_list, cv_list, ratios = [], [], [], []
+    hard_fracs = []
+    for sid in ids:
+        vec, areas_norm, absdiff, changed_mask, unchanged = _sample_features_v2(data_root, sid, dataset_name)
+        vecs.append(vec)
+        area_list.append(areas_norm)
+        ratio = float(vec[0])
+        ratios.append(ratio)
+        # hard pseudo-change: fraction of unchanged pixels whose |A-B| exceeds the
+        # changed-pixel q90 threshold (difficulty of separating pseudo change)
+        if unchanged.any() and thr > 0:
+            hard_fracs.append(float((absdiff.max(axis=2)[unchanged] > thr).mean()))
+        else:
+            hard_fracs.append(0.0)
+
+        # per-image boundary/area CV input
+        n_comp = float(vec[2])
+        cv_list.append(n_comp)
+
+    mat = np.stack(vecs, axis=0)
+    sig = mat.mean(axis=0)
+    areas_q = _global_object_area_quantiles(area_list)
+    sig[8:11] = areas_q
+    sig[7] = float(np.std(ratios) / (np.mean(ratios) + 1e-6))       # change_area_cv
+    sig[-1] = float(np.mean(hard_fracs))                             # hard_pseudo_change_fraction
+
+    details = {name: float(v) for name, v in zip(SIGNATURE_V2_NAMES, sig)}
+    details["_pilot_threshold_absdiff"] = thr
+    details["_n_samples"] = len(ids)
+    return sig.astype(np.float32), details
+
+
+__all__ = [
+    "compute_dataset_signature",
+    "compute_dataset_signature_v2",
+    "SIGNATURE_NAMES",
+    "SIGNATURE_V2_NAMES",
+    "SIGNATURE_V2_VERSION",
+]
 
 
 
@@ -392,6 +578,291 @@ __all__ = ["TeacherAgentPolicy", "select_action", "train_policy"]
 
 
 ====================================================================
+  agent  |  models/agent/safe_selector.py
+====================================================================
+
+"""U-SafeAgent core: uncertainty-aware safe-set teacher selection (review §6).
+
+Three layers:
+  1. eligibility  -- train-only sanity checks (NaN / missing probe / degenerate feature)
+  2. estimation   -- one SHARED weighted ridge for the mean utility ``mu`` (pp) plus a
+                     dataset-cluster "group jackknife" spread as a model-uncertainty
+                     proxy ``u_model`` (3 fits only -> sensitivity proxy, NOT a
+                     conformal or 95% guarantee)
+  3. decision     -- safe set ``S(D) = {T : mu - kappa*u > delta}`` and
+                     ``a(D) = argmax_{T in S} (mu - kappa*u)`` else ``None``
+
+All quantities are in **pp** (percentage points). Test data never enters this module.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+
+import numpy as np
+
+DEFAULT_DELTA_PP = 0.20   # project pre-registered "Strong Positive" bar
+DEFAULT_KAPPA = 1.0
+DEFAULT_EPS_PP = 0.0      # IoU-consistency gate slack
+
+
+def _standardize_fit(X: np.ndarray):
+    mu = X.mean(axis=0)
+    sd = X.std(axis=0)
+    sd[sd < 1e-9] = 1.0
+    return mu, sd
+
+
+def _weighted_ridge(X: np.ndarray, y: np.ndarray, w: np.ndarray, lam: float) -> np.ndarray:
+    """Solve (X^T W X + lam I) beta = X^T W y with an intercept column."""
+    Xa = np.concatenate([X, np.ones((len(X), 1), dtype=np.float64)], axis=1)
+    W = w.reshape(-1, 1)
+    XtW = (Xa * W).T
+    A = XtW @ Xa + lam * np.eye(Xa.shape[1], dtype=np.float64)
+    A[-1, -1] -= lam  # do not regularize the intercept
+    b = XtW @ y
+    return np.linalg.solve(A, b)
+
+
+@dataclass
+class Decision:
+    teacher: str | None
+    margin_pp: float
+    mu_pp: float
+    u_pp: float
+    reason: str
+    per_teacher: dict = field(default_factory=dict)
+
+
+class SafeSelector:
+    def __init__(self, lam: float = 1.0, delta_pp: float = DEFAULT_DELTA_PP,
+                 kappa: float = DEFAULT_KAPPA):
+        self.lam = float(lam)
+        self.delta_pp = float(delta_pp)
+        self.kappa = float(kappa)
+        self.feature_names: list[str] = []
+        self._x_mu = None
+        self._x_sd = None
+        self._y_mu = 0.0
+        self._y_sd = 1.0
+        self._beta = None
+        self._jackknife_betas: list[np.ndarray] = []
+        self._train_groups: list[str] = []
+
+    # ---------------------------------------------------------------- fitting
+    def fit(self, X: np.ndarray, y: np.ndarray, groups, feature_names=None):
+        X = np.asarray(X, dtype=np.float64)
+        y = np.asarray(y, dtype=np.float64)
+        groups = list(groups)
+        if len(X) != len(y) != len(groups):
+            raise ValueError("X / y / groups length mismatch")
+        if len(set(groups)) < 2:
+            raise ValueError("need >=2 training datasets for a group jackknife")
+        self.feature_names = list(feature_names or [f"f{i}" for i in range(X.shape[1])])
+
+        self._x_mu, self._x_sd = _standardize_fit(X)
+        self._y_mu = float(y.mean())
+        self._y_sd = float(y.std()) or 1.0
+        Xs = (X - self._x_mu) / self._x_sd
+        ys = (y - self._y_mu) / self._y_sd
+
+        # dataset-cluster balancing: each dataset contributes equal total weight
+        counts = {g: groups.count(g) for g in set(groups)}
+        w = np.array([1.0 / counts[g] for g in groups], dtype=np.float64)
+        w = w / w.mean()
+
+        self._beta = _weighted_ridge(Xs, ys, w, self.lam)
+
+        # group jackknife: refit leaving one TRAINING dataset out
+        self._train_groups = sorted(set(groups))
+        self._jackknife_betas = []
+        for g in self._train_groups:
+            keep = np.array([gg != g for gg in groups])
+            if keep.sum() < 2:
+                continue
+            Xk, yk = Xs[keep], ys[keep]
+            wk = w[keep]
+            wk = wk / wk.mean()
+            self._jackknife_betas.append(_weighted_ridge(Xk, yk, wk, self.lam))
+        return self
+
+    # ------------------------------------------------------------- prediction
+    def _design(self, X: np.ndarray) -> np.ndarray:
+        Xs = (np.asarray(X, dtype=np.float64) - self._x_mu) / self._x_sd
+        return np.concatenate([Xs, np.ones((len(Xs), 1), dtype=np.float64)], axis=1)
+
+    def predict_mu_pp(self, X: np.ndarray) -> np.ndarray:
+        return (self._design(X) @ self._beta) * self._y_sd + self._y_mu
+
+    def model_spread_pp(self, X: np.ndarray) -> np.ndarray:
+        """SD of the leave-one-training-dataset-out predictions (sensitivity proxy)."""
+        if not self._jackknife_betas:
+            return np.zeros(len(X), dtype=np.float64)
+        Xa = self._design(X)
+        preds = np.stack([(Xa @ b) * self._y_sd + self._y_mu for b in self._jackknife_betas], axis=0)
+        return preds.std(axis=0)
+
+    # --------------------------------------------------------------- decision
+    def decide(self, X_teachers: np.ndarray, teacher_ids, u_noise_pp: float = 0.0,
+               u_shift_pp: float = 0.0, eligibility=None) -> Decision:
+        X = np.asarray(X_teachers, dtype=np.float64)
+        if not np.isfinite(X).all():
+            raise ValueError("non-finite teacher features (missing probe must be explicit)")
+
+        mu = self.predict_mu_pp(X)
+        u_model = self.model_spread_pp(X)
+        u = np.sqrt(u_model ** 2 + float(u_noise_pp) ** 2 + float(u_shift_pp) ** 2)
+        margin = mu - self.kappa * u
+
+        per_teacher = {}
+        candidates = []
+        for i, tid in enumerate(teacher_ids):
+            ok = True if eligibility is None else bool(eligibility(tid, X[i]))
+            per_teacher[tid] = {
+                "mu_pp": float(mu[i]),
+                "u_model_pp": float(u_model[i]),
+                "u_noise_pp": float(u_noise_pp),
+                "u_pp": float(u[i]),
+                "margin_pp": float(margin[i]),
+                "eligible": ok,
+            }
+            if ok and margin[i] > self.delta_pp:
+                candidates.append((float(margin[i]), tid))
+
+        if not candidates:
+            return Decision(None, 0.0, 0.0, 0.0, "no_supported_positive_utility", per_teacher)
+        best_margin, best_tid = max(candidates)
+        i = list(teacher_ids).index(best_tid)
+        return Decision(best_tid, best_margin, float(mu[i]), float(u[i]),
+                        "accepted_by_predeclared_margin", per_teacher)
+
+
+class RidgeSelector:
+    """AG-01 baseline: identical features, ridge mean only, plain ``mu > 0`` gate."""
+
+    def __init__(self, lam: float = 1.0):
+        self.inner = SafeSelector(lam=lam, delta_pp=0.0, kappa=0.0)
+
+    def fit(self, X, y, groups, feature_names=None):
+        self.inner.fit(X, y, groups, feature_names)
+        return self
+
+    def decide(self, X_teachers, teacher_ids, u_noise_pp: float = 0.0, u_shift_pp: float = 0.0,
+               eligibility=None) -> Decision:
+        return self.inner.decide(X_teachers, teacher_ids, u_noise_pp=0.0, u_shift_pp=0.0,
+                                 eligibility=eligibility)
+
+
+__all__ = ["SafeSelector", "RidgeSelector", "Decision", "DEFAULT_DELTA_PP", "DEFAULT_KAPPA"]
+
+
+
+
+====================================================================
+  agent  |  models/agent/teacher_metadata.py
+====================================================================
+
+"""Teacher metadata (review §7.6): the minimum auditable, test-free teacher descriptors.
+
+Only fields that are fixed by the model card / checkpoint (never by any experimental
+result, and never by a test ranking) are allowed here:
+
+  training_domain    natural | satellite_eo | mixed
+  primary_objective  segmentation | self_supervision | vision_language | agglomerated
+  native_stride      main dense-output stride (encoded as log2)
+  pyramid_available  native multi-scale output?
+  cache_resolution   the ACTUAL stored Ht x Wt (not the claimed model resolution)
+
+``cache_resolution`` is validated against the on-disk cache manifest when available.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, asdict
+
+TRAINING_DOMAINS = ("natural", "satellite_eo", "mixed")
+PRIMARY_OBJECTIVES = ("segmentation", "self_supervision", "vision_language", "agglomerated")
+
+
+@dataclass(frozen=True)
+class TeacherMeta:
+    teacher_id: str
+    training_domain: str
+    primary_objective: str
+    native_stride: int
+    pyramid_available: bool
+    cache_hw: tuple[int, int]
+
+    def features(self) -> dict:
+        """Numeric encoding used by the selector (teacher-id free)."""
+        return {
+            "meta_log2_stride": float(__import__("math").log2(self.native_stride)),
+            "meta_pyramid": float(self.pyramid_available),
+            "meta_cache_h": float(self.cache_hw[0]),
+            "meta_cache_w": float(self.cache_hw[1]),
+            "meta_dom_natural": float(self.training_domain == "natural"),
+            "meta_dom_satellite": float(self.training_domain == "satellite_eo"),
+            "meta_dom_mixed": float(self.training_domain == "mixed"),
+            "meta_obj_segmentation": float(self.primary_objective == "segmentation"),
+            "meta_obj_ssl": float(self.primary_objective == "self_supervision"),
+            "meta_obj_vl": float(self.primary_objective == "vision_language"),
+            "meta_obj_agglomerated": float(self.primary_objective == "agglomerated"),
+        }
+
+
+# cache_hw = the ACTUAL dense feature grid produced by the frozen encoder at its
+# native input (verified in models/thirdparty/<name>/META + cache manifests).
+TEACHER_METADATA: dict[str, TeacherMeta] = {
+    "sam2": TeacherMeta("sam2", "natural", "segmentation", 16, True, (16, 16)),
+    "dinov2": TeacherMeta("dinov2", "natural", "self_supervision", 14, False, (16, 16)),
+    "dinov3_lvd": TeacherMeta("dinov3_lvd", "natural", "self_supervision", 16, False, (16, 16)),
+    "dinov3_sat": TeacherMeta("dinov3_sat", "satellite_eo", "self_supervision", 16, False, (16, 16)),
+    "remoteclip": TeacherMeta("remoteclip", "satellite_eo", "vision_language", 14, False, (16, 16)),
+    "mars": TeacherMeta("mars", "satellite_eo", "self_supervision", 16, True, (16, 16)),
+    "anysat": TeacherMeta("anysat", "satellite_eo", "self_supervision", 10, False, (25, 25)),
+    "universat": TeacherMeta("universat", "satellite_eo", "self_supervision", 4, False, (64, 64)),
+    "radio": TeacherMeta("radio", "mixed", "agglomerated", 16, False, (14, 14)),
+}
+
+META_FEATURE_NAMES = list(next(iter(TEACHER_METADATA.values())).features().keys())
+
+
+def validate() -> None:
+    for tid, meta in TEACHER_METADATA.items():
+        if tid != meta.teacher_id:
+            raise ValueError(f"teacher id mismatch: {tid} vs {meta.teacher_id}")
+        if meta.training_domain not in TRAINING_DOMAINS:
+            raise ValueError(f"{tid}: bad training_domain {meta.training_domain}")
+        if meta.primary_objective not in PRIMARY_OBJECTIVES:
+            raise ValueError(f"{tid}: bad primary_objective {meta.primary_objective}")
+        if meta.native_stride < 1:
+            raise ValueError(f"{tid}: bad native_stride")
+
+
+def meta_features(teacher_id: str) -> dict:
+    return TEACHER_METADATA[teacher_id].features()
+
+
+def as_json() -> dict:
+    return {tid: asdict(meta) for tid, meta in TEACHER_METADATA.items()}
+
+
+validate()
+
+__all__ = [
+    "TeacherMeta",
+    "TEACHER_METADATA",
+    "META_FEATURE_NAMES",
+    "meta_features",
+    "as_json",
+    "TRAINING_DOMAINS",
+    "PRIMARY_OBJECTIVES",
+]
+
+
+
+
+====================================================================
   agent  |  models/agent/teacher_registry.py
 ====================================================================
 
@@ -399,14 +870,39 @@ __all__ = ["TeacherAgentPolicy", "select_action", "train_policy"]
 
 Strict separation of test vs agent-trainable information:
 - ``research_report.json`` may contain formal test deltas (paper evidence only).
-- ``agent_train_registry.json`` contains only train/val info (Agent input; no test leakage).
+- ``agent_train_registry.json`` contains only train/val info (Agent input; no leakage).
+
+P0 hardening (review 2026-10-08): the accessor is an explicit enum, the Agent-side
+loader **refuses** any ``test_*`` field (fail-fast), and the research report can only
+be opened through a dedicated research-only API that is not used by Agent tooling.
 """
 
 from __future__ import annotations
 
 import json
+from enum import Enum
 from pathlib import Path
 from typing import Dict
+
+
+class RegistryKind(str, Enum):
+    """Only these two registries exist; anything else is an error."""
+
+    AGENT_TRAIN = "agent_train"
+    RESEARCH = "research"
+
+
+AGENT_FORBIDDEN_PREFIX = "test_"
+
+
+def _assert_no_test_leak(node, path: str = "root") -> None:
+    if isinstance(node, dict):
+        for key, value in node.items():
+            if isinstance(key, str) and key.startswith(AGENT_FORBIDDEN_PREFIX):
+                raise PermissionError(
+                    f"agent_train_registry contains forbidden test field: {path}.{key}"
+                )
+            _assert_no_test_leak(value, f"{path}.{key}")
 
 
 class TeacherRegistry:
@@ -416,28 +912,48 @@ class TeacherRegistry:
         self.research_path = self.root / "research_report.json"
         self.agent_path = self.root / "agent_train_registry.json"
 
-    def load(self, which: str) -> Dict:
-        path = self.research_path if which == "research" else self.agent_path
+    # ---- paths -------------------------------------------------------------
+    def path_of(self, kind: RegistryKind) -> Path:
+        return self.research_path if kind is RegistryKind.RESEARCH else self.agent_path
+
+    # ---- generic access (enum-only) ---------------------------------------
+    def load(self, kind: RegistryKind) -> Dict:
+        if not isinstance(kind, RegistryKind):
+            raise TypeError("kind must be a RegistryKind member")
+        path = self.path_of(kind)
         if not path.is_file():
             return {}
         return json.loads(path.read_text(encoding="utf-8"))
 
-    def save(self, data: Dict, which: str) -> None:
-        path = self.research_path if which == "research" else self.agent_path
-        path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    def save(self, data: Dict, kind: RegistryKind) -> None:
+        if not isinstance(kind, RegistryKind):
+            raise TypeError("kind must be a RegistryKind member")
+        if kind is RegistryKind.AGENT_TRAIN:
+            _assert_no_test_leak(data)
+        self.path_of(kind).write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    # ---- Agent-side API (hard leak guard) ---------------------------------
+    def load_agent_train(self) -> Dict:
+        data = self.load(RegistryKind.AGENT_TRAIN)
+        _assert_no_test_leak(data)
+        return data
+
+    # ---- research-only API (never called by Agent tooling) ----------------
+    def load_research(self) -> Dict:
+        return self.load(RegistryKind.RESEARCH)
 
     def record_research(self, teacher_id: str, dataset: str, entry: Dict) -> None:
-        data = self.load("research")
+        data = self.load_research()
         data.setdefault(teacher_id, {})[dataset] = entry
-        self.save(data, "research")
+        self.save(data, RegistryKind.RESEARCH)
 
     def record_agent_train(self, teacher_id: str, dataset: str, entry: Dict) -> None:
-        data = self.load("agent")
+        data = self.load_agent_train()
         data.setdefault(teacher_id, {})[dataset] = entry
-        self.save(data, "agent")
+        self.save(data, RegistryKind.AGENT_TRAIN)
 
 
-__all__ = ["TeacherRegistry"]
+__all__ = ["TeacherRegistry", "RegistryKind", "AGENT_FORBIDDEN_PREFIX"]
 
 
 
@@ -2090,7 +2606,115 @@ def confidence_calibration(confidence: torch.Tensor, label: torch.Tensor):
     }
 
 
-__all__ = ["separability_scores", "confidence_calibration"]
+__all__ = ["separability_scores", "confidence_calibration", "extended_probes", "balanced_auroc"]
+
+
+# =====================================================================================
+# Extended probes P1-P5 (review §7.4). All are TRAIN-only, Cache-only, CPU-only.
+# z = the teacher change RESPONSE (the per-pixel `confidence` map = max over channels
+# of the normalised A/B evidence). It is NOT a calibrated probability; the old name
+# "confidence" is kept only for cache-schema compatibility.
+# =====================================================================================
+
+import cv2  # noqa: E402
+import numpy as np  # noqa: E402
+
+
+def balanced_auroc(pos: np.ndarray, neg: np.ndarray, rng: np.random.Generator, max_per_class: int = 4096):
+    """AUROC between two score sets with per-class subsampling (tie-aware)."""
+    if pos.size == 0 or neg.size == 0:
+        return None
+    if pos.size > max_per_class:
+        pos = rng.choice(pos, max_per_class, replace=False)
+    if neg.size > max_per_class:
+        neg = rng.choice(neg, max_per_class, replace=False)
+    scores = np.concatenate([pos, neg])
+    labels = np.concatenate([np.ones(pos.size), np.zeros(neg.size)])
+    order = np.argsort(scores, kind="mergesort")
+    ranks = np.empty(scores.size, dtype=np.float64)
+    ranks[order] = np.arange(1, scores.size + 1, dtype=np.float64)
+    # average ranks for ties
+    uniq, inv, counts = np.unique(scores, return_inverse=True, return_counts=True)
+    if (counts > 1).any():
+        sums = np.zeros(uniq.size)
+        np.add.at(sums, inv, ranks)
+        ranks = (sums / counts)[inv]
+    n_pos = pos.size
+    u = ranks[labels == 1].sum() - n_pos * (n_pos + 1) / 2.0
+    return float(u / (n_pos * neg.size))
+
+
+def _boundary_band(mask: np.ndarray, r: int = 2):
+    k = np.ones((2 * r + 1, 2 * r + 1), np.uint8)
+    m = mask.astype(np.uint8)
+    dil = cv2.dilate(m, k)
+    ero = cv2.erode(m, k)
+    inner_edge = ((dil - ero) > 0) & mask          # changed pixels on the boundary
+    outer_band = (dil > 0) & (~mask)               # unchanged pixels in the narrow outer band
+    return inner_edge, outer_band
+
+
+@torch.no_grad()
+def extended_probes(confidence: torch.Tensor, label: torch.Tensor, seed: int = 2333) -> dict:
+    """P1-P5 probes for one sample. Returns None for any probe that is undefined."""
+    rng = np.random.default_rng(seed)
+    z = confidence
+    if z.dim() == 3:
+        z = z.squeeze(0)
+    z = z.float().numpy()
+    lab = label
+    if lab.dim() == 3:
+        lab = lab.squeeze(0)
+    m = (lab.float().numpy() > 0.5)
+    if z.shape != m.shape:
+        zt = torch.as_tensor(z).unsqueeze(0).unsqueeze(0)
+        z = F.interpolate(zt, size=m.shape, mode="bilinear", align_corners=False)[0, 0].numpy()
+
+    pos, neg = z[m], z[~m]
+    out: dict = {}
+
+    # P1: balanced pixel AUROC
+    out["balanced_auroc"] = balanced_auroc(pos, neg, rng)
+
+    # P2: hard-negative separation  Q50(z|M=1) - Q90(z|M=0), scaled by MAD(z)
+    if pos.size and neg.size:
+        mad = float(np.median(np.abs(z - np.median(z))) ) + 1e-6
+        out["hard_negative_separation"] = float(
+            (np.percentile(pos, 50) - np.percentile(neg, 90)) / mad)
+    else:
+        out["hard_negative_separation"] = None
+
+    # P3: boundary contrast
+    inner, outer = _boundary_band(m, r=2)
+    if inner.any() and outer.any():
+        out["boundary_contrast"] = float(z[inner].mean() - z[outer].mean())
+    else:
+        out["boundary_contrast"] = None
+
+    # P4: size-conditioned AUROC gap (small vs large GT components, a0 = 0.5% of image)
+    n, labmap, stats, _c = cv2.connectedComponentsWithStats(m.astype(np.uint8), connectivity=8)
+    a0 = 0.005 * m.size
+    if n > 1:
+        small_ids = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] < a0]
+        large_ids = [i for i in range(1, n) if stats[i, cv2.CC_STAT_AREA] >= a0]
+        def _auc_for(ids):
+            if not ids or neg.size == 0:
+                return None
+            sel = np.isin(labmap, ids)
+            return balanced_auroc(z[sel], neg, rng)
+        a_small, a_large = _auc_for(small_ids), _auc_for(large_ids)
+        out["size_conditioned_auroc_gap"] = (
+            None if (a_small is None or a_large is None) else float(a_small - a_large))
+    else:
+        out["size_conditioned_auroc_gap"] = None
+
+    # P5: unchanged leakage ratio
+    out["unchanged_leakage_ratio"] = (
+        None if (not pos.size or not neg.size) else float(neg.mean() / (pos.mean() + 1e-6)))
+
+    # extra: zero-change flag so aggregates can separate empty maps
+    out["_empty_pair"] = float(not m.any())
+    return out
 
 
 
@@ -2727,7 +3351,7 @@ def test_deployed(args, loader, model, device):
     return meter.get_scores(), infer_params, flops
 
 
-def append_test(logger, args, scores, train_params, infer_params, flops, swap_err, deploy_err, elapsed):
+def append_test(logger, args, scores, param_stats, infer_params, flops, swap_err, deploy_err, elapsed):
     logger.log_message("=" * 100)
     logger.log_message("=== TEST RESULTS ===")
     logger.log_message("Metric Split: test")
@@ -2739,7 +3363,11 @@ def append_test(logger, args, scores, train_params, infer_params, flops, swap_er
     logger.log_message(f"Seed: {args.seed}")
     logger.log_message(f"Max Steps: {args.max_steps}")
     logger.log_message(f"Batch Size: {args.batch_size}")
-    logger.log_message(f"Train Params: {train_params / 1e6:.4f}M")
+    # Parameter accounting (review P0): the KD aux head is training-only and was
+    # previously folded into "Train Params"; report student / aux / total / deploy.
+    logger.log_message(f"Student Params: {param_stats['student'] / 1e6:.4f}M")
+    logger.log_message(f"Aux Params: {param_stats['aux'] / 1e6:.4f}M")
+    logger.log_message(f"Train Params: {param_stats['training_total'] / 1e6:.4f}M")
     logger.log_message(f"Infer Params: {infer_params / 1e6:.4f}M")
     logger.log_message(f"FLOPs: {flops / 1e9:.4f}G" if flops is not None else "FLOPs: unavailable")
     logger.log_message(f"Temporal swap max error: {swap_err:.8e}")
@@ -2761,12 +3389,18 @@ def main():
     args.data_fingerprint = _fingerprints(args.data_root)
 
     model = build_model(args).to(device)
-    train_params = sum(p.numel() for p in model.parameters())
+    student_params = sum(p.numel() for p in model.parameters())
     expected = EXPECTED_C0_PARAMS if args.dca_mode == "none" else EXPECTED_C1_PARAMS
-    if train_params != expected:
-        raise RuntimeError(f"params {train_params:,} != expected {expected:,}")
+    if student_params != expected:
+        raise RuntimeError(f"student params {student_params:,} != expected {expected:,}")
 
     aux = ChangeEvidenceHead(64, 128, scale_index=2).to(device) if args.use_teacher else None
+    aux_params = sum(p.numel() for p in aux.parameters()) if aux is not None else 0
+    param_stats = {
+        "student": student_params,
+        "aux": aux_params,
+        "training_total": student_params + aux_params,
+    }
     params = list(model.parameters()) + (list(aux.parameters()) if aux is not None else [])
     optimizer = build_optimizer(args, params)
     criterion = build_loss(args.dice_reduction)
@@ -2808,7 +3442,10 @@ def main():
     last_path = save_dir / "last_checkpoint.pth"
     if not args.resume and (log_path.exists() or last_path.exists()):
         raise FileExistsError("existing run")
-    logger = TrainingLogger(str(log_path), {**vars(args), "train_params": f"{train_params/1e6:.4f}M",
+    logger = TrainingLogger(str(log_path), {**vars(args),
+                                            "student_params": f"{param_stats['student']/1e6:.4f}M",
+                                            "aux_params": f"{param_stats['aux']/1e6:.4f}M",
+                                            "training_total_params": f"{param_stats['training_total']/1e6:.4f}M",
                                             "n_train": len(train_loader.dataset), "n_val": len(val_loader.dataset), "n_test": len(test_loader.dataset)}, append=bool(args.resume))
 
     best_path = None
@@ -2848,7 +3485,7 @@ def main():
         raise RuntimeError(f"deploy error {deploy_err:.2e}")
     if infer_params != expected or infer_params >= PARAM_CAP:
         raise RuntimeError(f"deploy params {infer_params:,}")
-    append_test(logger, args, scores, train_params, infer_params, flops, swap_err, deploy_err, datetime.datetime.now() - started)
+    append_test(logger, args, scores, param_stats, infer_params, flops, swap_err, deploy_err, datetime.datetime.now() - started)
 
 
 if __name__ == "__main__":
@@ -8372,18 +9009,28 @@ if __name__ == "__main__":
 #!/usr/bin/env python3
 """Build the Teacher Capability Registry (Stage 3) from completed train_log.txt files.
 
-Outputs two strictly separated JSON files:
-  research_report.json       -- formal TEST deltas (paper evidence only; never Agent input)
-  agent_train_registry.json  -- VAL deltas only (Agent training input; no test leakage)
+P0 correctness (review 2026-10-08):
+  - parse the LAST complete ``=== TEST RESULTS === ... === END TEST RESULTS ===``
+    block (project discipline), not the first;
+  - all deltas are emitted in **pp** (percentage points);
+  - every record carries the source log path + sha256 for traceability;
+  - research (test) and agent_train (val only) registries are strictly separated,
+    and the agent_train file must never contain a ``test_*`` field.
+
+Outputs:
+  research_report.json       -- formal TEST deltas (paper evidence only)
+  agent_train_registry.json  -- VAL deltas only (Agent input; no test leakage)
 
 Usage:
     python -m models.tools.build_capability_registry \
-        --logs_root outputs/CATA-CD/teacher_adaptation --registry_dir outputs/CATA-CD/registry
+        --logs_root outputs/CATA-CD/teacher_adaptation \
+        --registry_dir outputs/CATA-CD/registry
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import sys
@@ -8405,11 +9052,36 @@ TEACHERS = {
     "radio": "TV-RADIO",
 }
 DATASETS = ["SYSU", "WHU", "CDD", "LEVIR"]
+
+# A complete block only; finditer + last keeps the project "final block" rule.
+TEST_RE = re.compile(r"=== TEST RESULTS ===[ \t]*\r?\n(.*?)\r?\n?=== END TEST RESULTS ===", re.S)
 EPOCH_RE = re.compile(r"Epoch \[\d+/\d+\].*?F1=([\d.]+) IoU=([\d.]+)")
-TEST_RE = re.compile(r"=== TEST RESULTS ===\n(.*?)=== END TEST RESULTS ===", re.S)
+REQUIRED_TEST = ("F1", "IoU", "Recall", "Precision", "OA", "Kappa")
+
+AGENT_FORBIDDEN_PREFIX = "test_"
 
 
-def best_val(text: str):
+def last_test_block(text: str) -> dict | None:
+    """Return the LAST complete TEST block as a dict, or None."""
+    blocks = list(TEST_RE.finditer(text))
+    if not blocks:
+        return None
+    vals: dict[str, float] = {}
+    for line in blocks[-1].group(1).splitlines():
+        if ":" not in line:
+            continue
+        k, v = line.split(":", 1)
+        k = k.strip()
+        if k in REQUIRED_TEST:
+            try:
+                vals[k] = float(v.strip())
+            except ValueError:
+                pass
+    return vals if len(vals) == len(REQUIRED_TEST) else None
+
+
+def best_val(text: str) -> dict | None:
+    """Best (max F1) validation row of a run — checkpoint-selected validation utility."""
     f1s, ious = [], []
     for m in EPOCH_RE.finditer(text):
         f1s.append(float(m.group(1)))
@@ -8420,21 +9092,11 @@ def best_val(text: str):
     return {"f1": f1s[i], "iou": ious[i]}
 
 
-def test_metrics(text: str):
-    m = TEST_RE.search(text)
-    if not m:
-        return None
-    vals = {}
-    for line in m.group(1).splitlines():
-        if ":" in line:
-            k, v = line.split(":", 1)
-            k = k.strip()
-            if k in ("F1", "IoU", "Recall", "Precision", "OA", "Kappa"):
-                try:
-                    vals[k] = float(v.strip())
-                except ValueError:
-                    pass
-    return vals or None
+def read(path: Path) -> tuple[str, str]:
+    if not path.is_file():
+        return "", ""
+    data = path.read_bytes()
+    return data.decode("utf-8", errors="replace"), hashlib.sha256(data).hexdigest()
 
 
 def main() -> None:
@@ -8447,54 +9109,82 @@ def main() -> None:
     reg_dir = Path(args.registry_dir)
     reg_dir.mkdir(parents=True, exist_ok=True)
 
-    def read(exp: str, ds: str) -> str:
-        p = logs_root / exp / ds / "train_log.txt"
-        return p.read_text(encoding="utf-8", errors="replace") if p.is_file() else ""
+    def load(exp: str, ds: str):
+        return read(logs_root / exp / ds / "train_log.txt")
 
-    # anchors
-    c1_val = {ds: best_val(read("C1", ds)) for ds in DATASETS}
-    c1_test = {ds: test_metrics(read("C1", ds)) for ds in DATASETS}
-    c0_test = {ds: test_metrics(read("C0", ds)) for ds in DATASETS}
+    c1_val, c1_test, c0_test = {}, {}, {}
+    for ds in DATASETS:
+        t, _h = load("C1", ds)
+        c1_val[ds] = best_val(t)
+        c1_test[ds] = last_test_block(t)
+        t0, _h0 = load("C0", ds)
+        c0_test[ds] = last_test_block(t0)
 
-    research = {"_anchors": {"C0_test": c0_test, "C1_test": c1_test, "C1_val": c1_val}}
-    agent = {}
+    research = {
+        "_meta": {
+            "unit": "pp",
+            "test_block_rule": "last complete TEST RESULTS block",
+            "val_rule": "best (max F1) epoch row = checkpoint-selected validation utility",
+        },
+        "_anchors": {
+            "C0_test_pp": c0_test,
+            "C1_test_pp": {k: (None if v is None else {m: v[m] * 100 for m in v}) for k, v in c1_test.items()},
+            "C1_val_pp": {k: (None if v is None else {m: v[m] * 100 for m in v}) for k, v in c1_val.items()},
+        },
+    }
+    agent: dict = {"_meta": {"unit": "pp", "reward_field": "val_delta_f1_pp",
+                             "note": "no test_* field by construction"}}
 
     for teacher, exp in TEACHERS.items():
         research[teacher] = {}
         agent[teacher] = {}
         for ds in DATASETS:
-            txt = read(exp, ds)
-            tv = best_val(txt)
-            tt = test_metrics(txt)
-            cv = c1_val[ds]
-            ct = c1_test[ds]
-            entry_r = {"experiment_id": exp, "has_test": tt is not None}
-            entry_a = {"experiment_id": exp, "has_val": tv is not None}
-            if tv and cv:
-                entry_a["val_f1"] = tv["f1"]
-                entry_a["val_iou"] = tv["iou"]
-                entry_a["val_delta_f1"] = tv["f1"] - cv["f1"]
-                entry_a["val_delta_iou"] = tv["iou"] - cv["iou"]
-            if tt and ct:
-                entry_r["test_f1"] = tt["F1"]
-                entry_r["test_iou"] = tt["IoU"]
-                entry_r["test_delta_f1"] = tt["F1"] - ct["F1"]
-                entry_r["test_delta_iou"] = tt["IoU"] - ct["IoU"]
-            research[teacher][ds] = entry_r
-            agent[teacher][ds] = entry_a
+            txt, sha = load(exp, ds)
+            src = (logs_root / exp / ds / "train_log.txt").as_posix()
+            tv, tt = best_val(txt), last_test_block(txt)
+            cv, ct = c1_val[ds], c1_test[ds]
+
+            # ---- agent-train (VAL only; never any test field) ----
+            a = {"experiment_id": exp, "source_log": src, "log_sha256": sha[:16]}
+            if tv is not None and cv is not None:
+                a["val_f1_pp"] = tv["f1"] * 100
+                a["val_iou_pp"] = tv["iou"] * 100
+                a["val_delta_f1_pp"] = (tv["f1"] - cv["f1"]) * 100
+                a["val_delta_iou_pp"] = (tv["iou"] - cv["iou"]) * 100
+            agent[teacher][ds] = a
+
+            # ---- research (test; paper evidence only) ----
+            r = {"experiment_id": exp, "source_log": src, "log_sha256": sha[:16]}
+            if tt is not None and ct is not None:
+                r["test_f1_pp"] = tt["F1"] * 100
+                r["test_iou_pp"] = tt["IoU"] * 100
+                r["test_delta_f1_pp"] = (tt["F1"] - ct["F1"]) * 100
+                r["test_delta_iou_pp"] = (tt["IoU"] - ct["IoU"]) * 100
+            research[teacher][ds] = r
+
+    # Hard guard: the agent-train registry must never carry a test_* key.
+    def assert_no_test(node, path="root"):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                if isinstance(k, str) and k.startswith(AGENT_FORBIDDEN_PREFIX):
+                    raise AssertionError(f"agent_train_registry leak: {path}.{k}")
+                assert_no_test(v, f"{path}.{k}")
+
+    assert_no_test(agent)
 
     (reg_dir / "research_report.json").write_text(json.dumps(research, indent=2), encoding="utf-8")
     (reg_dir / "agent_train_registry.json").write_text(json.dumps(agent, indent=2), encoding="utf-8")
 
-    print(f"[registry] wrote {reg_dir/'research_report.json'} and {reg_dir/'agent_train_registry.json'}")
-    print("\n== VAL utility (best val F1 relative to C1), Agent input ==")
+    print(f"[registry] wrote research_report.json + agent_train_registry.json (pp) -> {reg_dir}")
+    print("\n== dF1_val(pp), Agent reward ==")
     for ds in DATASETS:
-        row = [f"{ds}: C1={c1_val[ds]['f1']*100:.2f}" if c1_val[ds] else f"{ds}: C1=?"]
+        base = c1_val[ds]["f1"] * 100 if c1_val[ds] else float("nan")
+        parts = [f"{ds}(C1={base:.2f})"]
         for teacher in TEACHERS:
             e = agent[teacher][ds]
-            if "val_delta_f1" in e:
-                row.append(f"{teacher}={e['val_delta_f1']*100:+.2f}")
-        print(" ".join(row))
+            if "val_delta_f1_pp" in e:
+                parts.append(f"{teacher}={e['val_delta_f1_pp']:+.2f}")
+        print("  " + "  ".join(parts))
 
 
 if __name__ == "__main__":
@@ -8510,10 +9200,15 @@ if __name__ == "__main__":
 #!/usr/bin/env python3
 """Compute a dataset signature vector from the train split and save it as JSON.
 
+``--schema_version 1`` keeps the historical 18-dim signature (never overwritten);
+``--schema_version 2`` (default) writes the corrected 20-dim signature with global
+object-area quantiles, fixed n_components / Sobel magnitude, and CDD-safe path
+resolution.
+
 Usage:
     python -m models.tools.build_dataset_signature \
         --data_root /share_datasets/CD/SYSU-CD-256 --dataset_name SYSU \
-        --output /share_datasets/CD_teacher_cache/CATA_CD_v2/signatures/SYSU.json
+        --schema_version 2 --output .../signatures_v2/SYSU.json
 """
 
 from __future__ import annotations
@@ -8526,7 +9221,13 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models.agent.dataset_signature import SIGNATURE_NAMES, compute_dataset_signature  # noqa: E402
+from models.agent.dataset_signature import (  # noqa: E402
+    SIGNATURE_NAMES,
+    SIGNATURE_V2_NAMES,
+    SIGNATURE_V2_VERSION,
+    compute_dataset_signature,
+    compute_dataset_signature_v2,
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -8536,14 +9237,28 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--split", default="train")
     p.add_argument("--output", required=True)
     p.add_argument("--max_samples", type=int, default=None)
+    p.add_argument("--schema_version", type=int, default=SIGNATURE_V2_VERSION, choices=(1, 2))
+    p.add_argument("--pilot", type=int, default=200, help="samples used to calibrate the pseudo-change threshold (v2)")
     return p.parse_args()
 
 
 def main() -> None:
     args = parse_args()
-    vector, details = compute_dataset_signature(
-        args.data_root, args.dataset_name, split=args.split, max_samples=args.max_samples
-    )
+    if args.schema_version == 1:
+        vector, details = compute_dataset_signature(
+            args.data_root, args.dataset_name, split=args.split, max_samples=args.max_samples
+        )
+        names = SIGNATURE_NAMES
+    else:
+        vector, details = compute_dataset_signature_v2(
+            args.data_root, args.dataset_name, split=args.split,
+            max_samples=args.max_samples, pilot=args.pilot,
+        )
+        names = SIGNATURE_V2_NAMES
+
+    if len(vector) != len(names):
+        raise AssertionError(f"signature dim {len(vector)} != names {len(names)}")
+
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(
@@ -8551,7 +9266,8 @@ def main() -> None:
             {
                 "dataset": args.dataset_name.upper(),
                 "split": args.split,
-                "names": SIGNATURE_NAMES,
+                "schema_version": args.schema_version,
+                "names": names,
                 "vector": [float(v) for v in vector],
                 "details": {k: round(v, 6) for k, v in details.items()},
             },
@@ -8559,7 +9275,8 @@ def main() -> None:
         ),
         encoding="utf-8",
     )
-    print(f"[signature] {args.dataset_name}: saved {len(vector)}-dim signature to {out}")
+    print(f"[signature] {args.dataset_name} (schema v{args.schema_version}): "
+          f"saved {len(vector)}-dim signature to {out}")
 
 
 if __name__ == "__main__":
@@ -8738,16 +9455,23 @@ if __name__ == "__main__":
 #!/usr/bin/env python3
 """Compute train-only teacher capability probes from a compact cache and labels.
 
+Review fixes (2026-10-08):
+  - stratified train-only sampling with a fixed seed (no "first N" order bias);
+  - A/B/label resolved with the CDDataset fallback rules (CDD ``test_`` prefix,
+    png<->jpg), never a bare path join;
+  - records the sampled index SHA and the per-sample count for traceability;
+  - emits the P1-P5 extended probes alongside the legacy separability/calibration.
+
 Usage:
     python -m models.tools.probe_teacher_capability \
-        --cache_root /share_datasets/CD_teacher_cache/CATA_CD_v2/dinov3_sat \
-        --data_root /share_datasets/CD/SYSU-CD-256 --dataset_name SYSU \
-        --teacher_package dinov3_sat --output probes/SYSU_dinov3_sat.json
+        --cache_root .../CATA_CD_v2/dinov3_sat --data_root /share_datasets/CD/SYSU-CD-256 \
+        --dataset_name SYSU --teacher_package dinov3_sat --output probes_v2/SYSU_dinov3_sat.json
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -8759,7 +9483,15 @@ import torch
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
-from models.distill.capability_probe import confidence_calibration, separability_scores  # noqa: E402
+from models.agent.dataset_signature import _resolve  # noqa: E402
+from models.distill.capability_probe import (  # noqa: E402
+    confidence_calibration,
+    extended_probes,
+    separability_scores,
+)
+
+EXT_KEYS = ("balanced_auroc", "hard_negative_separation", "boundary_contrast",
+            "size_conditioned_auroc_gap", "unchanged_leakage_ratio")
 
 
 def parse_args() -> argparse.Namespace:
@@ -8771,6 +9503,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--split", default="train")
     p.add_argument("--output", required=True)
     p.add_argument("--max_samples", type=int, default=256)
+    p.add_argument("--seed", type=int, default=2333)
+    p.add_argument("--stratify", action=argparse.BooleanOptionalAction, default=True)
     return p.parse_args()
 
 
@@ -8781,45 +9515,90 @@ def _read_label(path: Path) -> np.ndarray:
     return (img >= 128).astype(np.float32)
 
 
+def _stratified_ids(data_root: Path, ids: list[str], dataset: str, n: int, seed: int) -> list[str]:
+    """Split by change ratio into 3 quantile bins and sample evenly."""
+    ratios = []
+    for sid in ids:
+        lab = _read_label(_resolve(data_root, "label", sid, dataset))
+        ratios.append(float(lab.mean()))
+    ratios = np.asarray(ratios)
+    order = np.argsort(ratios, kind="mergesort")
+    bins = np.array_split(order, 3)
+    rng = np.random.default_rng(seed)
+    per = max(1, n // 3)
+    picked: list[int] = []
+    for b in bins:
+        take = min(per, len(b))
+        picked.extend(rng.choice(b, take, replace=False).tolist())
+    picked = sorted(set(picked))
+    return [ids[i] for i in picked]
+
+
 def main() -> None:
     args = parse_args()
-    root = Path(args.cache_root) / args.dataset_name.upper() / args.split
+    dataset = args.dataset_name.upper()
     data_root = Path(args.data_root)
+    cache_dir = Path(args.cache_root) / dataset / args.split
 
     ids = [
         line.strip()
         for line in (data_root / "list" / f"{args.split}.txt").read_text(encoding="utf-8").splitlines()
         if line.strip()
-    ][: args.max_samples]
+    ]
+    if args.stratify and args.max_samples < len(ids):
+        selected = _stratified_ids(data_root, ids, dataset, args.max_samples, args.seed)
+    else:
+        rng = np.random.default_rng(args.seed)
+        idx = rng.permutation(len(ids))[: args.max_samples]
+        selected = [ids[i] for i in sorted(idx.tolist())]
+
+    idx_sha = hashlib.sha256(",".join(selected).encode()).hexdigest()[:16]
 
     sep = {"change_mean": [], "unchanged_mean": [], "ratio": []}
     cal = {"conf_change": [], "conf_unchanged": []}
+    ext = {k: [] for k in EXT_KEYS}
+    empty_pairs = 0
 
-    for sid in ids:
-        d = torch.load(root / f"{sid}.pt", map_location="cpu", weights_only=False)
+    for sid in selected:
+        path = cache_dir / f"{sid}.pt"
+        if not path.is_file():
+            raise FileNotFoundError(f"cache missing: {path}")
+        d = torch.load(path, map_location="cpu", weights_only=False)
         lc = d["local_change"].float()
         conf = d["confidence"].float()
-        lab = torch.from_numpy(_read_label(data_root / "label" / sid))
+        lab = torch.from_numpy(_read_label(_resolve(data_root, "label", sid, dataset)))
 
         s = separability_scores(lc, lab)
         c = confidence_calibration(conf, lab)
+        e = extended_probes(conf, lab, seed=args.seed)
         for k in sep:
             sep[k].append(s[k])
         for k in cal:
             cal[k].append(c[k])
+        for k in EXT_KEYS:
+            if e.get(k) is not None:
+                ext[k].append(float(e[k]))
+        empty_pairs += int(e.get("_empty_pair", 0.0))
 
     probe = {
         "teacher_id": args.teacher_package,
-        "dataset": args.dataset_name.upper(),
+        "dataset": dataset,
         "split": args.split,
-        "n_samples": len(ids),
+        "n_samples": len(selected),
+        "sampled_index_sha256": idx_sha,
+        "stratified": bool(args.stratify),
+        "empty_pair_ratio": empty_pairs / max(len(selected), 1),
         "separability": {k: float(np.mean(v)) for k, v in sep.items()},
         "calibration": {k: float(np.mean(v)) for k, v in cal.items()},
     }
+    for k in EXT_KEYS:
+        probe[k] = (float(np.mean(ext[k])) if ext[k] else None)
+
     out = Path(args.output)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(probe, indent=2), encoding="utf-8")
-    print(f"[probe] {args.teacher_package}/{args.dataset_name}: ratio={probe['separability']['ratio']:.3f}")
+    print(f"[probe] {args.teacher_package}/{dataset}: n={len(selected)} "
+          f"ratio={probe['separability']['ratio']:.3f} auroc={probe['balanced_auroc']} -> {out.name}")
 
 
 if __name__ == "__main__":
@@ -8912,6 +9691,409 @@ def main() -> None:
     if args.teacher:
         check_teacher(args.teacher, args.weight_dir)
     print("[smoke] ALL PASSED")
+
+
+if __name__ == "__main__":
+    main()
+
+
+
+
+====================================================================
+  tools  |  models/tools/train_safe_teacher_agent.py
+====================================================================
+
+#!/usr/bin/env python3
+"""Train / evaluate the U-SafeAgent (Agent-only, offline, val-only) — review §9.1.
+
+Arms (all reuse the same 44 teacher runs; no new student training):
+  AG-00  legacy MLP (23-dim signature+probe, max>0 gate)        [historical control]
+  AG-01  shared weighted ridge, delta=0                          [only change the fitter]
+  AG-02  ridge + delta=+0.20pp gate                              [only change the None gate]
+  AG-03  AG-02 + group-jackknife margin (mu - kappa*u)           [main proposal]
+  AG-04  AG-03 + extended probes (P1-P5)                          [only if available]
+  AG-05  AG-03 + teacher metadata                                 [single-variable control]
+  AG-CF  best fixed teacher by mean TRAIN val, else None          [fair fixed baseline]
+  AG-CH  train-only probe heuristic, else None                    [fair heuristic baseline]
+
+Diagnostics per fold: selected action, held-out val reward, regret, harm / false-action /
+coverage / positive-recall. Test values are NEVER read (hard guard on the registry).
+
+Usage:
+    python -m models.tools.train_safe_teacher_agent \
+        --registry_dir outputs/CATA-CD/registry \
+        --signatures_dir outputs/CATA-CD/signatures \
+        --probes_dir outputs/CATA-CD/probes \
+        --logs_root outputs/CATA-CD \
+        --out_dir outputs/CATA-CD/agent_safe --seed 2333 --delta_pp 0.20 --kappa 1.0
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import re
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+from models.agent.offline_bandit import TeacherAgentPolicy  # noqa: E402
+from models.agent.safe_selector import (  # noqa: E402
+    DEFAULT_DELTA_PP,
+    DEFAULT_KAPPA,
+    RidgeSelector,
+    SafeSelector,
+)
+from models.agent.teacher_metadata import META_FEATURE_NAMES, meta_features  # noqa: E402
+
+DATASETS = ["SYSU", "WHU", "CDD", "LEVIR"]
+HARM_PP = -0.20
+
+# Compact, physically motivated feature subset (review §4.1 advises <=10-12 inputs).
+# NOTE: the legacy ``separability_ratio`` has an unbounded dynamic range (division by a
+# near-zero unchanged response; observed 0.29 - 870), so the P1/P2 AUROC-style probes
+# are preferred here instead.
+COMPACT_SIG = ["change_ratio", "empty_pair_ratio", "area_p50_g", "small_fraction",
+               "boundary_density", "hard_pseudo_change_fraction", "illumination_unchanged"]
+COMPACT_PROBE = ["probe_balanced_auroc", "probe_hard_negative_separation",
+                 "probe_unchanged_leakage_ratio"]
+COMPACT_META = ["meta_log2_stride", "meta_pyramid", "meta_dom_satellite"]
+
+EPOCH_RE = re.compile(r"Epoch \[\d+/\d+\].*?F1=([\d.]+) IoU=([\d.]+)")
+TEST_RE = re.compile(r"=== TEST RESULTS ===[ \t]*\r?\n(.*?)\r?\n?=== END TEST RESULTS ===", re.S)
+
+
+def parse_args() -> argparse.Namespace:
+    p = argparse.ArgumentParser(description="U-SafeAgent training / LODO evaluation")
+    p.add_argument("--registry_dir", required=True)
+    p.add_argument("--signatures_dir", required=True)
+    p.add_argument("--probes_dir", required=True)
+    p.add_argument("--logs_root", default=None, help="for the val run-level noise proxy")
+    p.add_argument("--out_dir", required=True)
+    p.add_argument("--seed", type=int, default=2333)
+    p.add_argument("--delta_pp", type=float, default=DEFAULT_DELTA_PP)
+    p.add_argument("--kappa", type=float, default=DEFAULT_KAPPA)
+    p.add_argument("--lam", type=float, default=1.0)
+    p.add_argument("--feature_set", default="sig_probe_ext_meta",
+                   choices=("legacy", "sig_only", "sig_probe", "sig_probe_ext",
+                            "sig_probe_ext_meta", "full", "ladder"))
+    return p.parse_args()
+
+
+# --------------------------------------------------------------------------- data
+def load_json(path: Path) -> dict:
+    return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+
+
+def val_noise_sigma(logs_root: Path | None) -> dict:
+    """Per-dataset VAL run-level sigma from C1 + R1/R2/R3 best-val F1 (test never read)."""
+    out = {}
+    if logs_root is None:
+        return out
+    for ds in DATASETS:
+        vals = []
+        for rel in [f"teacher_adaptation/C1/{ds}/train_log.txt",
+                    f"noise/R1/{ds}/train_log.txt",
+                    f"noise/R2/{ds}/train_log.txt",
+                    f"noise/R3/{ds}/train_log.txt"]:
+            p = logs_root / rel
+            if not p.is_file():
+                continue
+            txt = p.read_text(encoding="utf-8", errors="replace")
+            f1s = [float(m.group(1)) for m in EPOCH_RE.finditer(txt)]
+            if f1s:
+                vals.append(max(f1s) * 100)
+        if len(vals) >= 2:
+            out[ds] = float(np.std(vals, ddof=1))
+    return out
+
+
+def probe_vector(probe: dict) -> dict:
+    sep = probe.get("separability", {})
+    cal = probe.get("calibration", {})
+    change = sep.get("change_mean", None)
+    unchange = sep.get("unchanged_mean", None)
+    ratio = sep.get("ratio", None)
+    v = {
+        "probe_change_mean": change,
+        "probe_unchanged_mean": unchange,
+        "separability_ratio": ratio,
+        "probe_conf_change": cal.get("conf_change", None),
+        "probe_conf_unchanged": cal.get("conf_unchanged", None),
+        "hard_negative_gap": (None if (change is None or unchange is None) else change - unchange),
+    }
+    # extended probes (P1-P5) live in the same JSON when present
+    for k in ("balanced_auroc", "hard_negative_separation", "boundary_contrast",
+              "size_conditioned_auroc_gap", "unchanged_leakage_ratio"):
+        if k in probe:
+            v[f"probe_{k}"] = probe[k]
+    return v
+
+
+def signature_vector(sig_dir: Path, ds: str) -> dict:
+    data = load_json(sig_dir / f"{ds}.json")
+    names = data.get("names", [])
+    vec = data.get("vector", [])
+    if len(names) != len(vec):
+        raise ValueError(f"{ds}: signature names/vector length mismatch")
+    return {n: float(v) for n, v in zip(names, vec)}
+
+
+def build_rows(registry: dict, sig_dir: Path, probe_dir: Path, feature_set: str):
+    rows, missing = [], []
+    for teacher in sorted(k for k in registry if not k.startswith("_")):
+        for ds in DATASETS:
+            e = registry[teacher].get(ds) or {}
+            if "val_delta_f1_pp" not in e:
+                missing.append((ds, teacher, "no val_delta_f1_pp"))
+                continue
+            f = {}
+            f.update(signature_vector(sig_dir, ds))
+            f.update(probe_vector(load_json(probe_dir / f"{ds}_{teacher}.json")))
+            f.update(meta_features(teacher))
+            rows.append({"ds": ds, "teacher": teacher, "f": f, "y": float(e["val_delta_f1_pp"])})
+    return rows, missing
+
+
+def feature_names(rows, feature_set: str) -> list[str]:
+    """Feature ladder for single-variable ablations (review §9.1).
+
+    legacy           : v1 signature + legacy probes + no metadata  (AG-00 historical)
+    sig_only         : compact v2 signature only
+    sig_probe        : + legacy separability probes
+    sig_probe_ext    : + P1-P5 extended probes      (AG-04 variable)
+    sig_probe_ext_meta: + teacher metadata           (AG-05 variable)
+    full             : every available feature
+    """
+    all_names = sorted(rows[0]["f"].keys())
+    if feature_set == "full":
+        return all_names
+    if feature_set == "legacy":
+        return [n for n in all_names if not n.startswith("meta_")]
+
+    available = set(all_names)
+    want = [n for n in COMPACT_SIG if n in available]
+    if feature_set == "sig_only":
+        return want
+    want += [n for n in ("probe_change_mean", "hard_negative_gap") if n in available]
+    if feature_set == "sig_probe":
+        return want
+    want += [n for n in COMPACT_PROBE if n in available]
+    if feature_set == "sig_probe_ext":
+        return want
+    want += [n for n in COMPACT_META if n in available]
+    if feature_set == "sig_probe_ext_meta":
+        return want
+    raise ValueError(f"unknown feature_set {feature_set}")
+
+
+def matrix(rows, names):
+    X, y, groups, tids = [], [], [], []
+    for r in rows:
+        v = []
+        for n in names:
+            val = r["f"].get(n, np.nan)
+            if val is None:
+                raise ValueError(f"missing feature {n} for {r['ds']}/{r['teacher']} "
+                                 f"(missing probe must be explicit, not 0)")
+            v.append(float(val))
+        X.append(v)
+        y.append(r["y"])
+        groups.append(r["ds"])
+        tids.append(r["teacher"])
+    return np.asarray(X, dtype=np.float64), np.asarray(y, dtype=np.float64), groups, tids
+
+
+# --------------------------------------------------------------------------- arms
+def fit_legacy_mlp(X, y, groups, epochs=800, seed=2333):
+    torch.manual_seed(seed)
+    mu, sd = X.mean(0), X.std(0) + 1e-6
+    ym, ys = y.mean(), y.std() + 1e-9
+    Xs = torch.tensor((X - mu) / sd, dtype=torch.float32)
+    yt = torch.tensor((y - ym) / ys, dtype=torch.float32)
+    policy = TeacherAgentPolicy(X.shape[1])
+    opt = torch.optim.Adam(policy.parameters(), lr=3e-3, weight_decay=1e-2)
+    for _ in range(epochs):
+        opt.zero_grad()
+        loss = torch.nn.functional.mse_loss(policy(Xs), yt)
+        loss.backward()
+        opt.step()
+
+    def predict(Z):
+        with torch.no_grad():
+            return policy(torch.tensor((Z - mu) / sd, dtype=torch.float32)).numpy() * ys + ym
+    return predict
+
+
+def decide_simple(pred_pp, teacher_ids, delta_pp):
+    k = int(np.argmax(pred_pp))
+    if pred_pp[k] > delta_pp:
+        return teacher_ids[k], float(pred_pp[k]), "accepted"
+    return None, 0.0, "no_supported_positive_utility"
+
+
+def run_lodo(rows, names, arm, args, u_noise: dict):
+    X, y, groups, tids = matrix(rows, names)
+    report = {}
+    for hold in DATASETS:
+        tr = [i for i, g in enumerate(groups) if g != hold]
+        te = [i for i, g in enumerate(groups) if g == hold]
+        if not tr or not te:
+            continue
+        Xtr, ytr, gtr = X[tr], y[tr], [groups[i] for i in tr]
+        Xte, tids_te = X[te], [tids[i] for i in te]
+
+        if arm == "AG-00":
+            predict = fit_legacy_mlp(Xtr, ytr, gtr)
+            teacher, pred, reason = decide_simple(predict(Xte), tids_te, 0.0)
+            detail = {"pred_pp": [float(v) for v in predict(Xte)]}
+        elif arm == "AG-CF":
+            mean_tr = {t: float(np.mean([y[i] for i in tr if tids[i] == t])) for t in set(tids_te)}
+            best = max(mean_tr, key=mean_tr.get)
+            teacher, pred, reason = (best, mean_tr[best], "fixed_train_mean") \
+                if mean_tr[best] > args.delta_pp else (None, 0.0, "fixed_below_delta")
+            detail = {"train_mean_pp": mean_tr}
+        elif arm == "AG-CH":
+            idx = int(np.argmax([rows[i]["f"].get("probe_change_mean", 0.0) for i in te]))
+            chosen = tids_te[idx]
+            util = float(np.mean([y[i] for i in te if tids[i] == chosen]))
+            teacher, pred, reason = (chosen, util, "probe_heuristic") if util > args.delta_pp \
+                else (None, 0.0, "heuristic_below_delta")
+            detail = {}
+        else:
+            kappa = {"AG-01": 0.0, "AG-02": 0.0, "AG-03": args.kappa, "AG-04": args.kappa,
+                     "AG-05": args.kappa}[arm]
+            delta = 0.0 if arm == "AG-01" else args.delta_pp
+            sel = (RidgeSelector(lam=args.lam) if arm == "AG-01"
+                   else SafeSelector(lam=args.lam, delta_pp=delta, kappa=kappa))
+            sel.fit(Xtr, ytr, gtr, names)
+            d = sel.decide(Xte, tids_te, u_noise_pp=u_noise.get(hold, 0.0))
+            teacher, pred, reason = d.teacher, d.margin_pp, d.reason
+            detail = {"per_teacher": d.per_teacher}
+
+        chosen_util = 0.0
+        if teacher is not None:
+            vals = [y[i] for i in te if tids[i] == teacher]
+            chosen_util = float(vals[0]) if vals else 0.0
+        report[hold] = {
+            "arm": arm, "teacher": teacher, "score_pp": pred, "reason": reason,
+            "heldout_val_pp": chosen_util, "detail": detail,
+        }
+    return report
+
+
+def summarize(report):
+    n = len(report)
+    if n == 0:
+        return {}
+    harms = sum(1 for r in report.values() if r["teacher"] is not None and r["heldout_val_pp"] < HARM_PP)
+    false_actions = sum(1 for r in report.values() if r["teacher"] is not None and r["heldout_val_pp"] <= 0)
+    coverage = sum(1 for r in report.values() if r["teacher"] is not None)
+    regrets = []
+    for ds, r in report.items():
+        oracle = r.get("_oracle_pp")
+        if oracle is None:
+            continue
+        regrets.append(max(0.0, oracle) - max(0.0, r["heldout_val_pp"]))
+    pos_domains = [ds for ds, r in report.items() if (r.get("_oracle_pp") or 0) > 0]
+    hit = sum(1 for ds in pos_domains
+              if report[ds]["teacher"] is not None and report[ds]["heldout_val_pp"] > 0)
+    return {
+        "n_folds": n,
+        "harm_rate": harms / n,
+        "false_action_rate": false_actions / n,
+        "coverage": coverage / n,
+        "mean_regret_pp": float(np.mean(regrets)) if regrets else None,
+        "median_regret_pp": float(np.median(regrets)) if regrets else None,
+        "any_positive_recall": (hit / len(pos_domains)) if pos_domains else None,
+    }
+
+
+def main() -> None:
+    args = parse_args()
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
+
+    reg_dir = Path(args.registry_dir)
+    out_dir = Path(args.out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    registry_path = reg_dir / "agent_train_registry.json"
+    # HARD GUARD: never load the research (test) report here.
+    registry = load_json(registry_path)
+    for k in registry:
+        if isinstance(k, str) and k.startswith("test_"):
+            raise PermissionError("agent_train_registry contains a test field")
+    registry_sha = hashlib.sha256(registry_path.read_bytes()).hexdigest() if registry_path.is_file() else "n/a"
+
+    rows, missing = build_rows(registry, Path(args.signatures_dir), Path(args.probes_dir), args.feature_set)
+    if missing:
+        print(f"[warn] {len(missing)} rows skipped: {missing[:4]}")
+    u_noise = val_noise_sigma(Path(args.logs_root)) if args.logs_root else {}
+
+    # oracle per fold = best held-out VAL reward (evaluation only, never used for fitting)
+    oracle = {}
+    for ds in DATASETS:
+        vals = [r["y"] for r in rows if r["ds"] == ds]
+        if vals:
+            oracle[ds] = max(vals)
+
+    ARMS = ("AG-00", "AG-01", "AG-02", "AG-03", "AG-05", "AG-CF", "AG-CH")
+    rungs = (["legacy", "sig_only", "sig_probe", "sig_probe_ext", "sig_probe_ext_meta"]
+             if args.feature_set == "ladder" else [args.feature_set])
+
+    ladder = {}
+    names = None
+    for rung in rungs:
+        names = feature_names(rows, rung)
+        results, summaries = {}, {}
+        for arm in ARMS:
+            rep = run_lodo(rows, names, arm, args, u_noise)
+            for ds, r in rep.items():
+                r["_oracle_pp"] = oracle.get(ds)
+            results[arm] = rep
+            summaries[arm] = summarize(rep)
+        ladder[rung] = {"n_features": len(names), "summaries": summaries,
+                        "actions": {ds: results["AG-03"][ds]["teacher"] for ds in DATASETS}}
+        print(f"\n--- feature rung '{rung}' ({len(names)} features) ---")
+        for ds in DATASETS:
+            line = [f"{ds}(oracle={oracle.get(ds, float('nan')):+.2f})"]
+            for arm in ARMS:
+                t = results[arm][ds]["teacher"]
+                line.append(f"{arm}={t if t else 'None'}({results[arm][ds]['heldout_val_pp']:+.2f})")
+            print("  " + "  ".join(line))
+        print("  summary: " + "  ".join(
+            f"{a}:h{summaries[a]['harm_rate']:.2f}/f{summaries[a]['false_action_rate']:.2f}/c{summaries[a]['coverage']:.2f}"
+            for a in ARMS))
+
+    # frozen actions of the PRIMARY rung (AG-03)
+    primary_rung = rungs[-1]
+    primary = ladder[primary_rung]
+    actions = {ds: {"teacher": primary["actions"][ds],
+                    "reason": primary["summaries"] and "safe_set_or_none"} for ds in DATASETS}
+    (out_dir / "selected_actions.json").write_text(json.dumps({
+        "arm": "AG-03", "feature_set": primary_rung, "delta_pp": args.delta_pp,
+        "kappa": args.kappa, "seed": args.seed, "registry_sha256": registry_sha[:16],
+        "feature_names": names, "actions": actions,
+    }, indent=2), encoding="utf-8")
+    (out_dir / "feature_schema.json").write_text(json.dumps({
+        "feature_names": names, "n_features": len(names), "feature_set": args.feature_set,
+        "signature_dims": len(signature_vector(Path(args.signatures_dir), DATASETS[0])),
+        "probe_keys": sorted(k for k in rows[0]["f"] if k.startswith(("probe_", "separability_", "hard_negative"))),
+        "meta_keys": META_FEATURE_NAMES,
+    }, indent=2), encoding="utf-8")
+    (out_dir / "lodo_report.json").write_text(json.dumps(
+        {"ladder": ladder, "oracle_val_pp": oracle,
+         "val_sigma_pp": u_noise, "registry_sha256": registry_sha[:16]}, indent=2), encoding="utf-8")
+
+    print(f"\n[agent] frozen AG-03 actions ({primary_rung}) -> {out_dir/'selected_actions.json'}")
+    print(f"[agent] ladder report -> {out_dir/'lodo_report.json'}")
 
 
 if __name__ == "__main__":
@@ -9342,7 +10524,7 @@ def adjust_learning_rate(args, optimizer, epoch, iter, max_batches, lr_factor=1)
 
 
 
-(Total: 61 Python files)
+(Total: 64 Python files)
 
 
 

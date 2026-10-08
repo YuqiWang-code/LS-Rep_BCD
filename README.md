@@ -79,11 +79,45 @@ M1/SYSU 与 M1/WHU 的配置与 C1 **逐字段完全相同**（`dca_mode=moe128`
 
 平均 σ = **0.259pp**，**随数据集强烈变化**（CDD 0.013 ↔ WHU 0.537）；并发度只在 WHU 上再加一点（σ_mixed 0.623）→ 主因是**内在 run-to-run 噪声**，不是并发。
 
-**效应/σ 重新判读**：DCA→WHU **2.6σ**、RADIO→SYSU **2.4σ**（接近显著）；DCA→SYSU 1.5σ、MARS→WHU 1.0σ、UNISAT→WHU 0.7σ、D3S→LEVIR 0.7σ（均在噪声内）；CDD 全部 ~0（确认真无效应）。
+**效应/σ 判读（⚠️ 仅为量级参考，不是显著性）**：σ 是**同一配置跨运行的 F1 标准差**，不是 `TV−C1` 差值的标准误；它没有覆盖教师臂自身方差、配对相关性、checkpoint 选择偏差与 9 教师×4 数据集的多重比较。因此只能把它当作粗噪声底：
 
-→ **结论修正**：并非"一切皆噪声"——SYSU 的 RADIO 效应与 DCA 的效应超出噪声，而 **WHU 上的教师效应全部不可测**。"教师是否有效"是**部分可测、部分不可测，且依数据集而定**。
+| 观察 | ΔF1 | σ | 量级 |
+|---|---:|---:|---|
+| DCA→WHU（C1−C0） | +1.38 | 0.537 | 2.6×σ |
+| RADIO→SYSU | +0.68 | 0.289 | 2.4×σ |
+| MARS→WHU | +0.56 | 0.537 | 1.0×σ |
+| D3S→LEVIR | +0.14 | 0.195 | 0.7×σ |
+| CDD 全部教师 | ≈0 | 0.013 | ~0 |
 
-下一步：把这份 σ 证据交给网页 GPT 改进 Agent 结构（prompt 见 `docs/temporary/网页GPT_CATA-CD_Agent改进_prompt.md`）。
+→ **结论修正（措辞收紧）**：这些差值**都还不能称为已证实的机制效应**，只能表述为"**RADIO→SYSU 与 DCA→WHU 是值得优先复核的观察**"；WHU 上的教师效应处于噪声量级；CDD 为"**同协议单 run 未观察到可信正增益**"（不说"确认真无效应"）。正式判据见下一节的 Agent-only 决策实验。
+
+## Stage 4（v2）：U-SafeAgent 与 Agent-only 消融
+
+按 `docs/temporary/CATA-CD_v2_Agent结构改进_最新GitHub审查_完整科研方案_20261008.md` 实现：
+
+- **P0 修复**：`build_capability_registry` 改取**最后一个完整 TEST block**；registry 改**严格枚举**且 Agent 侧读取遇 `test_*` 字段直接 `PermissionError`；`train.py` 分开上报 `Student/Aux/Train/Infer Params`（此前 TV-* 的 "Train Params" 漏掉了 KD 头 8,320 参数）；`dataset_signature` 新增 **schema v2**（20 维：修 `n_components` 零连通域、Sobel 用梯度幅值、面积分位改全局汇总，新增 empty-pair ratio / boundary density / change-area CV / hard pseudo-change / illumination-unchanged），**v1 的 18 维保留不覆盖**。
+- **新 reward**：`ΔF1_val(pp)`（弃用 `ΔF1+0.5ΔIoU` 的复合奖励，避免同一检测效应重复计量）。
+- **新 Agent**：`models/agent/safe_selector.py` —— 共享**加权 ridge**（按数据集簇均衡）+ **域级 jackknife** 模型不确定性代理 + **安全集** `S(D)={T: μ−κu>δ}`，`δ=+0.20pp / κ=1`，集合为空即 `None`。配套 `teacher_metadata.py`（5 个 test-free 元数据字段）与 `train_safe_teacher_agent.py`（LODO + 诊断 + 冻结动作）。
+- **新 probe**：`capability_probe.py` 增加 **P1–P5**（balanced AUROC / hard-negative separation / boundary contrast / size-conditioned AUROC gap / unchanged-leakage ratio），`probe_teacher_capability.py` 改**分层采样**（按变化比率三分位）+ **CDD 路径 fallback** + 记录采样 SHA。
+
+### Agent-only 消融结果（4 折 LODO，held-out **val** reward，pp）
+
+| 臂 | 含义 | harm↓ | false act.↓ | coverage | pos-recall |
+|---|---|---:|---:|---:|---:|
+| AG-00 | legacy MLP，`max>0` | 0.00–0.50 | 0.25–0.75 | 0.25–1.00 | 0.5 |
+| AG-01 | ridge，`μ>0` | 0.00–0.25 | 0.25–0.75 | 0.25–0.75 | 0.0 |
+| AG-02 | ridge + `δ=0.20pp` | **0.00** | 0.00–0.25 | 0.00–0.25 | 0.0 |
+| **AG-03** | **U-SafeAgent（主方法）** | **0.00** | **0.00** | **0.00** | 0.0 |
+| AG-05 | AG-04 + metadata | 0.00 | 0.00 | 0.00 | 0.0 |
+| AG-CF / AG-CH | 公平固定教师 / 启发式 + None | 0.00 | 0.00 | 0.00 | 0.0 |
+
+（范围为 5 个特征阶梯 `sig_only → sig_probe → sig_probe_ext → sig_probe_ext_meta → legacy` 的取值区间。val σ：SYSU 0.411 / WHU 0.311 / CDD 0.013 / LEVIR 0.061 pp；oracle-val：SYSU −0.09 / WHU +0.12 / CDD −0.00 / LEVIR +0.15 pp。）
+
+**判定：命中方案 §9.4 的 F0「机制不可识别」。** AG-03 在**全部 5 个特征阶梯、全部 4 折都选择 `None`**——val 噪声（0.013–0.41pp）不小于待判效应（最大 +0.15pp），`μ−κu>δ` 无法满足。按方案 §1.1 的可证伪边界，**不能为了"让 Agent 动起来"而降低 δ**。
+
+→ 结论：**Teacher Selection Signal Insufficiency（拒答正确，但尚无可用的选择策略）**。据此**不启动 Run2/M2**（方案 §9.2 要求的 gate 未通过：无 ≥1 折选到 positive reward 的非 None 动作）。
+
+**剩余缺口（硬目标，未变）**：SYSU 82.57/85（−2.43）、LEVIR 91.04/92.5（−1.46）、WHU 94.04/95（−0.96）、CDD 97.75/98（−0.25）——即 44 个单教师 run 中最大的 test 差也只有 +0.68pp，现有证据并不显示仅靠"选一个教师"可达四硬目标。
 
 ## 环境（RSML-3）
 

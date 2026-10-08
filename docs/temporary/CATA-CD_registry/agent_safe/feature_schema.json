@@ -1,0 +1,48 @@
+{
+  "feature_names": [
+    "change_ratio",
+    "empty_pair_ratio",
+    "area_p50_g",
+    "small_fraction",
+    "boundary_density",
+    "hard_pseudo_change_fraction",
+    "illumination_unchanged",
+    "probe_change_mean",
+    "hard_negative_gap",
+    "probe_balanced_auroc",
+    "probe_hard_negative_separation",
+    "probe_unchanged_leakage_ratio",
+    "meta_log2_stride",
+    "meta_pyramid",
+    "meta_dom_satellite"
+  ],
+  "n_features": 15,
+  "feature_set": "ladder",
+  "signature_dims": 20,
+  "probe_keys": [
+    "hard_negative_gap",
+    "probe_balanced_auroc",
+    "probe_boundary_contrast",
+    "probe_change_mean",
+    "probe_conf_change",
+    "probe_conf_unchanged",
+    "probe_hard_negative_separation",
+    "probe_size_conditioned_auroc_gap",
+    "probe_unchanged_leakage_ratio",
+    "probe_unchanged_mean",
+    "separability_ratio"
+  ],
+  "meta_keys": [
+    "meta_log2_stride",
+    "meta_pyramid",
+    "meta_cache_h",
+    "meta_cache_w",
+    "meta_dom_natural",
+    "meta_dom_satellite",
+    "meta_dom_mixed",
+    "meta_obj_segmentation",
+    "meta_obj_ssl",
+    "meta_obj_vl",
+    "meta_obj_agglomerated"
+  ]
+}

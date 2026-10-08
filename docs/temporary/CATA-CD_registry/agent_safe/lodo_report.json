@@ -1,0 +1,387 @@
+{
+  "ladder": {
+    "legacy": {
+      "n_features": 31,
+      "summaries": {
+        "AG-00": {
+          "n_folds": 4,
+          "harm_rate": 0.5,
+          "false_action_rate": 0.75,
+          "coverage": 1.0,
+          "mean_regret_pp": 0.0323749999999956,
+          "median_regret_pp": 0.006799999999995698,
+          "any_positive_recall": 0.5
+        },
+        "AG-01": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.75,
+          "coverage": 0.75,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-02": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-03": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-05": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-CF": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-CH": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        }
+      },
+      "actions": {
+        "SYSU": null,
+        "WHU": null,
+        "CDD": null,
+        "LEVIR": null
+      }
+    },
+    "sig_only": {
+      "n_features": 7,
+      "summaries": {
+        "AG-00": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.25,
+          "coverage": 0.25,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-01": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.25,
+          "coverage": 0.25,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-02": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.25,
+          "coverage": 0.25,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-03": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-05": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-CF": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-CH": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        }
+      },
+      "actions": {
+        "SYSU": null,
+        "WHU": null,
+        "CDD": null,
+        "LEVIR": null
+      }
+    },
+    "sig_probe": {
+      "n_features": 9,
+      "summaries": {
+        "AG-00": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.25,
+          "mean_regret_pp": 0.028974999999997753,
+          "median_regret_pp": 0.0,
+          "any_positive_recall": 0.5
+        },
+        "AG-01": {
+          "n_folds": 4,
+          "harm_rate": 0.25,
+          "false_action_rate": 0.5,
+          "coverage": 0.5,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-02": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.25,
+          "coverage": 0.25,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-03": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-05": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-CF": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-CH": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        }
+      },
+      "actions": {
+        "SYSU": null,
+        "WHU": null,
+        "CDD": null,
+        "LEVIR": null
+      }
+    },
+    "sig_probe_ext": {
+      "n_features": 12,
+      "summaries": {
+        "AG-00": {
+          "n_folds": 4,
+          "harm_rate": 0.25,
+          "false_action_rate": 0.25,
+          "coverage": 0.5,
+          "mean_regret_pp": 0.0323749999999956,
+          "median_regret_pp": 0.006799999999995698,
+          "any_positive_recall": 0.5
+        },
+        "AG-01": {
+          "n_folds": 4,
+          "harm_rate": 0.25,
+          "false_action_rate": 0.5,
+          "coverage": 0.5,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-02": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.25,
+          "coverage": 0.25,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-03": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-05": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-CF": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-CH": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        }
+      },
+      "actions": {
+        "SYSU": null,
+        "WHU": null,
+        "CDD": null,
+        "LEVIR": null
+      }
+    },
+    "sig_probe_ext_meta": {
+      "n_features": 15,
+      "summaries": {
+        "AG-00": {
+          "n_folds": 4,
+          "harm_rate": 0.5,
+          "false_action_rate": 0.75,
+          "coverage": 1.0,
+          "mean_regret_pp": 0.06384999999999585,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.5
+        },
+        "AG-01": {
+          "n_folds": 4,
+          "harm_rate": 0.25,
+          "false_action_rate": 0.5,
+          "coverage": 0.5,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-02": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.25,
+          "coverage": 0.25,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-03": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-05": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-CF": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        },
+        "AG-CH": {
+          "n_folds": 4,
+          "harm_rate": 0.0,
+          "false_action_rate": 0.0,
+          "coverage": 0.0,
+          "mean_regret_pp": 0.0654749999999954,
+          "median_regret_pp": 0.057949999999995505,
+          "any_positive_recall": 0.0
+        }
+      },
+      "actions": {
+        "SYSU": null,
+        "WHU": null,
+        "CDD": null,
+        "LEVIR": null
+      }
+    }
+  },
+  "oracle_val_pp": {
+    "SYSU": -0.09449999999999736,
+    "WHU": 0.11589999999999101,
+    "CDD": -0.000999999999995449,
+    "LEVIR": 0.14599999999999058
+  },
+  "val_sigma_pp": {
+    "SYSU": 0.410918357665682,
+    "WHU": 0.31102624085437525,
+    "CDD": 0.013174976280810416,
+    "LEVIR": 0.06079766305815842
+  },
+  "registry_sha256": "af112057fe1d6270"
+}

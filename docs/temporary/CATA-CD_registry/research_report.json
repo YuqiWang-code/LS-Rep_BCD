@@ -1,6 +1,11 @@
 {
+  "_meta": {
+    "unit": "pp",
+    "test_block_rule": "last complete TEST RESULTS block",
+    "val_rule": "best (max F1) epoch row = checkpoint-selected validation utility"
+  },
   "_anchors": {
-    "C0_test": {
+    "C0_test_pp": {
       "SYSU": {
         "Recall": 0.786792,
         "Precision": 0.859045,
@@ -34,363 +39,399 @@
         "Kappa": 0.904363
       }
     },
-    "C1_test": {
+    "C1_test_pp": {
       "SYSU": {
-        "Recall": 0.806873,
-        "Precision": 0.845474,
-        "OA": 0.919677,
-        "F1": 0.825722,
-        "IoU": 0.703175,
-        "Kappa": 0.773572
+        "Recall": 80.6873,
+        "Precision": 84.5474,
+        "OA": 91.9677,
+        "F1": 82.5722,
+        "IoU": 70.3175,
+        "Kappa": 77.3572
       },
       "WHU": {
-        "Recall": 0.93631,
-        "Precision": 0.944464,
-        "OA": 0.995289,
-        "F1": 0.940369,
-        "IoU": 0.88745,
-        "Kappa": 0.937917
+        "Recall": 93.631,
+        "Precision": 94.4464,
+        "OA": 99.5289,
+        "F1": 94.0369,
+        "IoU": 88.74499999999999,
+        "Kappa": 93.7917
       },
       "CDD": {
-        "Recall": 0.977079,
-        "Precision": 0.97802,
-        "OA": 0.99446,
-        "F1": 0.977549,
-        "IoU": 0.956085,
-        "Kappa": 0.97439
+        "Recall": 97.70790000000001,
+        "Precision": 97.802,
+        "OA": 99.446,
+        "F1": 97.7549,
+        "IoU": 95.60849999999999,
+        "Kappa": 97.439
       },
       "LEVIR": {
-        "Recall": 0.902249,
-        "Precision": 0.91863,
-        "OA": 0.990949,
-        "F1": 0.910366,
-        "IoU": 0.835479,
-        "Kappa": 0.9056
+        "Recall": 90.22489999999999,
+        "Precision": 91.863,
+        "OA": 99.0949,
+        "F1": 91.0366,
+        "IoU": 83.5479,
+        "Kappa": 90.56
       }
     },
-    "C1_val": {
+    "C1_val_pp": {
       "SYSU": {
-        "f1": 0.815541,
-        "iou": 0.688535
+        "f1": 81.55409999999999,
+        "iou": 68.8535
       },
       "WHU": {
-        "f1": 0.948231,
-        "iou": 0.901558
+        "f1": 94.82310000000001,
+        "iou": 90.1558
       },
       "CDD": {
-        "f1": 0.977304,
-        "iou": 0.955616
+        "f1": 97.73039999999999,
+        "iou": 95.5616
       },
       "LEVIR": {
-        "f1": 0.914958,
-        "iou": 0.843247
+        "f1": 91.4958,
+        "iou": 84.32469999999999
       }
     }
   },
   "sam2": {
     "SYSU": {
       "experiment_id": "TV-SAM",
-      "has_test": true,
-      "test_f1": 0.822894,
-      "test_iou": 0.699082,
-      "test_delta_f1": -0.0028279999999999417,
-      "test_delta_iou": -0.004093000000000013
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-SAM/SYSU/train_log.txt",
+      "log_sha256": "73101fc20669018e",
+      "test_f1_pp": 82.2894,
+      "test_iou_pp": 69.9082,
+      "test_delta_f1_pp": -0.28279999999999417,
+      "test_delta_iou_pp": -0.40930000000000133
     },
     "WHU": {
       "experiment_id": "TV-SAM",
-      "has_test": true,
-      "test_f1": 0.92888,
-      "test_iou": 0.867204,
-      "test_delta_f1": -0.011488999999999971,
-      "test_delta_iou": -0.020245999999999986
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-SAM/WHU/train_log.txt",
+      "log_sha256": "e34f278c87571ff1",
+      "test_f1_pp": 92.888,
+      "test_iou_pp": 86.7204,
+      "test_delta_f1_pp": -1.1488999999999971,
+      "test_delta_iou_pp": -2.0245999999999986
     },
     "CDD": {
       "experiment_id": "TV-SAM",
-      "has_test": true,
-      "test_f1": 0.977441,
-      "test_iou": 0.955878,
-      "test_delta_f1": -0.00010799999999999699,
-      "test_delta_iou": -0.00020699999999995722
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-SAM/CDD/train_log.txt",
+      "log_sha256": "4dab3abe5cad27fa",
+      "test_f1_pp": 97.7441,
+      "test_iou_pp": 95.5878,
+      "test_delta_f1_pp": -0.010799999999999699,
+      "test_delta_iou_pp": -0.020699999999995722
     },
     "LEVIR": {
       "experiment_id": "TV-SAM",
-      "has_test": true,
-      "test_f1": 0.910999,
-      "test_iou": 0.836546,
-      "test_delta_f1": 0.0006329999999999947,
-      "test_delta_iou": 0.0010670000000000401
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-SAM/LEVIR/train_log.txt",
+      "log_sha256": "6a2ffd47e7c8eb57",
+      "test_f1_pp": 91.0999,
+      "test_iou_pp": 83.6546,
+      "test_delta_f1_pp": 0.06329999999999947,
+      "test_delta_iou_pp": 0.10670000000000401
     }
   },
   "dinov2": {
     "SYSU": {
       "experiment_id": "TV-D2",
-      "has_test": true,
-      "test_f1": 0.824524,
-      "test_iou": 0.701439,
-      "test_delta_f1": -0.0011979999999999214,
-      "test_delta_iou": -0.0017359999999999598
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D2/SYSU/train_log.txt",
+      "log_sha256": "621ffda315197e69",
+      "test_f1_pp": 82.4524,
+      "test_iou_pp": 70.1439,
+      "test_delta_f1_pp": -0.11979999999999214,
+      "test_delta_iou_pp": -0.17359999999999598
     },
     "WHU": {
       "experiment_id": "TV-D2",
-      "has_test": true,
-      "test_f1": 0.936729,
-      "test_iou": 0.880987,
-      "test_delta_f1": -0.0036399999999999766,
-      "test_delta_iou": -0.0064629999999999965
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D2/WHU/train_log.txt",
+      "log_sha256": "a33dc81c666ca496",
+      "test_f1_pp": 93.6729,
+      "test_iou_pp": 88.0987,
+      "test_delta_f1_pp": -0.36399999999999766,
+      "test_delta_iou_pp": -0.6462999999999997
     },
     "CDD": {
       "experiment_id": "TV-D2",
-      "has_test": true,
-      "test_f1": 0.977373,
-      "test_iou": 0.955747,
-      "test_delta_f1": -0.00017599999999995397,
-      "test_delta_iou": -0.00033799999999994945
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D2/CDD/train_log.txt",
+      "log_sha256": "1cca5d1e66899bf2",
+      "test_f1_pp": 97.7373,
+      "test_iou_pp": 95.5747,
+      "test_delta_f1_pp": -0.017599999999995397,
+      "test_delta_iou_pp": -0.033799999999994945
     },
     "LEVIR": {
       "experiment_id": "TV-D2",
-      "has_test": true,
-      "test_f1": 0.908193,
-      "test_iou": 0.831826,
-      "test_delta_f1": -0.0021729999999999805,
-      "test_delta_iou": -0.0036530000000000173
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D2/LEVIR/train_log.txt",
+      "log_sha256": "7fab3e407f9213d4",
+      "test_f1_pp": 90.8193,
+      "test_iou_pp": 83.1826,
+      "test_delta_f1_pp": -0.21729999999999805,
+      "test_delta_iou_pp": -0.36530000000000173
     }
   },
   "dinov3_lvd": {
     "SYSU": {
       "experiment_id": "TV-D3N",
-      "has_test": true,
-      "test_f1": 0.823337,
-      "test_iou": 0.699722,
-      "test_delta_f1": -0.0023849999999999705,
-      "test_delta_iou": -0.0034530000000000394
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3N/SYSU/train_log.txt",
+      "log_sha256": "66876e1b286bb2ae",
+      "test_f1_pp": 82.3337,
+      "test_iou_pp": 69.9722,
+      "test_delta_f1_pp": -0.23849999999999705,
+      "test_delta_iou_pp": -0.34530000000000394
     },
     "WHU": {
       "experiment_id": "TV-D3N",
-      "has_test": true,
-      "test_f1": 0.938219,
-      "test_iou": 0.883627,
-      "test_delta_f1": -0.0021499999999999853,
-      "test_delta_iou": -0.00382299999999991
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3N/WHU/train_log.txt",
+      "log_sha256": "1297481e1c2e0dff",
+      "test_f1_pp": 93.8219,
+      "test_iou_pp": 88.3627,
+      "test_delta_f1_pp": -0.21499999999999853,
+      "test_delta_iou_pp": -0.382299999999991
     },
     "CDD": {
       "experiment_id": "TV-D3N",
-      "has_test": true,
-      "test_f1": 0.977072,
-      "test_iou": 0.955172,
-      "test_delta_f1": -0.0004769999999999497,
-      "test_delta_iou": -0.0009129999999999416
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3N/CDD/train_log.txt",
+      "log_sha256": "8e060acbe6d1e338",
+      "test_f1_pp": 97.7072,
+      "test_iou_pp": 95.5172,
+      "test_delta_f1_pp": -0.04769999999999497,
+      "test_delta_iou_pp": -0.09129999999999416
     },
     "LEVIR": {
       "experiment_id": "TV-D3N",
-      "has_test": true,
-      "test_f1": 0.911168,
-      "test_iou": 0.83683,
-      "test_delta_f1": 0.0008019999999999694,
-      "test_delta_iou": 0.001350999999999991
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3N/LEVIR/train_log.txt",
+      "log_sha256": "0003b292fef64202",
+      "test_f1_pp": 91.1168,
+      "test_iou_pp": 83.68299999999999,
+      "test_delta_f1_pp": 0.08019999999999694,
+      "test_delta_iou_pp": 0.1350999999999991
     }
   },
   "dinov3_sat": {
     "SYSU": {
       "experiment_id": "TV-D3S",
-      "has_test": true,
-      "test_f1": 0.819036,
-      "test_iou": 0.693531,
-      "test_delta_f1": -0.00668599999999997,
-      "test_delta_iou": -0.009643999999999986
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3S/SYSU/train_log.txt",
+      "log_sha256": "de77bd28bc82c822",
+      "test_f1_pp": 81.9036,
+      "test_iou_pp": 69.3531,
+      "test_delta_f1_pp": -0.668599999999997,
+      "test_delta_iou_pp": -0.9643999999999986
     },
     "WHU": {
       "experiment_id": "TV-D3S",
-      "has_test": true,
-      "test_f1": 0.94113,
-      "test_iou": 0.888805,
-      "test_delta_f1": 0.0007610000000000117,
-      "test_delta_iou": 0.001354999999999995
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3S/WHU/train_log.txt",
+      "log_sha256": "4e8aa5423c75dd18",
+      "test_f1_pp": 94.113,
+      "test_iou_pp": 88.8805,
+      "test_delta_f1_pp": 0.07610000000000117,
+      "test_delta_iou_pp": 0.1354999999999995
     },
     "CDD": {
       "experiment_id": "TV-D3S",
-      "has_test": true,
-      "test_f1": 0.977138,
-      "test_iou": 0.955298,
-      "test_delta_f1": -0.0004110000000000502,
-      "test_delta_iou": -0.0007869999999999822
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3S/CDD/train_log.txt",
+      "log_sha256": "458256c050f61903",
+      "test_f1_pp": 97.71379999999999,
+      "test_iou_pp": 95.5298,
+      "test_delta_f1_pp": -0.04110000000000502,
+      "test_delta_iou_pp": -0.07869999999999822
     },
     "LEVIR": {
       "experiment_id": "TV-D3S",
-      "has_test": true,
-      "test_f1": 0.911732,
-      "test_iou": 0.837783,
-      "test_delta_f1": 0.0013659999999999783,
-      "test_delta_iou": 0.0023040000000000838
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-D3S/LEVIR/train_log.txt",
+      "log_sha256": "914b408484aa15b4",
+      "test_f1_pp": 91.1732,
+      "test_iou_pp": 83.7783,
+      "test_delta_f1_pp": 0.13659999999999783,
+      "test_delta_iou_pp": 0.23040000000000838
     }
   },
   "remoteclip": {
     "SYSU": {
       "experiment_id": "TV-RCLIP",
-      "has_test": true,
-      "test_f1": 0.817645,
-      "test_iou": 0.691539,
-      "test_delta_f1": -0.008077,
-      "test_delta_iou": -0.01163599999999998
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RCLIP/SYSU/train_log.txt",
+      "log_sha256": "9c9c537433034686",
+      "test_f1_pp": 81.7645,
+      "test_iou_pp": 69.15390000000001,
+      "test_delta_f1_pp": -0.8077000000000001,
+      "test_delta_iou_pp": -1.163599999999998
     },
     "WHU": {
       "experiment_id": "TV-RCLIP",
-      "has_test": true,
-      "test_f1": 0.941129,
-      "test_iou": 0.888804,
-      "test_delta_f1": 0.0007599999999999829,
-      "test_delta_iou": 0.0013540000000000774
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RCLIP/WHU/train_log.txt",
+      "log_sha256": "645d3e9a5bc0e9cb",
+      "test_f1_pp": 94.1129,
+      "test_iou_pp": 88.88040000000001,
+      "test_delta_f1_pp": 0.07599999999999829,
+      "test_delta_iou_pp": 0.13540000000000774
     },
     "CDD": {
       "experiment_id": "TV-RCLIP",
-      "has_test": true,
-      "test_f1": 0.977488,
-      "test_iou": 0.955968,
-      "test_delta_f1": -6.099999999997774e-05,
-      "test_delta_iou": -0.00011699999999992272
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RCLIP/CDD/train_log.txt",
+      "log_sha256": "81b183da94580bdf",
+      "test_f1_pp": 97.7488,
+      "test_iou_pp": 95.5968,
+      "test_delta_f1_pp": -0.006099999999997774,
+      "test_delta_iou_pp": -0.011699999999992272
     },
     "LEVIR": {
       "experiment_id": "TV-RCLIP",
-      "has_test": true,
-      "test_f1": 0.909678,
-      "test_iou": 0.834321,
-      "test_delta_f1": -0.0006880000000000219,
-      "test_delta_iou": -0.0011579999999999924
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RCLIP/LEVIR/train_log.txt",
+      "log_sha256": "501dd23536468e1b",
+      "test_f1_pp": 90.9678,
+      "test_iou_pp": 83.43209999999999,
+      "test_delta_f1_pp": -0.06880000000000219,
+      "test_delta_iou_pp": -0.11579999999999924
     }
   },
   "mars": {
     "SYSU": {
       "experiment_id": "TV-MARS",
-      "has_test": true,
-      "test_f1": 0.82538,
-      "test_iou": 0.702679,
-      "test_delta_f1": -0.00034199999999995345,
-      "test_delta_iou": -0.0004959999999999409
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-MARS/SYSU/train_log.txt",
+      "log_sha256": "b9ad8ca0395c5eb5",
+      "test_f1_pp": 82.538,
+      "test_iou_pp": 70.26790000000001,
+      "test_delta_f1_pp": -0.034199999999995345,
+      "test_delta_iou_pp": -0.04959999999999409
     },
     "WHU": {
       "experiment_id": "TV-MARS",
-      "has_test": true,
-      "test_f1": 0.945988,
-      "test_iou": 0.897511,
-      "test_delta_f1": 0.005619000000000041,
-      "test_delta_iou": 0.010060999999999987
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-MARS/WHU/train_log.txt",
+      "log_sha256": "6b089ef80b195f46",
+      "test_f1_pp": 94.59880000000001,
+      "test_iou_pp": 89.7511,
+      "test_delta_f1_pp": 0.5619000000000041,
+      "test_delta_iou_pp": 1.0060999999999987
     },
     "CDD": {
       "experiment_id": "TV-MARS",
-      "has_test": true,
-      "test_f1": 0.977325,
-      "test_iou": 0.955656,
-      "test_delta_f1": -0.00022400000000000198,
-      "test_delta_iou": -0.0004290000000000127
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-MARS/CDD/train_log.txt",
+      "log_sha256": "305b245a1e06e9fb",
+      "test_f1_pp": 97.7325,
+      "test_iou_pp": 95.56559999999999,
+      "test_delta_f1_pp": -0.022400000000000198,
+      "test_delta_iou_pp": -0.04290000000000127
     },
     "LEVIR": {
       "experiment_id": "TV-MARS",
-      "has_test": true,
-      "test_f1": 0.909759,
-      "test_iou": 0.834456,
-      "test_delta_f1": -0.0006070000000000242,
-      "test_delta_iou": -0.0010229999999999961
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-MARS/LEVIR/train_log.txt",
+      "log_sha256": "6b752131fab9168f",
+      "test_f1_pp": 90.9759,
+      "test_iou_pp": 83.4456,
+      "test_delta_f1_pp": -0.06070000000000242,
+      "test_delta_iou_pp": -0.10229999999999961
     }
   },
   "anysat": {
     "SYSU": {
       "experiment_id": "TV-ANYSAT",
-      "has_test": true,
-      "test_f1": 0.819163,
-      "test_iou": 0.693714,
-      "test_delta_f1": -0.0065589999999999815,
-      "test_delta_iou": -0.009460999999999942
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/SYSU/train_log.txt",
+      "log_sha256": "459ee022be25e385",
+      "test_f1_pp": 81.91629999999999,
+      "test_iou_pp": 69.37140000000001,
+      "test_delta_f1_pp": -0.6558999999999982,
+      "test_delta_iou_pp": -0.9460999999999942
     },
     "WHU": {
       "experiment_id": "TV-ANYSAT",
-      "has_test": true,
-      "test_f1": 0.939089,
-      "test_iou": 0.885172,
-      "test_delta_f1": -0.0012800000000000589,
-      "test_delta_iou": -0.0022780000000000022
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/WHU/train_log.txt",
+      "log_sha256": "6b0a4ba99d9e0f1a",
+      "test_f1_pp": 93.90889999999999,
+      "test_iou_pp": 88.5172,
+      "test_delta_f1_pp": -0.1280000000000059,
+      "test_delta_iou_pp": -0.22780000000000022
     },
     "CDD": {
       "experiment_id": "TV-ANYSAT",
-      "has_test": true,
-      "test_f1": 0.977476,
-      "test_iou": 0.955944,
-      "test_delta_f1": -7.299999999998974e-05,
-      "test_delta_iou": -0.00014099999999994672
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/CDD/train_log.txt",
+      "log_sha256": "bae3a3ef47075e4c",
+      "test_f1_pp": 97.7476,
+      "test_iou_pp": 95.59440000000001,
+      "test_delta_f1_pp": -0.007299999999998974,
+      "test_delta_iou_pp": -0.014099999999994672
     },
     "LEVIR": {
       "experiment_id": "TV-ANYSAT",
-      "has_test": true,
-      "test_f1": 0.91099,
-      "test_iou": 0.83653,
-      "test_delta_f1": 0.0006239999999999579,
-      "test_delta_iou": 0.0010510000000000241
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/LEVIR/train_log.txt",
+      "log_sha256": "8a64f2c77ab50b15",
+      "test_f1_pp": 91.09899999999999,
+      "test_iou_pp": 83.653,
+      "test_delta_f1_pp": 0.06239999999999579,
+      "test_delta_iou_pp": 0.10510000000000241
     }
   },
   "universat": {
     "SYSU": {
       "experiment_id": "TV-UNISAT",
-      "has_test": true,
-      "test_f1": 0.823025,
-      "test_iou": 0.699272,
-      "test_delta_f1": -0.0026969999999999494,
-      "test_delta_iou": -0.00390299999999999
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-UNISAT/SYSU/train_log.txt",
+      "log_sha256": "8d26ae3d7be5f44d",
+      "test_f1_pp": 82.3025,
+      "test_iou_pp": 69.9272,
+      "test_delta_f1_pp": -0.26969999999999494,
+      "test_delta_iou_pp": -0.390299999999999
     },
     "WHU": {
       "experiment_id": "TV-UNISAT",
-      "has_test": true,
-      "test_f1": 0.944342,
-      "test_iou": 0.894553,
-      "test_delta_f1": 0.003973000000000004,
-      "test_delta_iou": 0.0071030000000000815
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-UNISAT/WHU/train_log.txt",
+      "log_sha256": "c1ac47bb8a278ae3",
+      "test_f1_pp": 94.4342,
+      "test_iou_pp": 89.45530000000001,
+      "test_delta_f1_pp": 0.39730000000000043,
+      "test_delta_iou_pp": 0.7103000000000081
     },
     "CDD": {
       "experiment_id": "TV-UNISAT",
-      "has_test": true,
-      "test_f1": 0.977562,
-      "test_iou": 0.956108,
-      "test_delta_f1": 1.3000000000040757e-05,
-      "test_delta_iou": 2.2999999999995246e-05
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-UNISAT/CDD/train_log.txt",
+      "log_sha256": "5d80d910a025973e",
+      "test_f1_pp": 97.7562,
+      "test_iou_pp": 95.6108,
+      "test_delta_f1_pp": 0.0013000000000040757,
+      "test_delta_iou_pp": 0.0022999999999995246
     },
     "LEVIR": {
       "experiment_id": "TV-UNISAT",
-      "has_test": true,
-      "test_f1": 0.908562,
-      "test_iou": 0.832445,
-      "test_delta_f1": -0.0018040000000000278,
-      "test_delta_iou": -0.003033999999999981
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-UNISAT/LEVIR/train_log.txt",
+      "log_sha256": "cbc33a0f39e3cba6",
+      "test_f1_pp": 90.8562,
+      "test_iou_pp": 83.2445,
+      "test_delta_f1_pp": -0.18040000000000278,
+      "test_delta_iou_pp": -0.3033999999999981
     }
   },
   "radio": {
     "SYSU": {
       "experiment_id": "TV-RADIO",
-      "has_test": true,
-      "test_f1": 0.832489,
-      "test_iou": 0.713046,
-      "test_delta_f1": 0.0067670000000000785,
-      "test_delta_iou": 0.009870999999999963
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RADIO/SYSU/train_log.txt",
+      "log_sha256": "acd503cdae32fece",
+      "test_f1_pp": 83.2489,
+      "test_iou_pp": 71.3046,
+      "test_delta_f1_pp": 0.6767000000000079,
+      "test_delta_iou_pp": 0.9870999999999963
     },
     "WHU": {
       "experiment_id": "TV-RADIO",
-      "has_test": true,
-      "test_f1": 0.937218,
-      "test_iou": 0.881854,
-      "test_delta_f1": -0.003151000000000015,
-      "test_delta_iou": -0.005595999999999934
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RADIO/WHU/train_log.txt",
+      "log_sha256": "d2019bc44ce8c122",
+      "test_f1_pp": 93.7218,
+      "test_iou_pp": 88.1854,
+      "test_delta_f1_pp": -0.3151000000000015,
+      "test_delta_iou_pp": -0.5595999999999934
     },
     "CDD": {
       "experiment_id": "TV-RADIO",
-      "has_test": true,
-      "test_f1": 0.977488,
-      "test_iou": 0.955968,
-      "test_delta_f1": -6.099999999997774e-05,
-      "test_delta_iou": -0.00011699999999992272
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RADIO/CDD/train_log.txt",
+      "log_sha256": "65ddbe1616e19447",
+      "test_f1_pp": 97.7488,
+      "test_iou_pp": 95.5968,
+      "test_delta_f1_pp": -0.006099999999997774,
+      "test_delta_iou_pp": -0.011699999999992272
     },
     "LEVIR": {
       "experiment_id": "TV-RADIO",
-      "has_test": true,
-      "test_f1": 0.910354,
-      "test_iou": 0.835458,
-      "test_delta_f1": -1.2000000000012001e-05,
-      "test_delta_iou": -2.0999999999937735e-05
+      "source_log": "outputs/CATA-CD/teacher_adaptation/TV-RADIO/LEVIR/train_log.txt",
+      "log_sha256": "a0431b86f3398f6d",
+      "test_f1_pp": 91.0354,
+      "test_iou_pp": 83.5458,
+      "test_delta_f1_pp": -0.0012000000000012,
+      "test_delta_iou_pp": -0.0020999999999937735
     }
   }
 }

@@ -342,7 +342,7 @@ def test_deployed(args, loader, model, device):
     return meter.get_scores(), infer_params, flops
 
 
-def append_test(logger, args, scores, train_params, infer_params, flops, swap_err, deploy_err, elapsed):
+def append_test(logger, args, scores, param_stats, infer_params, flops, swap_err, deploy_err, elapsed):
     logger.log_message("=" * 100)
     logger.log_message("=== TEST RESULTS ===")
     logger.log_message("Metric Split: test")
@@ -354,7 +354,11 @@ def append_test(logger, args, scores, train_params, infer_params, flops, swap_er
     logger.log_message(f"Seed: {args.seed}")
     logger.log_message(f"Max Steps: {args.max_steps}")
     logger.log_message(f"Batch Size: {args.batch_size}")
-    logger.log_message(f"Train Params: {train_params / 1e6:.4f}M")
+    # Parameter accounting (review P0): the KD aux head is training-only and was
+    # previously folded into "Train Params"; report student / aux / total / deploy.
+    logger.log_message(f"Student Params: {param_stats['student'] / 1e6:.4f}M")
+    logger.log_message(f"Aux Params: {param_stats['aux'] / 1e6:.4f}M")
+    logger.log_message(f"Train Params: {param_stats['training_total'] / 1e6:.4f}M")
     logger.log_message(f"Infer Params: {infer_params / 1e6:.4f}M")
     logger.log_message(f"FLOPs: {flops / 1e9:.4f}G" if flops is not None else "FLOPs: unavailable")
     logger.log_message(f"Temporal swap max error: {swap_err:.8e}")
@@ -376,12 +380,18 @@ def main():
     args.data_fingerprint = _fingerprints(args.data_root)
 
     model = build_model(args).to(device)
-    train_params = sum(p.numel() for p in model.parameters())
+    student_params = sum(p.numel() for p in model.parameters())
     expected = EXPECTED_C0_PARAMS if args.dca_mode == "none" else EXPECTED_C1_PARAMS
-    if train_params != expected:
-        raise RuntimeError(f"params {train_params:,} != expected {expected:,}")
+    if student_params != expected:
+        raise RuntimeError(f"student params {student_params:,} != expected {expected:,}")
 
     aux = ChangeEvidenceHead(64, 128, scale_index=2).to(device) if args.use_teacher else None
+    aux_params = sum(p.numel() for p in aux.parameters()) if aux is not None else 0
+    param_stats = {
+        "student": student_params,
+        "aux": aux_params,
+        "training_total": student_params + aux_params,
+    }
     params = list(model.parameters()) + (list(aux.parameters()) if aux is not None else [])
     optimizer = build_optimizer(args, params)
     criterion = build_loss(args.dice_reduction)
@@ -423,7 +433,10 @@ def main():
     last_path = save_dir / "last_checkpoint.pth"
     if not args.resume and (log_path.exists() or last_path.exists()):
         raise FileExistsError("existing run")
-    logger = TrainingLogger(str(log_path), {**vars(args), "train_params": f"{train_params/1e6:.4f}M",
+    logger = TrainingLogger(str(log_path), {**vars(args),
+                                            "student_params": f"{param_stats['student']/1e6:.4f}M",
+                                            "aux_params": f"{param_stats['aux']/1e6:.4f}M",
+                                            "training_total_params": f"{param_stats['training_total']/1e6:.4f}M",
                                             "n_train": len(train_loader.dataset), "n_val": len(val_loader.dataset), "n_test": len(test_loader.dataset)}, append=bool(args.resume))
 
     best_path = None
@@ -463,7 +476,7 @@ def main():
         raise RuntimeError(f"deploy error {deploy_err:.2e}")
     if infer_params != expected or infer_params >= PARAM_CAP:
         raise RuntimeError(f"deploy params {infer_params:,}")
-    append_test(logger, args, scores, train_params, infer_params, flops, swap_err, deploy_err, datetime.datetime.now() - started)
+    append_test(logger, args, scores, param_stats, infer_params, flops, swap_err, deploy_err, datetime.datetime.now() - started)
 
 
 if __name__ == "__main__":

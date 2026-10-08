@@ -1,0 +1,101 @@
+{
+  "sam2": {
+    "teacher_id": "sam2",
+    "training_domain": "natural",
+    "primary_objective": "segmentation",
+    "native_stride": 16,
+    "pyramid_available": true,
+    "cache_hw": [
+      16,
+      16
+    ]
+  },
+  "dinov2": {
+    "teacher_id": "dinov2",
+    "training_domain": "natural",
+    "primary_objective": "self_supervision",
+    "native_stride": 14,
+    "pyramid_available": false,
+    "cache_hw": [
+      16,
+      16
+    ]
+  },
+  "dinov3_lvd": {
+    "teacher_id": "dinov3_lvd",
+    "training_domain": "natural",
+    "primary_objective": "self_supervision",
+    "native_stride": 16,
+    "pyramid_available": false,
+    "cache_hw": [
+      16,
+      16
+    ]
+  },
+  "dinov3_sat": {
+    "teacher_id": "dinov3_sat",
+    "training_domain": "satellite_eo",
+    "primary_objective": "self_supervision",
+    "native_stride": 16,
+    "pyramid_available": false,
+    "cache_hw": [
+      16,
+      16
+    ]
+  },
+  "remoteclip": {
+    "teacher_id": "remoteclip",
+    "training_domain": "satellite_eo",
+    "primary_objective": "vision_language",
+    "native_stride": 14,
+    "pyramid_available": false,
+    "cache_hw": [
+      16,
+      16
+    ]
+  },
+  "mars": {
+    "teacher_id": "mars",
+    "training_domain": "satellite_eo",
+    "primary_objective": "self_supervision",
+    "native_stride": 16,
+    "pyramid_available": true,
+    "cache_hw": [
+      16,
+      16
+    ]
+  },
+  "anysat": {
+    "teacher_id": "anysat",
+    "training_domain": "satellite_eo",
+    "primary_objective": "self_supervision",
+    "native_stride": 10,
+    "pyramid_available": false,
+    "cache_hw": [
+      25,
+      25
+    ]
+  },
+  "universat": {
+    "teacher_id": "universat",
+    "training_domain": "satellite_eo",
+    "primary_objective": "self_supervision",
+    "native_stride": 4,
+    "pyramid_available": false,
+    "cache_hw": [
+      64,
+      64
+    ]
+  },
+  "radio": {
+    "teacher_id": "radio",
+    "training_domain": "mixed",
+    "primary_objective": "agglomerated",
+    "native_stride": 16,
+    "pyramid_available": false,
+    "cache_hw": [
+      14,
+      14
+    ]
+  }
+}
