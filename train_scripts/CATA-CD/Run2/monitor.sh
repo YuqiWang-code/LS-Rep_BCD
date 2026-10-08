@@ -7,8 +7,18 @@ DS="${1:-SYSU}"
 MAX_STEPS=40000
 
 echo "=== Run2 arms on $DS ==="
-printf '%-12s %-9s %-8s %-7s %-9s %s\n' ARM EPOCHS STEP PCT ETA_MIN LAST_LINE
-for ARM in J1-C1 J1-GT J1-GATE J1-TASKKD; do
+# Discover every experiment directory that has a log for this dataset (J1-*,
+# S0-C1/S1-STAT/S2-PCG, ...) so new arms show up without editing this script.
+ARMS=()
+for d in "$LOG_BASE"/*/; do
+  [ -d "$d" ] || continue
+  a=$(basename "$d")
+  [ -f "$d$DS/train_log.txt" ] && ARMS+=("$a")
+done
+if [ ${#ARMS[@]} -eq 0 ]; then ARMS=(J1-C1 J1-GT J1-GATE J1-TASKKD S0-C1 S1-STAT S2-PCG); fi
+
+printf '%-12s %-9s %-8s %-7s %s\n' ARM EPOCHS STEP PCT LAST_LINE
+for ARM in $(printf '%s\n' "${ARMS[@]}" | sort); do
   LOG="$LOG_BASE/$ARM/$DS/train_log.txt"
   if [ ! -f "$LOG" ]; then
     printf '%-12s %s\n' "$ARM" "(no log yet)"
@@ -18,14 +28,11 @@ for ARM in J1-C1 J1-GT J1-GATE J1-TASKKD; do
   STEP=$(grep -o 'global_step: [0-9]*' "$LOG" 2>/dev/null | tail -1 | awk '{print $2}')
   STEP=${STEP:-0}
   PCT=$(( STEP * 100 / MAX_STEPS ))
-  # ETA from the log's own wall-clock rate: first and last epoch timestamps are not
-  # recorded, so use the epoch count as a coarse but honest progress signal.
-  ETA="-"
-  LAST=$(tail -1 "$LOG" | cut -c1-70)
+  LAST=$(tail -1 "$LOG" | cut -c1-64)
   if grep -q '^=== END TEST RESULTS ===' "$LOG"; then
-    LAST="DONE  $(grep '^F1:' "$LOG" | tail -1)"
+    LAST="DONE  F1=$(grep '^F1:' "$LOG" | tail -1 | awk '{print $2}')  IoU=$(grep '^IoU:' "$LOG" | tail -1 | awk '{print $2}')"
   fi
-  printf '%-12s %-9s %-8s %-7s %-9s %s\n' "$ARM" "$EPOCHS" "$STEP" "${PCT}%" "$ETA" "$LAST"
+  printf '%-12s %-9s %-8s %-7s %s\n' "$ARM" "$EPOCHS" "$STEP" "${PCT}%" "$LAST"
 done
 
 echo
