@@ -9354,12 +9354,12 @@ def adjust_learning_rate(args, optimizer, epoch, iter, max_batches, lr_factor=1)
 --- Sheet: README ---
 LS-Rep_BCD_RSML_3 — Experiment Metrics (DART-R / RDT-CD / SCTC / FA-SCRD / SAGE-CD)	
 	
-Generated	2026-10-07 22:04:01 +0800
+Generated	2026-10-08 11:52:43 +0800
 Extraction rule	Last complete formal TEST RESULTS block per train_log.txt
 Metric unit	Percentage points; source log fractions multiplied by 100
 Sources	outputs/DirectionC (DART-R) + outputs/DART-R-TS + outputs/RDT-CD + outputs/SCTC + outputs/SAGE-CD; launcher logs excluded
-Completed rows	133
-Rows by run	CATA-CD=48, DART-R=8, DART-R-TS=4, FA-SCRD-Run1=8, RDT-CD-Run1=12, RDT-CD-Run2=11, RDT-CD-Run3=14, SAGE-CD-Run1=6, SAGE-CD-Run2=10, SCTC-Run1=12
+Completed rows	145
+Rows by run	CATA-CD=60, DART-R=8, DART-R-TS=4, FA-SCRD-Run1=8, RDT-CD-Run1=12, RDT-CD-Run2=11, RDT-CD-Run3=14, SAGE-CD-Run1=6, SAGE-CD-Run2=10, SCTC-Run1=12
 DART-R scope	DART-R=C0 gradient routing (failed); DART-R-TS=C1 fixed teacher (failed, B0 only); RDT-CD-Run1=D1 dynamic teacher (B0/D1/D2); RDT-CD-Run2=SCGR (B0/D1NG/D1/D2, ineffective). All 40k, seed 2333 — not a multi-seed paper result.
 SCTC scope	SCTC-Run1: S0=clean A2Net, S1=full-pixel symmetric calibration, S2=unchanged-aware SCTC. S2-S0 = WHU +0.43 / SYSU -0.25 / CDD -0.20 / LEVIR -0.10 → WHU-only single-dataset trick, H4 failed. 40k, seed 2333 only.
 FA-SCRD scope	FA-SCRD-Run1: C0=clean, C1=joint temporal BN, A1=fixed DINOv3 teacher relation KD, M1=+failure-aware weighting. A1-C1 = SYSU -0.33 / CDD -0.33 → teacher transfer negative (not a trick, a straight loss). WHU/LEVIR stopped early (C0 only). 40k, seed 2333 only.
@@ -9381,6 +9381,18 @@ CATA-CD	Full	M1	M1	CDD-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mo
 CATA-CD	Full	M1	M1	LEVIR-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=True; dca=moe128; teacher_pkg=anysat	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	89.6602	92.3689	99.0959	90.9944	83.4769	90.5186		0	3:24:51.468164	outputs/CATA-CD	outputs/CATA-CD/Run1/LEVIR/train_log.txt
 CATA-CD	Full	M1	M1	SYSU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	80.3025	85.3756	92.1109	82.7614	70.5923	77.6526		0	3:22:52.371079	outputs/CATA-CD	outputs/CATA-CD/Run1/SYSU/train_log.txt
 CATA-CD	Full	M1	M1	WHU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	91.8516	94.1891	99.4519	93.0057	86.9258	92.7205		0	3:07:30.744861	outputs/CATA-CD	outputs/CATA-CD/Run1/WHU/train_log.txt
+CATA-CD	Full	R1	R1	CDD-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	97.7025	97.8052	99.4458	97.7538	95.6063	97.4377		0	4:26:01.236376	outputs/CATA-CD	outputs/CATA-CD/noise/R1/CDD/train_log.txt
+CATA-CD	Full	R1	R1	LEVIR-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	90.1005	91.2956	99.0581	90.6941	82.9728	90.1981		0	2:32:54.482776	outputs/CATA-CD	outputs/CATA-CD/noise/R1/LEVIR/train_log.txt
+CATA-CD	Full	R1	R1	SYSU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	79.2778	85.3968	91.9160	82.2236	69.8133	77.0014		0	4:24:43.637177	outputs/CATA-CD	outputs/CATA-CD/noise/R1/SYSU/train_log.txt
+CATA-CD	Full	R1	R1	WHU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	92.2266	97.1870	99.5857	94.6419	89.8288	94.4266		0	4:18:12.685261	outputs/CATA-CD	outputs/CATA-CD/noise/R1/WHU/train_log.txt
+CATA-CD	Full	R2	R2	CDD-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	97.7282	97.7933	99.4474	97.7607	95.6196	97.4455		0	4:33:46.204581	outputs/CATA-CD	outputs/CATA-CD/noise/R2/CDD/train_log.txt
+CATA-CD	Full	R2	R2	LEVIR-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	89.4800	92.8340	99.1122	91.1261	83.6988	90.6591		0	4:26:46.252597	outputs/CATA-CD	outputs/CATA-CD/noise/R2/LEVIR/train_log.txt
+CATA-CD	Full	R2	R2	SYSU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	81.5623	84.2988	92.0693	82.9080	70.8058	77.7466		0	3:10:51.116623	outputs/CATA-CD	outputs/CATA-CD/noise/R2/SYSU/train_log.txt
+CATA-CD	Full	R2	R2	WHU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	92.7171	94.1382	99.4820	93.4223	87.6564	93.1527		0	3:00:40.704114	outputs/CATA-CD	outputs/CATA-CD/noise/R2/WHU/train_log.txt
+CATA-CD	Full	R3	R3	CDD-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	97.6929	97.7675	99.4399	97.7302	95.5612	97.4107		0	4:04:59.938022	outputs/CATA-CD	outputs/CATA-CD/noise/R3/CDD/train_log.txt
+CATA-CD	Full	R3	R3	LEVIR-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	89.8775	92.2952	99.1021	91.0703	83.6046	90.5977		0	4:02:17.064826	outputs/CATA-CD	outputs/CATA-CD/noise/R3/LEVIR/train_log.txt
+CATA-CD	Full	R3	R3	SYSU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	80.1132	84.8709	91.9423	82.4234	70.1019	77.2021		0	4:24:35.838818	outputs/CATA-CD	outputs/CATA-CD/noise/R3/SYSU/train_log.txt
+CATA-CD	Full	R3	R3	WHU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=False; dca=moe128; teacher_pkg=none	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	92.1131	95.1962	99.5027	93.6293	88.0217	93.3706		0	4:03:55.470005	outputs/CATA-CD	outputs/CATA-CD/noise/R3/WHU/train_log.txt
 CATA-CD	Full	TV-ANYSAT	TV-ANYSAT	CDD-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=True; dca=moe128; teacher_pkg=anysat	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	97.6985	97.7966	99.4442	97.7476	95.5944	97.4306		0	4:45:36.359148	outputs/CATA-CD	outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/CDD/train_log.txt
 CATA-CD	Full	TV-ANYSAT	TV-ANYSAT	LEVIR-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=True; dca=moe128; teacher_pkg=anysat	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	90.2226	91.9925	99.1018	91.0990	83.6530	90.6261		0	3:41:10.768721	outputs/CATA-CD	outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/LEVIR/train_log.txt
 CATA-CD	Full	TV-ANYSAT	TV-ANYSAT	SYSU-CD-256	batch=64; steps=40000; seed=2333; lr=0.0005; lr_mode=poly; wd=0.0001; dice=batch; teacher=True; dca=moe128; teacher_pkg=anysat	64	40000	2333	0.0005	poly	0.0001		batch				3.2803	3.2803	3.2432	78.7089	85.3961	91.8047	81.9163	69.3714	76.6294		0	4:54:48.409643	outputs/CATA-CD	outputs/CATA-CD/teacher_adaptation/TV-ANYSAT/SYSU/train_log.txt
@@ -9590,12 +9602,18 @@ outputs/SAGE-CD/Run2	outputs/SAGE-CD/Run2/R3/SYSU/train_log.txt	complete
 outputs/SAGE-CD/Run2	outputs/SAGE-CD/Run2/R3/WHU/train_log.txt	complete
 outputs/SAGE-CD/Run2	outputs/SAGE-CD/Run2/R4/SYSU/train_log.txt	complete
 outputs/SAGE-CD/Run2	outputs/SAGE-CD/Run2/R4/WHU/train_log.txt	complete
-outputs/CATA-CD	outputs/CATA-CD/noise/R1/CDD/train_log.txt	missing complete TEST RESULTS block
-outputs/CATA-CD	outputs/CATA-CD/noise/R1/SYSU/train_log.txt	missing complete TEST RESULTS block
-outputs/CATA-CD	outputs/CATA-CD/noise/R1/WHU/train_log.txt	missing complete TEST RESULTS block
-outputs/CATA-CD	outputs/CATA-CD/noise/R2/CDD/train_log.txt	missing complete TEST RESULTS block
-outputs/CATA-CD	outputs/CATA-CD/noise/R2/LEVIR/train_log.txt	missing complete TEST RESULTS block
-outputs/CATA-CD	outputs/CATA-CD/noise/R3/SYSU/train_log.txt	missing complete TEST RESULTS block
+outputs/CATA-CD	outputs/CATA-CD/noise/R1/CDD/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/noise/R1/LEVIR/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/noise/R1/SYSU/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/noise/R1/WHU/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/noise/R2/CDD/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/noise/R2/LEVIR/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/noise/R2/SYSU/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/noise/R2/WHU/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/noise/R3/CDD/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/noise/R3/LEVIR/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/noise/R3/SYSU/train_log.txt	complete
+outputs/CATA-CD	outputs/CATA-CD/noise/R3/WHU/train_log.txt	complete
 outputs/CATA-CD	outputs/CATA-CD/Run1/CDD/train_log.txt	complete
 outputs/CATA-CD	outputs/CATA-CD/Run1/LEVIR/train_log.txt	complete
 outputs/CATA-CD	outputs/CATA-CD/Run1/SYSU/train_log.txt	complete
