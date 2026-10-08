@@ -47,7 +47,13 @@ DATASETS = ["SYSU", "WHU", "CDD", "LEVIR"]
 
 # A complete block only; finditer + last keeps the project "final block" rule.
 TEST_RE = re.compile(r"=== TEST RESULTS ===[ \t]*\r?\n(.*?)\r?\n?=== END TEST RESULTS ===", re.S)
-EPOCH_RE = re.compile(r"Epoch \[\d+/\d+\].*?F1=([\d.]+) IoU=([\d.]+)")
+# Full validation row: all six reported metrics are required, so a half-written
+# line can never be mistaken for a validation point.
+EPOCH_RE = re.compile(
+    r"Epoch \[(\d+)/(\d+)\][^\n]*?F1=([\d.]+) IoU=([\d.]+) Recall=([\d.]+) "
+    r"Precision=([\d.]+) OA=([\d.]+) Kappa=([\d.]+)"
+)
+BEST_VAL_METRICS = ("f1", "iou", "recall", "precision", "oa", "kappa")
 REQUIRED_TEST = ("F1", "IoU", "Recall", "Precision", "OA", "Kappa")
 
 AGENT_FORBIDDEN_PREFIX = "test_"
@@ -72,16 +78,29 @@ def last_test_block(text: str) -> dict | None:
     return vals if len(vals) == len(REQUIRED_TEST) else None
 
 
-def best_val(text: str) -> dict | None:
-    """Best (max F1) validation row of a run — checkpoint-selected validation utility."""
-    f1s, ious = [], []
+def _best_val_row(text: str) -> tuple[dict | None, int | None]:
+    """Best (max F1) validation row -> (metrics_dict, epoch).
+
+    The returned metrics dict carries ONLY the six reported metrics, so callers may
+    safely map it through ``to_pp`` (which multiplies every value by 100). The epoch
+    index is returned separately for exactly that reason.
+    """
+    best, best_epoch = None, None
     for m in EPOCH_RE.finditer(text):
-        f1s.append(float(m.group(1)))
-        ious.append(float(m.group(2)))
-    if not f1s:
-        return None
-    i = max(range(len(f1s)), key=lambda k: f1s[k])
-    return {"f1": f1s[i], "iou": ious[i]}
+        f1 = float(m.group(3))
+        if best is None or f1 > best["f1"]:
+            best = dict(zip(BEST_VAL_METRICS, (float(m.group(i)) for i in range(3, 9))))
+            best_epoch = int(m.group(1))
+    return best, best_epoch
+
+
+def best_val(text: str) -> dict | None:
+    """Best (max F1) validation row of a run - checkpoint-selected validation utility."""
+    return _best_val_row(text)[0]
+
+
+def best_val_epoch(text: str) -> int | None:
+    return _best_val_row(text)[1]
 
 
 def read(path: Path) -> tuple[str, str]:
@@ -95,33 +114,54 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--logs_root", required=True)
     ap.add_argument("--registry_dir", required=True)
+    ap.add_argument("--allow_overwrite", action="store_true",
+                    help="required to write into a directory that already holds a registry "
+                         "(v3 discipline: never silently overwrite the v2 anchors)")
+    ap.add_argument("--audit_json", default=None,
+                    help="optional outputs/CATA-CD/audit_v3/test_block_audit.json; when given, "
+                         "the C0/C1 anchors are cross-checked against it")
     args = ap.parse_args()
 
     logs_root = Path(args.logs_root)
     reg_dir = Path(args.registry_dir)
+    if (reg_dir / "research_report.json").is_file() and not args.allow_overwrite:
+        raise SystemExit(
+            f"[registry] refusing to overwrite the existing registry in {reg_dir}.\n"
+            f"           Choose a fresh --registry_dir (e.g. .../registry_v3) or pass "
+            f"--allow_overwrite explicitly.")
     reg_dir.mkdir(parents=True, exist_ok=True)
 
     def load(exp: str, ds: str):
         return read(logs_root / exp / ds / "train_log.txt")
 
-    c1_val, c1_test, c0_test = {}, {}, {}
+    c1_val, c1_test, c0_test, c0_val = {}, {}, {}, {}
     for ds in DATASETS:
         t, _h = load("C1", ds)
         c1_val[ds] = best_val(t)
         c1_test[ds] = last_test_block(t)
         t0, _h0 = load("C0", ds)
         c0_test[ds] = last_test_block(t0)
+        c0_val[ds] = best_val(t0)
+
+    def to_pp(d):
+        return {k: (None if v is None else {m: v[m] * 100 for m in v}) for k, v in d.items()}
 
     research = {
         "_meta": {
             "unit": "pp",
+            "version": "v3",
             "test_block_rule": "last complete TEST RESULTS block",
             "val_rule": "best (max F1) epoch row = checkpoint-selected validation utility",
+            # P0-B (review 2026-10-08): v2 emitted C0_test_pp as a raw 0-1 ratio while
+            # C1_* were already scaled, so the C0 anchor disagreed with its own unit
+            # label by 100x. Every anchor below now goes through the same to_pp().
+            "p0_b_c0_unit_fix": "all _anchors.*_pp fields are pp (x100 of the log ratio)",
         },
         "_anchors": {
-            "C0_test_pp": c0_test,
-            "C1_test_pp": {k: (None if v is None else {m: v[m] * 100 for m in v}) for k, v in c1_test.items()},
-            "C1_val_pp": {k: (None if v is None else {m: v[m] * 100 for m in v}) for k, v in c1_val.items()},
+            "C0_test_pp": to_pp(c0_test),
+            "C0_val_pp": to_pp(c0_val),
+            "C1_test_pp": to_pp(c1_test),
+            "C1_val_pp": to_pp(c1_val),
         },
     }
     agent: dict = {"_meta": {"unit": "pp", "reward_field": "val_delta_f1_pp",
@@ -137,7 +177,8 @@ def main() -> None:
             cv, ct = c1_val[ds], c1_test[ds]
 
             # ---- agent-train (VAL only; never any test field) ----
-            a = {"experiment_id": exp, "source_log": src, "log_sha256": sha[:16]}
+            a = {"experiment_id": exp, "source_log": src, "log_sha256": sha,
+                 "best_val_epoch": best_val_epoch(txt)}
             if tv is not None and cv is not None:
                 a["val_f1_pp"] = tv["f1"] * 100
                 a["val_iou_pp"] = tv["iou"] * 100
@@ -146,7 +187,7 @@ def main() -> None:
             agent[teacher][ds] = a
 
             # ---- research (test; paper evidence only) ----
-            r = {"experiment_id": exp, "source_log": src, "log_sha256": sha[:16]}
+            r = {"experiment_id": exp, "source_log": src, "log_sha256": sha}
             if tt is not None and ct is not None:
                 r["test_f1_pp"] = tt["F1"] * 100
                 r["test_iou_pp"] = tt["IoU"] * 100
@@ -163,6 +204,27 @@ def main() -> None:
                 assert_no_test(v, f"{path}.{k}")
 
     assert_no_test(agent)
+
+    # ---- optional cross-check against the independent TEST-block audit (step 1) ----
+    if args.audit_json:
+        audit_path = Path(args.audit_json)
+        if not audit_path.is_file():
+            raise SystemExit(f"[registry] --audit_json not found: {audit_path}")
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        aud = {(r["experiment_id"], r["dataset"]): r for r in audit.get("records", [])}
+        bad = []
+        for exp, anchors in (("C0", c0_test), ("C1", c1_test)):
+            for ds in DATASETS:
+                r = aud.get((exp, ds))
+                if not r or not r.get("test"):
+                    bad.append(f"{exp}/{ds}: missing from audit")
+                    continue
+                if abs(r["test"]["F1"] - anchors[ds]["F1"]) > 1e-9:
+                    bad.append(f"{exp}/{ds}: registry={anchors[ds]['F1']} audit={r['test']['F1']}")
+        if bad:
+            raise SystemExit("[registry] audit cross-check FAILED:\n  " + "\n  ".join(bad))
+        print(f"[registry] audit cross-check OK vs {audit_path.name} "
+              f"({len(aud)} audited logs)")
 
     (reg_dir / "research_report.json").write_text(json.dumps(research, indent=2), encoding="utf-8")
     (reg_dir / "agent_train_registry.json").write_text(json.dumps(agent, indent=2), encoding="utf-8")

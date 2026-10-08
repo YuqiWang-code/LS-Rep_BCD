@@ -71,8 +71,12 @@ class SafeSelector:
         X = np.asarray(X, dtype=np.float64)
         y = np.asarray(y, dtype=np.float64)
         groups = list(groups)
-        if len(X) != len(y) != len(groups):
-            raise ValueError("X / y / groups length mismatch")
+        # P2-A (review 2026-10-08): a chained comparison is NOT an equality test --
+        # ``a != b != c`` means ``a != b and b != c``, so ``len(X)=1, len(y)=2,
+        # len(groups)=1`` would have passed silently. Compare all three explicitly.
+        if not (len(X) == len(y) == len(groups)):
+            raise ValueError(
+                f"X / y / groups length mismatch: {len(X)} / {len(y)} / {len(groups)}")
         if len(set(groups)) < 2:
             raise ValueError("need >=2 training datasets for a group jackknife")
         self.feature_names = list(feature_names or [f"f{i}" for i in range(X.shape[1])])
@@ -101,6 +105,13 @@ class SafeSelector:
             wk = w[keep]
             wk = wk / wk.mean()
             self._jackknife_betas.append(_weighted_ridge(Xk, yk, wk, self.lam))
+        # P2-A: without at least one leave-one-domain refit there is NO uncertainty
+        # information at all. Returning a zero spread here would manufacture false
+        # certainty, so refuse to fit instead.
+        if not self._jackknife_betas:
+            raise ValueError(
+                "no leave-one-domain refit could be formed (need >=2 domains with "
+                ">=3 members) -- refusing to report a zero (fake-certain) spread")
         return self
 
     # ------------------------------------------------------------- prediction
@@ -112,9 +123,16 @@ class SafeSelector:
         return (self._design(X) @ self._beta) * self._y_sd + self._y_mu
 
     def model_spread_pp(self, X: np.ndarray) -> np.ndarray:
-        """SD of the leave-one-training-dataset-out predictions (sensitivity proxy)."""
+        """SD of the leave-one-training-dataset-out predictions.
+
+        **This is a sensitivity proxy, NOT a 95% CI and NOT a conformal bound.**
+        With only three training domains there are three refits, so this number
+        carries no coverage guarantee and must never be described as one.
+        """
         if not self._jackknife_betas:
-            return np.zeros(len(X), dtype=np.float64)
+            raise RuntimeError(
+                "model_spread_pp called without a fitted group jackknife; a zero "
+                "spread would be false certainty (P2-A)")
         Xa = self._design(X)
         preds = np.stack([(Xa @ b) * self._y_sd + self._y_mu for b in self._jackknife_betas], axis=0)
         return preds.std(axis=0)

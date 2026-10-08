@@ -3,10 +3,12 @@
 
 Subcommands:
     status    GPU / weights / datasets / cache / tmux
-    sync      SFTP-upload models/, train_scripts/CATA-CD/, analyse/, README.md
+    sync      SFTP-upload models/, train_scripts/CATA-CD/, analyse/, tests/, README.md
     bashn     bash -n every .sh under train_scripts/CATA-CD
     launch    (re)start cache-gen + training tmux queues
     monitor   tail each run's train_log + nvidia-smi + tmux ls
+    sh CMD    run an arbitrary shell command on the server (conda env + project cwd)
+    py CMD    run an arbitrary python command in the project conda env
 """
 from __future__ import annotations
 
@@ -24,6 +26,8 @@ _UPLOAD_DIRS = [
     ("models", "models"),
     ("train_scripts/CATA-CD", "train_scripts/CATA-CD"),
     ("analyse", "analyse"),
+    ("tests", "tests"),
+    ("others", "others"),
 ]
 _UPLOAD_FILES = ["README.md"]
 
@@ -128,10 +132,41 @@ def monitor(c):
     print(out)
 
 
+def sh(c, cmd: str):
+    """Run an arbitrary shell command on the server, inside the project conda env."""
+    out, err = run(c, f"cd {REMOTE} && {CONDA} && {cmd}")
+    print(out, end="")
+    if err.strip():
+        print("--- STDERR ---")
+        print(err, end="")
+    return out, err
+
+
+def sh_main(c):
+    sh(c, " ".join(sys.argv[2:]))
+
+
+def py_main(c):
+    sh(c, "python " + " ".join(sys.argv[2:]))
+
+
+def pull_main(c):
+    """Download remote files: pull <remote_path> <local_path> ... (pairs)."""
+    sftp = c.open_sftp()
+    pairs = sys.argv[2:]
+    for i in range(0, len(pairs), 2):
+        remote, local = pairs[i], Path(pairs[i + 1])
+        local.parent.mkdir(parents=True, exist_ok=True)
+        sftp.get(remote, str(local))
+        print(f"  down {remote} -> {local} ({local.stat().st_size} bytes)")
+    sftp.close()
+
+
 if __name__ == "__main__":
     sub = sys.argv[1] if len(sys.argv) > 1 else "status"
     c, cfg = conn()
     try:
-        {"status": status, "sync": sync, "bashn": bashn, "launch": launch, "monitor": monitor}[sub](c)
+        {"status": status, "sync": sync, "bashn": bashn, "launch": launch,
+         "monitor": monitor, "sh": sh_main, "py": py_main, "pull": pull_main}[sub](c)
     finally:
         c.close()

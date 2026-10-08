@@ -41,6 +41,12 @@ from models import A2Net_LWGANet_L0, build_loss  # noqa: E402
 from models.datasets.cd_dataset import get_loader, get_test_loader  # noqa: E402
 from models.distill.cache_v2 import TeacherCacheReaderV2, apply_cache_state  # noqa: E402
 from models.distill.kd import ChangeEvidenceHead, dense_change_kd, gradient_budget_lambda  # noqa: E402
+from models.distill.task_reliable_kd import (  # noqa: E402
+    AUX_TASKS,
+    TaskReliableAuxHead,
+    TaskReliableConfig,
+    aux_task_loss,
+)
 from models.distill.teacher_package import TEACHER_REGISTRY  # noqa: E402
 from models.utils.metrics import ConfuseMatrixMeter  # noqa: E402
 from models.utils.scheduler import adjust_learning_rate  # noqa: E402
@@ -89,6 +95,15 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--rho", type=float, default=0.25)
     p.add_argument("--lambda_max", type=float, default=1.0)
 
+    # J1 mechanism arms (review §4.3). Default "none" reproduces the historical
+    # C0/C1/TV-* protocol byte-for-byte: dense 128ch cosine KD when a teacher is set.
+    p.add_argument("--aux_task", default="none", choices=AUX_TASKS,
+                   help="none = legacy dense-change KD (or no aux at all); "
+                        "gt = 1ch GT-only aux; gate = GT target on the teacher-consistent "
+                        "region G; taskkd = teacher soft response q_T on the same region G")
+    p.add_argument("--taskkd_calibration", default=None,
+                   help="frozen train-only calibration JSON for --aux_task gate/taskkd")
+
     p.add_argument("--save_dir", required=True)
     p.add_argument("--log_file", default="train_log.txt")
     p.add_argument("--resume", default=None)
@@ -98,9 +113,20 @@ def parse_args() -> argparse.Namespace:
     if len(args.main_loss_weights) != 4:
         raise ValueError("main_loss_weights must contain four values")
     args.use_teacher = args.teacher_package != "none"
+    # Derived protocol flags. ``use_dense_kd`` is exactly the legacy behaviour.
+    args.use_dense_kd = (args.aux_task == "none") and args.use_teacher
+    args.use_taskkd = args.aux_task != "none"
+    # J1 requires the cache for gate/taskkd (the teacher signal) and, for gt, so that
+    # GT/GATE/TASKKD share ONE data stream -- otherwise the "same pixels" control
+    # would be confounded by a different augmentation RNG stream.
+    args.load_cache = args.use_dense_kd or args.use_taskkd
     args.implementation_version = IMPLEMENTATION_VERSION
-    if args.use_teacher and not args.teacher_cache_root:
-        raise ValueError("--teacher_cache_root required when a teacher package is used")
+    if args.load_cache and not args.teacher_cache_root:
+        raise ValueError("--teacher_cache_root required when a teacher package or --aux_task is used")
+    if args.use_taskkd and args.teacher_package == "none":
+        raise ValueError("--aux_task requires --teacher_package (cache is needed for loader parity)")
+    if args.aux_task in ("gate", "taskkd") and not args.taskkd_calibration:
+        raise ValueError(f"--aux_task {args.aux_task} requires --taskkd_calibration")
     if args.pretrained and not args.pretrained_path:
         raise ValueError("--pretrained_path required when --pretrained")
     return args
@@ -220,7 +246,8 @@ def multiscale_loss(preds, target, crit, ws):
     return sum(w * crit(p, target) for w, p in zip(ws, preds))
 
 
-def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, device):
+def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, device,
+                taskcfg: TaskReliableConfig | None = None):
     model.train()
     if hasattr(loader.dataset, "set_epoch"):
         loader.dataset.set_epoch(epoch)
@@ -231,14 +258,17 @@ def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, devic
     totals = {"total": 0.0, "main": 0.0, "kd": 0.0, "lam": 0.0}
     batches = 0
     last_lr = args.lr
-    use_teacher = args.use_teacher
-    if use_teacher:
+    load_cache = args.load_cache
+    aux_skipped = 0
+    region_acc: dict[str, float] = {}
+    region_n = 0
+    if aux is not None:
         aux.train()
 
     for batch in loader:
         if gs >= args.max_steps:
             break
-        if use_teacher:
+        if load_cache:
             image, target = batch[0], batch[1]
             local_change = batch[2].to(device, non_blocking=True)
             confidence = batch[3].to(device, non_blocking=True)
@@ -257,12 +287,28 @@ def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, devic
 
         kd_loss = torch.zeros((), device=device)
         lam = torch.zeros((), device=device)
-        if use_teacher:
+        if args.use_dense_kd:
             student_evidence = aux(change)  # [B,128,h,w] at scale 2 (stride 16)
             kd_loss = dense_change_kd(student_evidence, local_change, confidence, cap=args.kd_cap)
             lam = gradient_budget_lambda(main_loss, kd_loss, change[2], rho=args.rho, lam_max=args.lambda_max)
+        elif args.use_taskkd:
+            # J1: 1-channel head on c2 (stride 4). Same head/capacity for gt/gate/taskkd;
+            # only the supervised region and/or the target differ.
+            logits = aux(change)  # [B,1,h,w]
+            task_loss, _stats = aux_task_loss(args.aux_task, logits, target, taskcfg, confidence)
+            if task_loss is None:
+                # Empty region: skip the auxiliary term entirely, main loss continues.
+                aux_skipped += 1
+            else:
+                kd_loss = task_loss
+                lam = gradient_budget_lambda(main_loss, kd_loss, change[0],
+                                             rho=args.rho, lam_max=args.lambda_max)
+                for _k, _v in _stats.items():
+                    if isinstance(_v, (int, float)) and _k != "skipped":
+                        region_acc[_k] = region_acc.get(_k, 0.0) + float(_v)
+                region_n += 1
 
-        total = main_loss + lam * kd_loss if use_teacher else main_loss
+        total = main_loss + lam * kd_loss
         if not bool(torch.isfinite(total)):
             raise FloatingPointError("Non-finite loss")
         total.backward()
@@ -283,7 +329,10 @@ def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, devic
     if batches == 0:
         raise RuntimeError("No batches")
     print(flush=True)
-    return {k: v / batches for k, v in totals.items()}, meter.get_scores(), last_lr, gs
+    aux_info = {"aux_skipped": aux_skipped, "n_batches": batches, "region_batches": region_n}
+    for k, v in region_acc.items():
+        aux_info[k] = v / max(region_n, 1)
+    return {k: v / batches for k, v in totals.items()}, meter.get_scores(), last_lr, gs, aux_info
 
 
 @torch.no_grad()
@@ -351,6 +400,7 @@ def append_test(logger, args, scores, param_stats, infer_params, flops, swap_err
     logger.log_message(f"Implementation: {args.implementation_version}")
     logger.log_message(f"DCA Mode: {args.dca_mode}")
     logger.log_message(f"Teacher Package: {args.teacher_package}")
+    logger.log_message(f"Aux Task: {args.aux_task}")
     logger.log_message(f"Seed: {args.seed}")
     logger.log_message(f"Max Steps: {args.max_steps}")
     logger.log_message(f"Batch Size: {args.batch_size}")
@@ -385,8 +435,22 @@ def main():
     if student_params != expected:
         raise RuntimeError(f"student params {student_params:,} != expected {expected:,}")
 
-    aux = ChangeEvidenceHead(64, 128, scale_index=2).to(device) if args.use_teacher else None
+    # Auxiliary head: legacy 128ch evidence head for dense KD, or the 1ch (65-param)
+    # task-reliable head for the J1 arms. Both are training-only.
+    if args.use_dense_kd:
+        aux = ChangeEvidenceHead(64, 128, scale_index=2).to(device)
+    elif args.use_taskkd:
+        aux = TaskReliableAuxHead(64, scale_index=0).to(device)
+    else:
+        aux = None
     aux_params = sum(p.numel() for p in aux.parameters()) if aux is not None else 0
+    taskcfg = None
+    if args.aux_task in ("gate", "taskkd"):
+        taskcfg = TaskReliableConfig.from_json(args.taskkd_calibration)
+        if taskcfg.dataset.upper() != args.dataset_name.upper():
+            raise ValueError(f"calibration dataset {taskcfg.dataset} != {args.dataset_name}")
+        if taskcfg.teacher_package != args.teacher_package:
+            raise ValueError(f"calibration teacher {taskcfg.teacher_package} != {args.teacher_package}")
     param_stats = {
         "student": student_params,
         "aux": aux_params,
@@ -396,7 +460,7 @@ def main():
     optimizer = build_optimizer(args, params)
     criterion = build_loss(args.dice_reduction)
 
-    if args.use_teacher:
+    if args.load_cache:
         reader = TeacherCacheReaderV2(args.teacher_cache_root, args.dataset_name)
         base = get_loader(args.data_root, os.path.join(args.data_root, "list", "train.txt"),
                           batchsize=1, trainsize=args.inWidth, num_workers=args.num_workers,
@@ -444,7 +508,9 @@ def main():
     for epoch in range(start_epoch, args.max_epochs):
         if gs >= args.max_steps:
             break
-        train_losses, _, lr, gs = train_epoch(args, train_loader, model, aux, criterion, optimizer, epoch, gs, device)
+        train_losses, _, lr, gs, aux_info = train_epoch(args, train_loader, model, aux,
+                                                        criterion, optimizer, epoch, gs,
+                                                        device, taskcfg)
         val_loss, val = evaluate(val_loader, model, criterion, args.main_loss_weights, device)
         is_best = val["F1"] > best_val_f1
         if is_best:
@@ -459,6 +525,14 @@ def main():
             best_path = nb
         logger.log_epoch(epoch, args.max_epochs, train_losses, {"f1": val["F1"], "iou": val["IoU"], "kappa": val["Kappa"], "recall": val["recall"], "precision": val["precision"], "oa": val["OA"]}, lr, torch.cuda.max_memory_allocated(device) / 1e9 if device.type == "cuda" else 0.0, is_best)
         logger.log_message(f"Val loss: {val_loss:.6f}; global_step: {gs}")
+        if args.use_taskkd:
+            logger.log_message(
+                "Aux region: task={} skipped={}/{} kept={} ".format(
+                    args.aux_task, aux_info["aux_skipped"], aux_info["n_batches"],
+                    aux_info["region_batches"])
+                + " ".join(f"{k}={aux_info[k]:.5f}" for k in
+                           ("n_pos", "n_neg", "g_pos_frac", "g_neg_frac", "band_frac")
+                           if k in aux_info))
         if gs >= args.max_steps:
             break
 

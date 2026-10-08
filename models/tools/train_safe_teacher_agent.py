@@ -14,6 +14,23 @@ Arms (all reuse the same 44 teacher runs; no new student training):
 Diagnostics per fold: selected action, held-out val reward, regret, harm / false-action /
 coverage / positive-recall. Test values are NEVER read (hard guard on the registry).
 
+P0 fixes from the 2026-10-08 review (§2.3 P0-A, P0-E):
+
+  * **P0-A (AG-CH held-out val leak, fixed).** AG-CH used to read the held-out
+    dataset's own ``y`` to decide whether to accept its teacher
+    (``util = mean(y[i] for i in te ...)``), i.e. it looked at the answer before
+    abstaining. Its zero false-action rate was therefore not a fair LODO baseline.
+    Now BOTH the selection and the accept/abstain gate are derived from training
+    domains only, and the held-out ``y`` is used exclusively for post-hoc scoring.
+    ``--verify_no_leak`` proves it by permuting the held-out labels and asserting
+    the actions are bit-identical.
+  * **P0-E (noise floor source, split).** ``--noise_mode transductive`` reproduces
+    the old protocol (the target dataset's own repeated-C1 sigma is used as the
+    prior; legitimate only when the target dataset already has repeated training
+    runs). ``--noise_mode inductive`` (default) estimates the floor only from the
+    three TRAINING domains, which is the honest setting for "a dataset we have
+    never trained or validated on".
+
 Usage:
     python -m models.tools.train_safe_teacher_agent \
         --registry_dir outputs/CATA-CD/registry \
@@ -78,6 +95,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--feature_set", default="sig_probe_ext_meta",
                    choices=("legacy", "sig_only", "sig_probe", "sig_probe_ext",
                             "sig_probe_ext_meta", "full", "ladder"))
+    p.add_argument("--noise_mode", default="inductive", choices=("inductive", "transductive"),
+                   help="inductive: noise floor from the TRAINING domains only (P0-E); "
+                        "transductive: legacy protocol that reads the target dataset's own "
+                        "repeated-C1 val sigma")
+    p.add_argument("--verify_no_leak", action="store_true",
+                   help="permute each fold's held-out labels and assert the actions are "
+                        "unchanged (P0-A leak audit); writes leak_audit.json")
     return p.parse_args()
 
 
@@ -86,12 +110,17 @@ def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
 
 
-def val_noise_sigma(logs_root: Path | None) -> dict:
-    """Per-dataset VAL run-level sigma from C1 + R1/R2/R3 best-val F1 (test never read)."""
+def val_noise_sigma(logs_root: Path | None, datasets: list[str] | None = None) -> dict:
+    """Per-dataset VAL run-level sigma from C1 + R1/R2/R3 best-val F1 (test never read).
+
+    P0-E: callers must pass the dataset subset they are allowed to observe.
+    ``inductive`` mode passes the TRAINING domains only, so the held-out dataset's
+    own repeated-C1 sigma never enters the decision.
+    """
     out = {}
     if logs_root is None:
         return out
-    for ds in DATASETS:
+    for ds in (datasets or DATASETS):
         vals = []
         for rel in [f"teacher_adaptation/C1/{ds}/train_log.txt",
                     f"noise/R1/{ds}/train_log.txt",
@@ -233,7 +262,21 @@ def decide_simple(pred_pp, teacher_ids, delta_pp):
     return None, 0.0, "no_supported_positive_utility"
 
 
-def run_lodo(rows, names, arm, args, u_noise: dict):
+def _probe_gain_on(rows, idxs) -> float:
+    """Mean val gain of the ``probe_change_mean``-argmax teacher over a set of rows.
+
+    Pure feature-side choice: it reads ``probe_change_mean`` (a train-only probe
+    feature) and nothing else. Used to build AG-CH's gate from TRAINING domains.
+    """
+    if not idxs:
+        return 0.0
+    j = int(np.argmax([rows[i]["f"].get("probe_change_mean", 0.0) for i in idxs]))
+    return float(rows[idxs[j]]["y"])
+
+
+def run_lodo(rows, names, arm, args, logs_root: Path | None,
+             noise_mode: str = "inductive", permute_holdout: bool = False,
+             rng: np.random.Generator | None = None):
     X, y, groups, tids = matrix(rows, names)
     report = {}
     for hold in DATASETS:
@@ -243,6 +286,26 @@ def run_lodo(rows, names, arm, args, u_noise: dict):
             continue
         Xtr, ytr, gtr = X[tr], y[tr], [groups[i] for i in tr]
         Xte, tids_te = X[te], [tids[i] for i in te]
+
+        # ---- P0-A leak audit: the held-out LABELS must not reach any decision ----
+        # ``y_all`` is what post-hoc scoring reads. Permuting ``y[te]`` destroys the
+        # teacher->reward mapping inside the held-out domain while leaving the
+        # training labels untouched, so any action change is a genuine leak.
+        y_all = y.copy()
+        if permute_holdout:
+            rng = rng or np.random.default_rng(args.seed)
+            y_all[te] = y[te][rng.permutation(len(te))]
+
+        # ---- P0-E: where does the noise floor come from? ----
+        if noise_mode == "transductive":
+            u_pp = val_noise_sigma(logs_root, [hold]).get(hold, 0.0)
+            u_src = f"transductive:{hold}"
+        else:
+            train_domains = sorted(set(gtr))
+            sigma_tr = val_noise_sigma(logs_root, train_domains)
+            # Conservative: the largest training-domain floor, never the held-out one.
+            u_pp = max(sigma_tr.values()) if sigma_tr else 0.0
+            u_src = "inductive:" + ",".join(train_domains)
 
         if arm == "AG-00":
             predict = fit_legacy_mlp(Xtr, ytr, gtr)
@@ -255,12 +318,19 @@ def run_lodo(rows, names, arm, args, u_noise: dict):
                 if mean_tr[best] > args.delta_pp else (None, 0.0, "fixed_below_delta")
             detail = {"train_mean_pp": mean_tr}
         elif arm == "AG-CH":
-            idx = int(np.argmax([rows[i]["f"].get("probe_change_mean", 0.0) for i in te]))
-            chosen = tids_te[idx]
-            util = float(np.mean([y[i] for i in te if tids[i] == chosen]))
-            teacher, pred, reason = (chosen, util, "probe_heuristic") if util > args.delta_pp \
-                else (None, 0.0, "heuristic_below_delta")
-            detail = {}
+            # ---- P0-A FIX ----
+            # Selection: best train-only probe response (no labels read).
+            chosen = tids_te[int(np.argmax(
+                [rows[i]["f"].get("probe_change_mean", 0.0) for i in te]))]
+            # Gate: calibrated ONLY on the training domains -- for each training
+            # domain, what did the same probe rule actually earn there?
+            per_domain = {g: _probe_gain_on(rows, [i for i in tr if groups[i] == g])
+                          for g in sorted(set(gtr))}
+            gate = float(np.mean(list(per_domain.values()))) if per_domain else 0.0
+            teacher, pred, reason = (
+                (chosen, gate, "probe_heuristic_train_gated") if gate > args.delta_pp
+                else (None, 0.0, "heuristic_below_delta_train"))
+            detail = {"train_probe_argmax_gain_pp": per_domain, "gate_pp": gate}
         else:
             kappa = {"AG-01": 0.0, "AG-02": 0.0, "AG-03": args.kappa, "AG-04": args.kappa,
                      "AG-05": args.kappa}[arm]
@@ -268,17 +338,18 @@ def run_lodo(rows, names, arm, args, u_noise: dict):
             sel = (RidgeSelector(lam=args.lam) if arm == "AG-01"
                    else SafeSelector(lam=args.lam, delta_pp=delta, kappa=kappa))
             sel.fit(Xtr, ytr, gtr, names)
-            d = sel.decide(Xte, tids_te, u_noise_pp=u_noise.get(hold, 0.0))
+            d = sel.decide(Xte, tids_te, u_noise_pp=u_pp)
             teacher, pred, reason = d.teacher, d.margin_pp, d.reason
             detail = {"per_teacher": d.per_teacher}
 
         chosen_util = 0.0
         if teacher is not None:
-            vals = [y[i] for i in te if tids[i] == teacher]
+            vals = [y_all[i] for i in te if tids[i] == teacher]
             chosen_util = float(vals[0]) if vals else 0.0
         report[hold] = {
             "arm": arm, "teacher": teacher, "score_pp": pred, "reason": reason,
-            "heldout_val_pp": chosen_util, "detail": detail,
+            "heldout_val_pp": chosen_util, "u_noise_pp": u_pp, "u_noise_source": u_src,
+            "detail": detail,
         }
     return report
 
@@ -330,7 +401,10 @@ def main() -> None:
     rows, missing = build_rows(registry, Path(args.signatures_dir), Path(args.probes_dir), args.feature_set)
     if missing:
         print(f"[warn] {len(missing)} rows skipped: {missing[:4]}")
-    u_noise = val_noise_sigma(Path(args.logs_root)) if args.logs_root else {}
+    logs_root = Path(args.logs_root) if args.logs_root else None
+    # Reporting copy only. The decision path recomputes the floor per fold under
+    # ``args.noise_mode`` and, in inductive mode, never opens the held-out log (P0-E).
+    u_noise = val_noise_sigma(logs_root) if logs_root else {}
 
     # oracle per fold = best held-out VAL reward (evaluation only, never used for fitting)
     oracle = {}
@@ -349,13 +423,25 @@ def main() -> None:
         names = feature_names(rows, rung)
         results, summaries = {}, {}
         for arm in ARMS:
-            rep = run_lodo(rows, names, arm, args, u_noise)
+            rep = run_lodo(rows, names, arm, args, logs_root, args.noise_mode)
             for ds, r in rep.items():
                 r["_oracle_pp"] = oracle.get(ds)
             results[arm] = rep
             summaries[arm] = summarize(rep)
-        ladder[rung] = {"n_features": len(names), "summaries": summaries,
-                        "actions": {ds: results["AG-03"][ds]["teacher"] for ds in DATASETS}}
+        ladder[rung] = {
+            "n_features": len(names),
+            "summaries": summaries,
+            "actions": {ds: results["AG-03"][ds]["teacher"] for ds in DATASETS},
+            # Audit trail: which noise floor the decision SAW, and why it abstained.
+            "noise_floor": {ds: {"u_noise_pp": results["AG-03"][ds]["u_noise_pp"],
+                                 "source": results["AG-03"][ds]["u_noise_source"]}
+                            for ds in DATASETS},
+            "decisions": {ds: {"teacher": results["AG-03"][ds]["teacher"],
+                               "reason": results["AG-03"][ds]["reason"],
+                               "score_pp": results["AG-03"][ds]["score_pp"],
+                               "heldout_val_pp": results["AG-03"][ds]["heldout_val_pp"]}
+                          for ds in DATASETS},
+        }
         print(f"\n--- feature rung '{rung}' ({len(names)} features) ---")
         for ds in DATASETS:
             line = [f"{ds}(oracle={oracle.get(ds, float('nan')):+.2f})"]
@@ -367,14 +453,46 @@ def main() -> None:
             f"{a}:h{summaries[a]['harm_rate']:.2f}/f{summaries[a]['false_action_rate']:.2f}/c{summaries[a]['coverage']:.2f}"
             for a in ARMS))
 
+    # ---- P0-A leak audit: permute each fold's held-out labels; actions must not move ----
+    leak_audit = {"ran": bool(args.verify_no_leak), "noise_mode": args.noise_mode}
+    if args.verify_no_leak:
+        rng = np.random.default_rng(args.seed + 1)
+        per_rung, all_ok = {}, True
+        for rung in rungs:
+            nms = feature_names(rows, rung)
+            rung_res = {}
+            for arm in ARMS:
+                base = run_lodo(rows, nms, arm, args, logs_root, args.noise_mode)
+                perm = run_lodo(rows, nms, arm, args, logs_root, args.noise_mode,
+                                permute_holdout=True, rng=np.random.default_rng(args.seed + 1))
+                changed = {ds: {"base": base[ds]["teacher"], "permuted": perm[ds]["teacher"]}
+                           for ds in base if base[ds]["teacher"] != perm[ds]["teacher"]}
+                rung_res[arm] = {"ok": not changed, "changed": changed}
+                all_ok = all_ok and not changed
+            per_rung[rung] = rung_res
+        leak_audit.update({"all_arms_invariant": all_ok, "per_rung": per_rung})
+        (out_dir / "leak_audit.json").write_text(
+            json.dumps(leak_audit, indent=2), encoding="utf-8")
+        verdict = "PASS" if all_ok else "FAIL"
+        print(f"\n[leak-audit] held-out label permutation -> actions invariant: {verdict}")
+        for rung, arms in per_rung.items():
+            for arm, r in arms.items():
+                if not r["ok"]:
+                    print(f"  LEAK {rung}/{arm}: {r['changed']}")
+
     # frozen actions of the PRIMARY rung (AG-03)
     primary_rung = rungs[-1]
     primary = ladder[primary_rung]
     actions = {ds: {"teacher": primary["actions"][ds],
-                    "reason": primary["summaries"] and "safe_set_or_none"} for ds in DATASETS}
+                    "reason": primary["decisions"][ds]["reason"],
+                    "score_pp": primary["decisions"][ds]["score_pp"],
+                    "u_noise_pp": primary["noise_floor"][ds]["u_noise_pp"],
+                    "u_noise_source": primary["noise_floor"][ds]["source"]}
+               for ds in DATASETS}
     (out_dir / "selected_actions.json").write_text(json.dumps({
         "arm": "AG-03", "feature_set": primary_rung, "delta_pp": args.delta_pp,
-        "kappa": args.kappa, "seed": args.seed, "registry_sha256": registry_sha[:16],
+        "kappa": args.kappa, "seed": args.seed, "noise_mode": args.noise_mode,
+        "registry_sha256": registry_sha[:16],
         "feature_names": names, "actions": actions,
     }, indent=2), encoding="utf-8")
     (out_dir / "feature_schema.json").write_text(json.dumps({
@@ -385,7 +503,9 @@ def main() -> None:
     }, indent=2), encoding="utf-8")
     (out_dir / "lodo_report.json").write_text(json.dumps(
         {"ladder": ladder, "oracle_val_pp": oracle,
-         "val_sigma_pp": u_noise, "registry_sha256": registry_sha[:16]}, indent=2), encoding="utf-8")
+         "val_sigma_pp": u_noise, "noise_mode": args.noise_mode,
+         "leak_audit": leak_audit,
+         "registry_sha256": registry_sha[:16]}, indent=2), encoding="utf-8")
 
     print(f"\n[agent] frozen AG-03 actions ({primary_rung}) -> {out_dir/'selected_actions.json'}")
     print(f"[agent] ladder report -> {out_dir/'lodo_report.json'}")
