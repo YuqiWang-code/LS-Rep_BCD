@@ -11,8 +11,14 @@ Deploy graph
       -> change map
 
 ``dca_mode``:
-    ``none``    C0: clean A2Net-LWGANet-L0 (deploy params 2,913,094).
-    ``moe128``  C1: + DeployableChangeAdapter(width=128), deploy params ~3.28M.
+    ``none``         C0: clean A2Net-LWGANet-L0 (deploy params 2,913,094).
+    ``moe128``       C1: + DeployableChangeAdapter(width=128) with the original
+                     global gate over change features (S-PCG S0).
+    ``moe128_stats`` C1 + S-PCG **S1**: per-scale gate on the symmetric difference
+                     statistic ``GAP(|a_s - b_s|)`` only.
+    ``moe128_sympcg`` C1 + S-PCG **S2**: per-scale gate that adds the symmetric
+                     common context ``GAP((a_s+b_s)/2)`` and the pooled phase
+                     difference ``|GAP(a_s) - GAP(b_s)|``.
 
 The DCA is part of the deploy graph. Teachers / cache / translators / agent are
 training-only and are never registered inside this module.
@@ -30,7 +36,9 @@ from .backbone.lwganet import LWGANet_L0_1242_e32_k11_GELU
 from .decoder.a2net_decoder import Decoder, NeighborFeatureAggregation, TemporalFusionModule
 from .decoder.deployable_change_adapter import DeployableChangeAdapter
 
-SUPPORTED_DCA_MODES = ("none", "moe128")
+# dca_mode -> gate_mode
+SUPPORTED_DCA_MODES = ("none", "moe128", "moe128_stats", "moe128_sympcg")
+DCA_GATE_MODES = {"moe128": "legacy", "moe128_stats": "stats", "moe128_sympcg": "sympcg"}
 
 
 class A2Net_LWGANet_L0(nn.Module):
@@ -57,8 +65,9 @@ class A2Net_LWGANet_L0(nn.Module):
         self.swa = NeighborFeatureAggregation([32, 32, 64, 128, 256], self.mid_d)
         self.tfm = TemporalFusionModule(self.mid_d, self.mid_d)
         self.dca = (
-            DeployableChangeAdapter(self.mid_d, width=128)
-            if self.dca_mode == "moe128"
+            DeployableChangeAdapter(self.mid_d, width=128,
+                                    gate_mode=DCA_GATE_MODES[self.dca_mode])
+            if self.dca_mode != "none"
             else None
         )
         self.decoder = Decoder(self.mid_d)
@@ -86,7 +95,9 @@ class A2Net_LWGANet_L0(nn.Module):
         change = self.tfm(*aggregated1, *aggregated2)  # (c2, c3, c4, c5)
 
         if self.dca is not None:
-            change = self.dca(*change)
+            # S-PCG gate modes need the pre-fusion temporal pair (a_s, b_s); the
+            # legacy S0 gate path ignores ``pair`` and stays bit-identical.
+            change = self.dca(*change, pair=(aggregated1, aggregated2))
 
         decoder_output = self.decoder(*change)
         decoder_features = tuple(decoder_output[:4])

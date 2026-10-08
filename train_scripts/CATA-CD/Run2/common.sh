@@ -38,6 +38,13 @@ exp_cfg() {
     J1-GT)     echo "moe128 $J1_TEACHER gt" ;;
     J1-GATE)   echo "moe128 $J1_TEACHER gate" ;;
     J1-TASKKD) echo "moe128 $J1_TEACHER taskkd" ;;
+    # S-PCG 阶梯（review §5.1）：唯一变量 = DCA gate 的输入。
+    #   S0 legacy 全局 gate（与冻结 C1 完全同构，参数量 3,280,274）
+    #   S1 逐尺度 gate，只加对称差分统计 GAP(|a_s-b_s|)        (+192 参数)
+    #   S2 S1 + 对称共性上下文 GAP((a_s+b_s)/2) 与 |GAP(a_s)-GAP(b_s)| (+32,960 参数)
+    S0-C1)     echo "moe128        none none" ;;
+    S1-STAT)   echo "moe128_stats  none none" ;;
+    S2-PCG)    echo "moe128_sympcg none none" ;;
     *) echo "unknown experiment $1" >&2; exit 1 ;;
   esac
 }
@@ -47,16 +54,24 @@ run_one() {
   local DS="$2"
   local GPU_ID="$3"
 
+  # 冒烟/诊断覆盖：默认即生产协议。RUN_TAG=_smoke 会把产物写到 *Run2_smoke 树，
+  # MAX_STEPS_OVERRIDE 允许只跑几十步，SMOKE_CLEAN=1 先清空该臂目录。
+  local TAG="${RUN_TAG:-}"
+  local STEPS="${MAX_STEPS_OVERRIDE:-40000}"
+
   local CFG DCA_MODE TEACHER AUX_TASK
   CFG="$(exp_cfg "$EXP")"
   DCA_MODE="${CFG%% *}"
   TEACHER="$(echo "$CFG" | awk '{print $2}')"
   AUX_TASK="$(echo "$CFG" | awk '{print $3}')"
 
-  local SAVE_DIR="$CKPT_BASE/$EXP/$DS"
-  local LOG_FILE="$LOG_BASE/$EXP/$DS/train_log.txt"
+  local SAVE_DIR="$CKPT_BASE$TAG/$EXP/$DS"
+  local LOG_FILE="$LOG_BASE$TAG/$EXP/$DS/train_log.txt"
 
-  if grep -q '^=== END TEST RESULTS ===' "$LOG_FILE" 2>/dev/null; then
+  if [ "${SMOKE_CLEAN:-0}" = "1" ]; then
+    rm -rf "$SAVE_DIR" "$(dirname "$LOG_FILE")"
+  fi
+  if [ "$TAG" = "" ] && grep -q '^=== END TEST RESULTS ===' "$LOG_FILE" 2>/dev/null; then
     echo "[skip] $EXP/$DS already complete"
     return 0
   fi
@@ -92,7 +107,7 @@ run_one() {
     --aux_task "$AUX_TASK" \
     --dataset_name "$DS" --data_root "$DATA_BASE/$(ds_folder "$DS")" \
     --pretrained --pretrained_path "$PRETRAINED" \
-    --gpu_id "$GPU_ID" --batch_size 64 --max_steps 40000 --seed 2333 \
+    --gpu_id "$GPU_ID" --batch_size 64 --max_steps "$STEPS" --seed 2333 \
     --save_dir "$SAVE_DIR" \
     --log_file "$LOG_FILE" \
     $CACHE_ARG $CALIB_ARG $RESUME_ARG

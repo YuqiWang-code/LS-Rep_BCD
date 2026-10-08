@@ -38,6 +38,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(PROJECT_ROOT))
 
 from models import A2Net_LWGANet_L0, build_loss  # noqa: E402
+from models.a2net import SUPPORTED_DCA_MODES  # noqa: E402
 from models.datasets.cd_dataset import get_loader, get_test_loader  # noqa: E402
 from models.distill.cache_v2 import TeacherCacheReaderV2, apply_cache_state  # noqa: E402
 from models.distill.kd import ChangeEvidenceHead, dense_change_kd, gradient_budget_lambda  # noqa: E402
@@ -66,7 +67,7 @@ TEACHER_CHOICES = ["none"] + list(TEACHER_REGISTRY.keys())
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="CATA-CD v2 trainer")
     p.add_argument("--experiment_id", required=True, help="e.g. C0 / C1 / TV-SAM")
-    p.add_argument("--dca_mode", default="none", choices=("none", "moe128"))
+    p.add_argument("--dca_mode", default="none", choices=SUPPORTED_DCA_MODES)
     p.add_argument("--teacher_package", default="none", choices=TEACHER_CHOICES)
     p.add_argument("--dataset_name", required=True, choices=("CDD", "LEVIR", "SYSU", "WHU"))
     p.add_argument("--data_root", required=True)
@@ -431,9 +432,14 @@ def main():
 
     model = build_model(args).to(device)
     student_params = sum(p.numel() for p in model.parameters())
-    expected = EXPECTED_C0_PARAMS if args.dca_mode == "none" else EXPECTED_C1_PARAMS
-    if student_params != expected:
+    # C0/C1 have frozen expected counts so any accidental architecture drift is
+    # caught. The S-PCG gate variants (S1/S2) legitimately change the gate head, so
+    # for those we enforce only the deploy budget and report the measured count.
+    expected = {"none": EXPECTED_C0_PARAMS, "moe128": EXPECTED_C1_PARAMS}.get(args.dca_mode)
+    if expected is not None and student_params != expected:
         raise RuntimeError(f"student params {student_params:,} != expected {expected:,}")
+    if student_params >= PARAM_CAP:
+        raise RuntimeError(f"student params {student_params:,} >= cap {PARAM_CAP:,}")
 
     # Auxiliary head: legacy 128ch evidence head for dense KD, or the 1ch (65-param)
     # task-reliable head for the J1 arms. Both are training-only.
@@ -548,8 +554,10 @@ def main():
         raise RuntimeError(f"swap error {swap_err:.2e}")
     if deploy_err >= DEPLOY_ATOL:
         raise RuntimeError(f"deploy error {deploy_err:.2e}")
-    if infer_params != expected or infer_params >= PARAM_CAP:
-        raise RuntimeError(f"deploy params {infer_params:,}")
+    if expected is not None and infer_params != expected:
+        raise RuntimeError(f"deploy params {infer_params:,} != expected {expected:,}")
+    if infer_params >= PARAM_CAP:
+        raise RuntimeError(f"deploy params {infer_params:,} >= cap {PARAM_CAP:,}")
     append_test(logger, args, scores, param_stats, infer_params, flops, swap_err, deploy_err, datetime.datetime.now() - started)
 
 
