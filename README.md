@@ -1,9 +1,14 @@
 # README.md — LS-Rep_BCD_RSML_3
 
-> Last updated: 2026-10-07
+> Last updated: 2026-10-09
 > 当前主线：**CATA-CD v2 —— Capability-Validated Adaptive Teacher Agent for Lightweight Change Detection**。
-> 完整方案见 `docs/temporary/CATA-CD_v2_扩展教师池_验证驱动Agent_完整方案_20261005.md`。
+> 完整方案见 `docs/temporary/CATA-CD_v2_扩展教师池_验证驱动Agent_完整方案_20261005.md`；
+> 负结果复盘与下一轮可证伪方案见 `docs/temporary/CATA-CD_v2_负结果严格复盘_下一轮可证伪迭代方案_GitHub最新_20261008.md`。
 > 项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。
+>
+> **2026-10-08/09 复核后的状态**：教师选择主线经 J1 判决**未通过 Gate R1**（见
+> 「Run2」一节），论文主轴已按方案 §11.1 转向**不依赖教师的 S-PCG 结构创新**。
+> 教师相关的 Capability Registry / Cache / probe 保留为**诊断资产**，不再作为主创新。
 
 ## 任务与硬目标
 
@@ -21,6 +26,12 @@
 4. 把一个约 **0.37M 的对称 Deployable Change Adapter（DCA）**固化进学生部署图，使最终模型约 3.28M，推理完全不访问任何大模型。
 
 **教师—数据集适配关系全部由实验决定，不预设结论。** 最终 Agent 候选动作只保留 3–5 个互补且被证明有效的 Teacher Package + None。
+
+> **⚠️ 第 1–3 步的当前状态（2026-10-09）**：第 1 步完成（44 个 40K run），
+> 第 2 步完成（Registry），**第 3 步经 J1 判决失败**——教师软目标在同等辅助容量下
+> **无独立价值**（`J1-TASKKD − J1-GATE = −0.18pp`，见 Run2 一节）。
+> 因此**第 3 步不再作为论文主创新**；第 4 步的 DCA 及其 S-PCG 扩展成为主轴。
+> 教师包与 Registry 仍保留，用于解释"为什么强教师难以蒸馏"这一诊断性结论。
 
 ## 实验约定（固定）
 
@@ -120,7 +131,11 @@ M1/SYSU 与 M1/WHU 的配置与 C1 **逐字段完全相同**（`dca_mode=moe128`
 
 **判定：命中方案 §9.4 的 F0「机制不可识别」。** AG-03 在**全部 5 个特征阶梯、全部 4 折都选择 `None`**——val 噪声（0.013–0.41pp）不小于待判效应（最大 +0.15pp），`μ−κu>δ` 无法满足。按方案 §1.1 的可证伪边界，**不能为了"让 Agent 动起来"而降低 δ**。
 
-→ 结论：**Teacher Selection Signal Insufficiency（拒答正确，但尚无可用的选择策略）**。据此**不启动 Run2/M2**（方案 §9.2 要求的 gate 未通过：无 ≥1 折选到 positive reward 的非 None 动作）。
+→ 结论：**Teacher Selection Signal Insufficiency（拒答正确，但尚无可用的选择策略）**。据此当时**未启动 M2**（方案 §9.2 要求的 gate 未通过：无 ≥1 折选到 positive reward 的非 None 动作）。
+
+> **后续（2026-10-08/09）**：按上述复盘方案执行了 **Run2（J0 + J1）**，
+> 结论是教师软目标**无独立价值**（Gate R1 失败）→ 论文主轴转向 S-PCG。
+> 详见「Run2」一节。此处"不启动 Run2"仅指当时（Stage 4 v2）的判断。
 
 **剩余缺口（硬目标，未变）**：SYSU 82.57/85（−2.43）、LEVIR 91.04/92.5（−1.46）、WHU 94.04/95（−0.96）、CDD 97.75/98（−0.25）——即 44 个单教师 run 中最大的 test 差也只有 +0.68pp，现有证据并不显示仅靠"选一个教师"可达四硬目标。
 
@@ -161,6 +176,24 @@ M1/SYSU 与 M1/WHU 的配置与 C1 **逐字段完全相同**（`dca_mode=moe128`
 **对 Gate R0 的判定**：R0 字面要求的"可重复初始化 + 数据序列"**通过**；
 "同配置 40K 可复现"**不通过且无可用开关可修**。
 → Run2 的 40K 结果只能按**单次抽样**解读，**不得**把 <约 1–2pp 的差值归因于方法差异。
+
+### σ 必须上调：Run2 出现了更大的同配置散布
+
+Run2 的 `S0-C1` 与 J1 的 `J1-C1` **逐字段同配置**（`moe128` / 无教师 / 无辅助头 / seed 2333 / 40K / 同预训练），
+但在 SYSU 上跑出 **83.1391 vs 81.8087 → 相差 1.33pp**。
+
+| 数据集 | 同配置 run（F1） | n | **σ_old（n=4）** | **σ_new** | τ=max(0.2, 2√2σ) |
+|---|---|---:|---:|---:|---:|
+| SYSU | 82.57 / 82.22 / 82.91 / 82.42 / **81.81** / **83.14** | 6 | 0.291 | **0.478** | 0.82 → **1.35** |
+| WHU | 94.04 / 94.64 / 93.42 / 93.63 / **93.23** | 5 | 0.537 | 0.561 | 1.52 → 1.59 |
+
+- SYSU σ 的 95% χ² 区间（n=6）为 **[0.298, 1.173]**——即**旧的 n=4 估计 0.291 几乎落在下界**，
+  说明先前把 σ_SYSU 当成 0.29 是**低估值**。
+- 直接影响：**Gate R1 在 SYSU 的正确阈值应是 ≈1.35pp 而非 0.82pp**。
+  R1 的结论（−0.18pp）在两种阈值下都失败，**判决不变**；
+  但**Gate R2 必须按 1.35pp 判读**。
+- 教训：n=4 的 σ 估计不可靠（方案 §6.1 已警告过 CI 达 `[0.566, 3.729]×s`），
+  **每新增一次同配置 run 都应重算 σ**。
 
 ### J1：教师软目标无独立价值（SYSU，四臂 40K，全部完整 TEST block）
 
@@ -207,6 +240,9 @@ M1/SYSU 与 M1/WHU 的配置与 C1 **逐字段完全相同**（`dca_mode=moe128`
 
 S1→S2 是干净的单变量对照（同架构、同流程，仅 gate 输入不同）；所有 gate 输入按构造**交换对称**（swap error < 1e−6，10 个单测覆盖）。
 正在 SYSU/WHU 上跑 S0/S1/S2；**Gate R2：S2 必须独立优于 S1，否则拒绝该创新**。
+
+> **R2 判读阈值（按上文修正后的 σ）**：SYSU 需 **> 1.35pp**、WHU 需 **> 1.59pp** 才算超过噪声尺度。
+> 若 S2−S1 落在此之下，**只能说"未检出""，不得声称 S2 有效或无效应**。
 
 ## 环境（RSML-3）
 
@@ -255,9 +291,20 @@ models/
 train_scripts/CATA-CD/
   teacher_adaptation/                  数据集适配性验证（C0/C1 + Wave-A 能力矩阵）
   Run1/                                Agent 选教师后从头重跑 M1
+  Run2/                                复核后的下一轮：J0 可重复性 + J1 机制判决 + S-PCG
+    README.md                          预注册 Gate R0–R3（先读这个）
+    common.sh                          Run2 共享环境与 run_one（J1-*/S0/S1/S2 臂表）
+    run_j0.sh / run_j0_switches.sh     J0 取证与开关隔离
+    run_calibration.sh                 J1 的 train-only 冻结校准
+    run_j1_sysu.sh / smoke_j1.sh       J1 四臂
+    run_spcg.sh                        S-PCG S0/S1/S2 阶梯
+    monitor.sh                         各臂进度 / F1 / GPU / tmux
+tests/                                 无依赖单元测试（safe_selector / task_reliable_kd / dca_gate）
 analyse/                               extract_metrics.py / models_to_txt.py
-others/                                <name>-main/ 精简参考代码
-docs/temporary/CATA-CD_v2_...md       完整方案
+others/                                <name>-main/ 精简参考代码 + 一次性复核脚本
+docs/temporary/CATA-CD_v2_...md       完整方案（20261005）
+docs/temporary/CATA-CD_v2_负结果严格复盘_..._20261008.md   负结果复盘与下一轮方案
+docs/temporary/CATA-CD_Run2_J1_结果.md J1 判决结果与"允许/不允许宣称"清单
 ```
 
 ## 部署约束
@@ -284,6 +331,18 @@ tmux new -s cata_gpu1 -d 'bash train_scripts/CATA-CD/teacher_adaptation/run_gpu1
 # 结果统计（实验完成后）
 python -B analyse/extract_metrics.py          # 写入 docs/experiment_metrics.xlsx
 python analyse/models_to_txt.py --cata        # 快照 → docs/temporary/models_and_metrics_CATA-CD_Run1.txt
+
+# Run2（复核后的下一轮；先读 train_scripts/CATA-CD/Run2/README.md 的 Gate R0–R3）
+python tests/test_safe_selector.py            # 无依赖单测
+python tests/test_task_reliable_kd.py
+python tests/test_dca_gate.py
+
+bash train_scripts/CATA-CD/Run2/run_j0.sh 0 200 2                 # J0 可重复性取证
+bash train_scripts/CATA-CD/Run2/run_j0_switches.sh 0 30 SYSU      # J0 开关隔离（诊断）
+bash train_scripts/CATA-CD/Run2/run_calibration.sh 512 SYSU       # J1 train-only 校准
+bash train_scripts/CATA-CD/Run2/run_j1_sysu.sh 0 J1-C1,J1-GT SYSU # J1 四臂
+bash train_scripts/CATA-CD/Run2/run_spcg.sh 0 S0-C1,S1-STAT,S2-PCG SYSU,WHU
+bash train_scripts/CATA-CD/Run2/monitor.sh SYSU                    # 进度监控
 ```
 
 ## GitHub 提交流程

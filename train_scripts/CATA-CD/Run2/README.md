@@ -17,7 +17,10 @@
   并有 train-only 探针证据一致；否则**停止把 teacher selector 作为论文主线**。
   （0.82pp = `max(0.20, 2√2·σ_SYSU)`，σ_SYSU=0.289pp，是工程阈值而非 p<0.05。）
 - **Gate R2（structure）**：S-PCG-S2 同协议在四域优于 S1；SYSU/LEVIR/WHU 提升、CDD 不降；
-  部署 <5M、swap/deploy <1e−6。未达则拒绝该创新，不新增第四专家。
+  部署 <5M、swap/deploy <1e−6；未达则拒绝该创新，不新增第四专家。
+  **阈值按实测 σ 判读**：Run2 的 `S0-C1` 相对 `J1-C1` 出现 1.33pp 同配置散布，
+  使 SYSU 的 σ 由 0.291（n=4）上调至 **0.478（n=6）**，对应 **SYSU 阈值 ≈1.35pp、WHU ≈1.59pp**。
+  未超阈值只能说"未检出"，不得声称有效或无效应。
 - **Gate R3（硬目标）**：单次同协议公开 test 必须 SYSU≥85、LEVIR≥92.5、WHU≥95、CDD≥98
   （IoU 同向）。未全部达到即仍属**方法探寻阶段**。
 
