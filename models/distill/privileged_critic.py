@@ -79,10 +79,23 @@ class PrivilegedCritic(nn.Module):
     # ------------------------------------------------------------------ pieces
     def encode_teacher(self, evidence: torch.Tensor, context: torch.Tensor,
                        size: tuple[int, int]) -> torch.Tensor:
-        """P([Resize(E), Resize(M)]) -> [B, d, H, W] on the student's grid."""
-        e = F.interpolate(evidence.float(), size=size, mode="bilinear", align_corners=False)
-        m = F.interpolate(context.float(), size=size, mode="bilinear", align_corners=False)
-        return self.P(torch.cat([e, m], dim=1))
+        """Teacher adapter: channel-mix at the NATIVE grid, then resample to ``size``.
+
+        Order matters for memory. The report writes ``P([Resize(E), Resize(M)])``,
+        i.e. upsample first. Doing that with a 1024-channel teacher materialises
+        ``[B, 1024, 64, 64]`` twice in float32 (~4.3 GiB at B=64) and OOMs on a
+        shared GPU. Since ``P`` is a 1x1 channel mixer followed by norm+activation,
+        applying it *before* the resample computes the same kind of U at 32x lower
+        activation cost: the wide tensors stay at 16x16 and only the narrow ``d``
+        channel summary is upsampled. This is a deliberate, documented deviation
+        from the literal formula; it changes the resolution at which norm/act are
+        evaluated, not the mechanism.
+        """
+        x = torch.cat([evidence.float(), context.float()], dim=1)   # native grid
+        u = self.P(x)                                               # [B, d, h, w]
+        if u.shape[-2:] != tuple(size):
+            u = F.interpolate(u, size=size, mode="bilinear", align_corners=False)
+        return u
 
     def _apply_mode(self, u: torch.Tensor) -> torch.Tensor:
         if self.mode == "zero":
