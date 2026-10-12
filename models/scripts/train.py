@@ -41,7 +41,13 @@ from models import A2Net_LWGANet_L0, build_loss  # noqa: E402
 from models.a2net import SUPPORTED_DCA_MODES  # noqa: E402
 from models.datasets.cd_dataset import get_loader, get_test_loader  # noqa: E402
 from models.distill.cache_v2 import TeacherCacheReaderV2, apply_cache_state  # noqa: E402
+from models.distill.cache_v3 import (  # noqa: E402
+    TeacherCacheV3Reader,
+    apply_cache_state_v3,
+)
 from models.distill.kd import ChangeEvidenceHead, dense_change_kd, gradient_budget_lambda  # noqa: E402
+from models.distill.privileged_critic import MODES as CTP_MODES  # noqa: E402
+from models.distill.privileged_critic import PrivilegedCritic  # noqa: E402
 from models.distill.task_reliable_kd import (  # noqa: E402
     AUX_TASKS,
     TaskReliableAuxHead,
@@ -58,7 +64,10 @@ PARAM_CAP = 5_000_000
 SWAP_ATOL = 1e-6
 DEPLOY_ATOL = 1e-6
 
-CHECKPOINT_FORMAT_VERSION = 8
+# v9 introduces the CTP-Critic auxiliary structure (report §7.4). Bumping the format
+# deliberately invalidates resuming a Run2 checkpoint into a third-round arm, which
+# the report forbids.
+CHECKPOINT_FORMAT_VERSION = 9
 IMPLEMENTATION_VERSION = "cata_cd_v2"
 
 TEACHER_CHOICES = ["none"] + list(TEACHER_REGISTRY.keys())
@@ -105,6 +114,21 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--taskkd_calibration", default=None,
                    help="frozen train-only calibration JSON for --aux_task gate/taskkd")
 
+    # ---- third round: CTP-Critic knowledge channel (report §5) ----
+    p.add_argument("--channel_mode", default="none", choices=("none", "ctp"),
+                   help="none = legacy behaviour; ctp = train-only privileged critic "
+                        "fed by the v3 E/M cache. The deployable student is untouched.")
+    p.add_argument("--teacher_input_mode", default="real", choices=CTP_MODES,
+                   help="counterfactual arm: real (paired U) / zero (U=0 at point of use) / "
+                        "shuffle (U from another sample in the batch)")
+    p.add_argument("--v3_teacher", default=None,
+                   help="teacher id whose v3 cache feeds the critic (required for ctp)")
+    p.add_argument("--ctp_lambda_a", type=float, default=1.0)
+    p.add_argument("--ctp_lambda_t", type=float, default=1.0)
+    p.add_argument("--ctp_tau", type=float, default=1.0)
+    p.add_argument("--ctp_d", type=int, default=32, help="teacher adapter width d")
+    p.add_argument("--ctp_z_dim", type=int, default=64)
+
     p.add_argument("--save_dir", required=True)
     p.add_argument("--log_file", default="train_log.txt")
     p.add_argument("--resume", default=None)
@@ -121,7 +145,17 @@ def parse_args() -> argparse.Namespace:
     # GT/GATE/TASKKD share ONE data stream -- otherwise the "same pixels" control
     # would be confounded by a different augmentation RNG stream.
     args.load_cache = args.use_dense_kd or args.use_taskkd
+    args.use_ctp = args.channel_mode == "ctp"
     args.implementation_version = IMPLEMENTATION_VERSION
+    if args.use_ctp:
+        if args.aux_task != "none":
+            raise ValueError("--channel_mode ctp is exclusive with --aux_task")
+        if not args.v3_teacher:
+            raise ValueError("--channel_mode ctp requires --v3_teacher")
+        if not args.teacher_cache_root:
+            raise ValueError("--channel_mode ctp requires --teacher_cache_root (the v3 root)")
+        # the critic reads the v3 cache, not the v2 one
+        args.load_cache = True
     if args.load_cache and not args.teacher_cache_root:
         raise ValueError("--teacher_cache_root required when a teacher package or --aux_task is used")
     if args.use_taskkd and args.teacher_package == "none":
@@ -200,9 +234,11 @@ def save_ckpt_atomic(ckpt, path):
     os.replace(tmp, path)
 
 
-def build_ckpt(model, aux, optimizer, epoch, gs, best, args):
+def build_ckpt(model, aux, optimizer, epoch, gs, best, args, critic=None):
     return {"format_version": CHECKPOINT_FORMAT_VERSION, "model": model.state_dict(),
-            "aux": aux.state_dict() if aux is not None else None, "optimizer": optimizer.state_dict(),
+            "aux": aux.state_dict() if aux is not None else None,
+            "critic": critic.state_dict() if critic is not None else None,
+            "optimizer": optimizer.state_dict(),
             "epoch": epoch, "global_step": gs, "best_val_f1": best,
             "args": dict(vars(args)), "rng": capture_rng()}
 
@@ -234,6 +270,30 @@ class CataCacheDataset(torch.utils.data.Dataset):
         return (image, label, cache["local_change"].float(), cache["confidence"].float())
 
 
+class CataCacheV3Dataset(torch.utils.data.Dataset):
+    """v3 cache: multi-channel symmetric E/M pair evidence for the CTP critic.
+
+    Same geometric replay contract as v2; E and M are exchange-symmetric so only
+    crop/flip are replayed (``apply_cache_state_v3`` enforces this).
+    """
+
+    def __init__(self, base, reader, split):
+        self.base = base
+        self.reader = reader
+        self.split = split
+
+    def __len__(self):
+        return len(self.base)
+
+    def set_epoch(self, e):
+        self.base.set_epoch(e)
+
+    def __getitem__(self, idx):
+        image, label, sample_id, state = self.base[idx]
+        cache = apply_cache_state_v3(self.reader.load(self.split, sample_id), state)
+        return (image, label, cache["evidence"].float(), cache["context"].float())
+
+
 def build_model(args):
     return A2Net_LWGANet_L0(pretrained=args.pretrained, pretrained_path=args.pretrained_path,
                             dca_mode=args.dca_mode)
@@ -248,7 +308,7 @@ def multiscale_loss(preds, target, crit, ws):
 
 
 def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, device,
-                taskcfg: TaskReliableConfig | None = None):
+                taskcfg: TaskReliableConfig | None = None, critic=None):
     model.train()
     if hasattr(loader.dataset, "set_epoch"):
         loader.dataset.set_epoch(epoch)
@@ -263,16 +323,25 @@ def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, devic
     aux_skipped = 0
     region_acc: dict[str, float] = {}
     region_n = 0
+    ctp_acc: dict[str, float] = {"task": 0.0, "pri": 0.0, "transfer": 0.0, "u_norm": 0.0}
+    ctp_n = 0
     if aux is not None:
         aux.train()
+    if critic is not None:
+        critic.train()
 
     for batch in loader:
         if gs >= args.max_steps:
             break
         if load_cache:
             image, target = batch[0], batch[1]
-            local_change = batch[2].to(device, non_blocking=True)
-            confidence = batch[3].to(device, non_blocking=True)
+            if args.use_ctp:
+                evidence = batch[2].to(device, non_blocking=True)
+                context = batch[3].to(device, non_blocking=True)
+                local_change = confidence = None
+            else:
+                local_change = batch[2].to(device, non_blocking=True)
+                confidence = batch[3].to(device, non_blocking=True)
         else:
             image, target = unpack(batch)
 
@@ -292,6 +361,7 @@ def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, devic
             student_evidence = aux(change)  # [B,128,h,w] at scale 2 (stride 16)
             kd_loss = dense_change_kd(student_evidence, local_change, confidence, cap=args.kd_cap)
             lam = gradient_budget_lambda(main_loss, kd_loss, change[2], rho=args.rho, lam_max=args.lambda_max)
+            total = main_loss + lam * kd_loss
         elif args.use_taskkd:
             # J1: 1-channel head on c2 (stride 4). Same head/capacity for gt/gate/taskkd;
             # only the supervised region and/or the target differ.
@@ -300,16 +370,31 @@ def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, devic
             if task_loss is None:
                 # Empty region: skip the auxiliary term entirely, main loss continues.
                 aux_skipped += 1
+                total = main_loss
             else:
                 kd_loss = task_loss
                 lam = gradient_budget_lambda(main_loss, kd_loss, change[0],
                                              rho=args.rho, lam_max=args.lambda_max)
+                total = main_loss + lam * kd_loss
                 for _k, _v in _stats.items():
                     if isinstance(_v, (int, float)) and _k != "skipped":
                         region_acc[_k] = region_acc.get(_k, 0.0) + float(_v)
                 region_n += 1
-
-        total = main_loss + lam * kd_loss
+        elif args.use_ctp:
+            # CTP-Critic: train-only privileged view vs teacher-free view on c2.
+            # The teacher evidence enters ONLY here; the student forward is untouched.
+            out = critic(change[0], evidence, context, target)
+            kd_loss = out.loss_task + out.loss_pri
+            total = (main_loss
+                     + args.ctp_lambda_a * (out.loss_task + out.loss_pri)
+                     + args.ctp_lambda_t * out.loss_transfer)
+            ctp_acc["task"] += float(out.loss_task.detach())
+            ctp_acc["pri"] += float(out.loss_pri.detach())
+            ctp_acc["transfer"] += float(out.loss_transfer.detach())
+            ctp_acc["u_norm"] += out.u_norm
+            ctp_n += 1
+        else:
+            total = main_loss
         if not bool(torch.isfinite(total)):
             raise FloatingPointError("Non-finite loss")
         total.backward()
@@ -333,6 +418,10 @@ def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, devic
     aux_info = {"aux_skipped": aux_skipped, "n_batches": batches, "region_batches": region_n}
     for k, v in region_acc.items():
         aux_info[k] = v / max(region_n, 1)
+    if ctp_n:
+        for k, v in ctp_acc.items():
+            aux_info[f"ctp_{k}"] = v / max(ctp_n, 1)
+        aux_info["ctp_batches"] = ctp_n
     return {k: v / batches for k, v in totals.items()}, meter.get_scores(), last_lr, gs, aux_info
 
 
@@ -402,6 +491,10 @@ def append_test(logger, args, scores, param_stats, infer_params, flops, swap_err
     logger.log_message(f"DCA Mode: {args.dca_mode}")
     logger.log_message(f"Teacher Package: {args.teacher_package}")
     logger.log_message(f"Aux Task: {args.aux_task}")
+    logger.log_message(f"Channel Mode: {args.channel_mode}")
+    if args.use_ctp:
+        logger.log_message(f"V3 Teacher: {args.v3_teacher}")
+        logger.log_message(f"Teacher Input Mode: {args.teacher_input_mode}")
     logger.log_message(f"Seed: {args.seed}")
     logger.log_message(f"Max Steps: {args.max_steps}")
     logger.log_message(f"Batch Size: {args.batch_size}")
@@ -449,7 +542,20 @@ def main():
         aux = TaskReliableAuxHead(64, scale_index=0).to(device)
     else:
         aux = None
-    aux_params = sum(p.numel() for p in aux.parameters()) if aux is not None else 0
+    # Third round: the CTP critic replaces the aux head entirely and is likewise
+    # constructed OUTSIDE the student so it can never enter the deploy graph.
+    critic = None
+    critic_params = 0
+    if args.use_ctp:
+        v3reader = TeacherCacheV3Reader(args.teacher_cache_root, args.dataset_name, args.v3_teacher)
+        meta3 = v3reader.load_meta()
+        critic = PrivilegedCritic(64, meta3.channels, d=args.ctp_d, z_dim=args.ctp_z_dim,
+                                  tau=args.ctp_tau, mode=args.teacher_input_mode).to(device)
+        critic_params = sum(p.numel() for p in critic.parameters())
+        print(f"[ctp] mode={args.teacher_input_mode} teacher={args.v3_teacher} "
+              f"C={meta3.channels} native={meta3.native_h}x{meta3.native_w} "
+              f"n_cache={meta3.n_samples} critic_params={critic_params:,}")
+    aux_params = (sum(p.numel() for p in aux.parameters()) if aux is not None else 0) + critic_params
     taskcfg = None
     if args.aux_task in ("gate", "taskkd"):
         taskcfg = TaskReliableConfig.from_json(args.taskkd_calibration)
@@ -463,18 +569,32 @@ def main():
         "training_total": student_params + aux_params,
     }
     params = list(model.parameters()) + (list(aux.parameters()) if aux is not None else [])
+    if critic is not None:
+        params += list(critic.parameters())
     optimizer = build_optimizer(args, params)
     criterion = build_loss(args.dice_reduction)
 
     if args.load_cache:
-        reader = TeacherCacheReaderV2(args.teacher_cache_root, args.dataset_name)
-        base = get_loader(args.data_root, os.path.join(args.data_root, "list", "train.txt"),
-                          batchsize=1, trainsize=args.inWidth, num_workers=args.num_workers,
-                          return_state=True, seed=args.seed).dataset
-        train_dataset = CataCacheDataset(base, reader, "train")
-        train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
-                                                   num_workers=args.num_workers, pin_memory=True, drop_last=True,
-                                                   generator=torch.Generator().manual_seed(args.seed), persistent_workers=False)
+        if args.use_ctp:
+            reader = TeacherCacheV3Reader(args.teacher_cache_root, args.dataset_name, args.v3_teacher)
+            base = get_loader(args.data_root, os.path.join(args.data_root, "list", "train.txt"),
+                              batchsize=1, trainsize=args.inWidth, num_workers=args.num_workers,
+                              return_state=True, seed=args.seed).dataset
+            train_dataset = CataCacheV3Dataset(base, reader, "train")
+            train_loader = torch.utils.data.DataLoader(
+                train_dataset, batch_size=args.batch_size, shuffle=True,
+                num_workers=args.num_workers, pin_memory=True, drop_last=True,
+                generator=torch.Generator().manual_seed(args.seed), persistent_workers=False)
+        else:
+            reader = TeacherCacheReaderV2(args.teacher_cache_root, args.dataset_name)
+            base = get_loader(args.data_root, os.path.join(args.data_root, "list", "train.txt"),
+                              batchsize=1, trainsize=args.inWidth, num_workers=args.num_workers,
+                              return_state=True, seed=args.seed).dataset
+            train_dataset = CataCacheDataset(base, reader, "train")
+            train_loader = torch.utils.data.DataLoader(
+                train_dataset, batch_size=args.batch_size, shuffle=True,
+                num_workers=args.num_workers, pin_memory=True, drop_last=True,
+                generator=torch.Generator().manual_seed(args.seed), persistent_workers=False)
     else:
         train_loader = get_loader(args.data_root, os.path.join(args.data_root, "list", "train.txt"),
                                   batchsize=args.batch_size, trainsize=args.inWidth, num_workers=args.num_workers, seed=args.seed)
@@ -492,6 +612,8 @@ def main():
         optimizer.load_state_dict(ck["optimizer"])
         if aux is not None and ck.get("aux"):
             aux.load_state_dict(ck["aux"])
+        if critic is not None and ck.get("critic"):
+            critic.load_state_dict(ck["critic"])
         start_epoch = int(ck["epoch"]) + 1
         gs = int(ck["global_step"])
         best_val_f1 = float(ck["best_val_f1"])
@@ -516,12 +638,12 @@ def main():
             break
         train_losses, _, lr, gs, aux_info = train_epoch(args, train_loader, model, aux,
                                                         criterion, optimizer, epoch, gs,
-                                                        device, taskcfg)
+                                                        device, taskcfg, critic)
         val_loss, val = evaluate(val_loader, model, criterion, args.main_loss_weights, device)
         is_best = val["F1"] > best_val_f1
         if is_best:
             best_val_f1 = float(val["F1"])
-        ck = build_ckpt(model, aux, optimizer, epoch, gs, best_val_f1, args)
+        ck = build_ckpt(model, aux, optimizer, epoch, gs, best_val_f1, args, critic)
         save_ckpt_atomic(ck, last_path)
         if is_best:
             nb = save_dir / f"best_model_F1={best_val_f1:.6f}.pth"
@@ -539,6 +661,14 @@ def main():
                 + " ".join(f"{k}={aux_info[k]:.5f}" for k in
                            ("n_pos", "n_neg", "g_pos_frac", "g_neg_frac", "band_frac")
                            if k in aux_info))
+        if args.use_ctp:
+            logger.log_message(
+                "CTP: mode={} teacher={} L_task={:.5f} L_pri={:.5f} L_transfer={:.5f} "
+                "|U|={:.5f} batches={}".format(
+                    args.teacher_input_mode, args.v3_teacher,
+                    aux_info.get("ctp_task", float("nan")), aux_info.get("ctp_pri", float("nan")),
+                    aux_info.get("ctp_transfer", float("nan")), aux_info.get("ctp_u_norm", float("nan")),
+                    aux_info.get("ctp_batches", 0)))
         if gs >= args.max_steps:
             break
 
