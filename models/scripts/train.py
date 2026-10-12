@@ -138,14 +138,16 @@ def parse_args() -> argparse.Namespace:
     if len(args.main_loss_weights) != 4:
         raise ValueError("main_loss_weights must contain four values")
     args.use_teacher = args.teacher_package != "none"
-    # Derived protocol flags. ``use_dense_kd`` is exactly the legacy behaviour.
-    args.use_dense_kd = (args.aux_task == "none") and args.use_teacher
+    # Derived protocol flags. ``use_dense_kd`` is exactly the legacy behaviour; CTP
+    # also sets --teacher_package (it needs the cache), so it must be excluded here
+    # or the legacy KD branch would run against tensors the v3 loader never provides.
+    args.use_ctp = args.channel_mode == "ctp"
     args.use_taskkd = args.aux_task != "none"
+    args.use_dense_kd = (args.aux_task == "none") and args.use_teacher and not args.use_ctp
     # J1 requires the cache for gate/taskkd (the teacher signal) and, for gt, so that
     # GT/GATE/TASKKD share ONE data stream -- otherwise the "same pixels" control
     # would be confounded by a different augmentation RNG stream.
-    args.load_cache = args.use_dense_kd or args.use_taskkd
-    args.use_ctp = args.channel_mode == "ctp"
+    args.load_cache = args.use_dense_kd or args.use_taskkd or args.use_ctp
     args.implementation_version = IMPLEMENTATION_VERSION
     if args.use_ctp:
         if args.aux_task != "none":
@@ -154,8 +156,6 @@ def parse_args() -> argparse.Namespace:
             raise ValueError("--channel_mode ctp requires --v3_teacher")
         if not args.teacher_cache_root:
             raise ValueError("--channel_mode ctp requires --teacher_cache_root (the v3 root)")
-        # the critic reads the v3 cache, not the v2 one
-        args.load_cache = True
     if args.load_cache and not args.teacher_cache_root:
         raise ValueError("--teacher_cache_root required when a teacher package or --aux_task is used")
     if args.use_taskkd and args.teacher_package == "none":
