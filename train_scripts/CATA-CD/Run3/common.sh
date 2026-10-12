@@ -37,6 +37,9 @@ exp_cfg() {
     C3L-S-D3S)    echo "shuffle dinov3_sat" ;;
     C3L-R-D3S)    echo "real dinov3_sat" ;;
     C3L-R-D2)     echo "real dinov2" ;;
+    # 第 8 臂：补齐"每卡 2 进程"排期所需的整除轮次，同时增加教师跨度
+    # （Agent 的价值前提是"不同教师在同一个域上可区分"，2 个教师答不了这个问题）。
+    C3L-R-RADIO)  echo "real radio" ;;
     C3C-Z)        echo "zero dinov3_sat" ;;
     C3C-R-D3S)    echo "real dinov3_sat" ;;
     C3C-R-D2)     echo "real dinov2" ;;
