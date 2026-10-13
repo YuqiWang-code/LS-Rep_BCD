@@ -32,7 +32,7 @@ SCTC1_OUTPUT = ARCHIVE_DIR / 'models_and_metrics_SCTC_Run1.txt'
 FASCRD1_OUTPUT = ARCHIVE_DIR / 'models_and_metrics_FA-SCRD_Run1.txt'
 SAGE1_OUTPUT = ARCHIVE_DIR / 'models_and_metrics_SAGE-CD_Run1.txt'
 SAGE2_OUTPUT = ARCHIVE_DIR / 'models_and_metrics_SAGE-CD_Run2.txt'
-CATA_OUTPUT = ARCHIVE_DIR / 'models_and_metrics_CATA-CD_Run1.txt'
+CATA_OUTPUT = ARCHIVE_DIR / 'models_and_metrics_CATA-CD_Run1-3.txt'
 
 
 def read_file(path: Path) -> str:
@@ -294,6 +294,14 @@ def build_cata_version():
     parts.append('Project: LS-Rep_BCD_RSML_3\n')
     parts.append('Metrics source: docs/experiment_metrics.xlsx\n')
     parts.append('CATA-CD v2 note: C0=clean A2Net, C1=C0+DCA (moe128), TV-*=C1+teacher package (Wave-A: sam2/dinov2/dinov3_lvd/dinov3_sat/remoteclip/mars; Wave-B: anysat/universat/radio). Teacher utility = TV-* - C1 per dataset; teacher-dataset fit decided by 40K experiment. Deploy params <5M (C0=2.9131M, C1=3.2803M). 40k, seed 2333 only.\n')
+    parts.append(
+        'Rounds included: Run1 = C0/C1 + 36 TV-* + 12 noise repeats + 4 M1 (dense 128ch cosine KD). '
+        'Run2 = J1 four-arm mechanism verdict (aux_task none/gt/gate/taskkd on SYSU; '
+        'J1-TASKKD - J1-GATE = -0.181pp) and the S-PCG four-dataset ladder '
+        '(dca_mode moe128 / moe128_stats / moe128_sympcg; S2-S1 fails 0/4 domains). '
+        'Run3 = CTP-Critic counterfactual screening (channel_mode ctp, teacher_input_mode real/zero/shuffle) '
+        'on LEVIR (C3L-*) and CDD (C3C-*); the new channel shows no absolute gain over the old one '
+        '(best LEVIR 91.1707 vs 91.1732) and the teacher spread stays 0.30pp.\n')
     parts.append(separator('MODELS CODE'))
     code_count = append_models_code(parts)
     result_count = append_excel_metrics(parts)

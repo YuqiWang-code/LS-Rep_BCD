@@ -1,16 +1,19 @@
 # README.md — LS-Rep_BCD_RSML_3
 
-> Last updated: 2026-10-09
+> Last updated: 2026-10-13
 > 当前主线：**CATA-CD v2 —— Capability-Validated Adaptive Teacher Agent for Lightweight Change Detection**。
-> 完整方案见 `docs/temporary/CATA-CD_v2_扩展教师池_验证驱动Agent_完整方案_20261005.md`；
-> 负结果复盘与下一轮可证伪方案见 `docs/temporary/CATA-CD_v2_负结果严格复盘_下一轮可证伪迭代方案_GitHub最新_20261008.md`。
+> 完整方案见 `docs/temporary/过去的思路/CATA-CD_v2_扩展教师池_验证驱动Agent_完整方案_20261005.md`；
+> 负结果复盘与下一轮可证伪方案见 `docs/temporary/过去的思路/CATA-CD_v2_负结果严格复盘_下一轮可证伪迭代方案_GitHub最新_20261008.md`。
 > 项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。
 >
-> **2026-10-08/10 复核后的状态**：Capability Registry / J1 机制判决 / S-PCG 四域阶梯均已执行完毕。
-> 两条线的**当前证据**是：教师软目标在同等辅助容量下**未观察到超过噪声的独立增益**（J1）；
-> S-PCG 的对称共性上下文在四域上**0/4 超过噪声阈值**（见「Run2」一节）。
-> 按下面的**研究纪律**，这两条都记为**待归因的负结果**，**不构成放弃相应机制线的理由**；
+> **2026-10-12/13 更新**：Capability Registry / J1 机制判决 / S-PCG 四域阶梯 / **Run3 CTP-Critic 筛选** 均已执行完毕。
+> 三条线的**当前证据**都是**未观察到超过噪声的独立增益**：
+> J1（教师软目标，`TASKKD−GATE = −0.181pp`）、S-PCG（对称共性上下文，四域 0/4 超阈值）、
+> **CTP-Critic（新知识通道，LEVIR `REAL−ZERO = +0.302pp` 未达 +1.0pp，且绝对水平与旧通道持平）**。
+> 按下面的**研究纪律**，这些都是**待归因的负结果**，**不构成放弃相应机制线的理由**；
 > 主线仍是「**多教师 + 按教师—数据集适配性选择的 Agent**」，并以 CTRL/EXP 同期消融继续迭代。
+> **未解决的核心矛盾**：本通道下**教师仍不可区辨**（LEVIR 跨度 0.30pp / CDD 0.002pp），
+> 选师 Agent 因此没有可选的信号——这是下一轮必须正面处理的问题。
 
 ## 研究纪律（固定，优先级高于任何单轮结论）
 
@@ -139,7 +142,7 @@ M1/SYSU 与 M1/WHU 的配置与 C1 **逐字段完全相同**（`dca_mode=moe128`
 
 ## Stage 4（v2）：U-SafeAgent 与 Agent-only 消融
 
-按 `docs/temporary/CATA-CD_v2_Agent结构改进_最新GitHub审查_完整科研方案_20261008.md` 实现：
+按 `docs/temporary/过去的思路/CATA-CD_v2_Agent结构改进_最新GitHub审查_完整科研方案_20261008.md` 实现：
 
 - **P0 修复**：`build_capability_registry` 改取**最后一个完整 TEST block**；registry 改**严格枚举**且 Agent 侧读取遇 `test_*` 字段直接 `PermissionError`；`train.py` 分开上报 `Student/Aux/Train/Infer Params`（此前 TV-* 的 "Train Params" 漏掉了 KD 头 8,320 参数）；`dataset_signature` 新增 **schema v2**（20 维：修 `n_components` 零连通域、Sobel 用梯度幅值、面积分位改全局汇总，新增 empty-pair ratio / boundary density / change-area CV / hard pseudo-change / illumination-unchanged），**v1 的 18 维保留不覆盖**。
 - **新 reward**：`ΔF1_val(pp)`（弃用 `ΔF1+0.5ΔIoU` 的复合奖励，避免同一检测效应重复计量）。
@@ -176,7 +179,7 @@ M1/SYSU 与 M1/WHU 的配置与 C1 **逐字段完全相同**（`dca_mode=moe128`
 
 ## Run2（2026-10-08 复核后的下一轮：J0 可重复性 + J1 机制判决）
 
-按 `docs/temporary/CATA-CD_v2_负结果严格复盘_下一轮可证伪迭代方案_GitHub最新_20261008.md` 执行。
+按 `docs/temporary/过去的思路/CATA-CD_v2_负结果严格复盘_下一轮可证伪迭代方案_GitHub最新_20261008.md` 执行。
 代码与脚本见 `train_scripts/CATA-CD/Run2/`（README 顶部含预注册 Gate R0–R3）。
 
 ### P0 修复（均已验证）
@@ -341,7 +344,7 @@ SYSU **0.478 / τ=1.353**（n=6）、WHU 0.561 / 1.587（n=5）、LEVIR 0.193 / 
 - 与硬目标的关系：即使按 SYSU 最大 +0.97pp 外推，83.33 + 0.97 = 84.30 **仍距 85 有 0.70pp**；
   但按「研究纪律」1，这**不构成否定该机制线的理由**，只说明它单独不足以达标。
 
-完整 12-run 数据、"允许/不允许宣称"清单见 `docs/temporary/CATA-CD_Run2_SPCG_结果.md`。
+完整 12-run 数据、"允许/不允许宣称"清单见 `docs/temporary/过去的思路/CATA-CD_Run2_SPCG_结果.md`。
 
 ### 两条线的负结果归档（不构成放弃理由）
 
@@ -349,10 +352,54 @@ SYSU **0.478 / τ=1.353**（n=6）、WHU 0.561 / 1.587（n=5）、LEVIR 0.193 / 
 |---|---|---|---|
 | 教师选择 / 蒸馏（Stage 3/4 + J1） | 本轮**未观察到**超过噪声的独立增益 | `J1-TASKKD − J1-GATE = −0.181pp`；`J1-TASKKD ≈ J1-GT`（−0.010pp） | **改知识通道**：固定随机投影 + 单尺度 cosine + max-channel 响应；教师特征未进入学生输入 |
 | 结构 S-PCG（S0/S1/S2） | 本轮**0/4 域超过噪声阈值** | `S2−S1` 四域均值 +0.338pp，CDD 下降 | 对称共性上下文只在 GAP 统计层；可考虑进入 decoder 交互或训练期特权信息 |
+| **知识通道 CTP-Critic（Run3）** | **未通过预注册门槛，且绝对水平无提升** | LEVIR `REAL−ZERO = +0.302pp`（0.55τ）＜ 门槛 +1.0pp；`REAL−SHUFFLE` 仅 +0.135pp；**新通道最好 91.1707 vs 旧通道 91.1732（−0.003pp）** | critic 只通过 KL/BCE **间接**影响学生，传导效率极低；教师证据未进入学生前向 |
 
-**共同瓶颈**：同配置 40K 的 σ 达 **0.19–0.56pp**，而上面所有机制的效应都在 **0.02–0.97pp**，
+**共同瓶颈**：同配置 40K 的 σ 达 **0.19–0.56pp**，而上面所有机制的效应都在 **0.002–0.97pp**，
 即**效应与噪声同量级**。因此下一轮的设计必须让 `EXP − CTRL` 的**预期效应 > 1pp**，
-否则无论机制真假都判不出来（见下方「σ 与可检测下限」）。
+否则无论机制真假都判不出来（见上方「σ 与可检测下限」）。
+
+## Run3（2026-10-12/13：CTP-Critic 知识通道）
+
+对应 `docs/temporary/CATA-CD v2 第三轮研究分析报告.md`。方案：保持九教师 + 适配性选师 Agent 不变，
+**只改训练期知识通道**——Cache v3 存多通道对称 `E=|LN(F_A)−LN(F_B)|` 与 `M=½(LN(F_A)+LN(F_B))`，
+训练期在 `c2` 上挂**特权评论器**，用 `zero`/`shuffle`/`real` 做反事实对照；`models/a2net.py` **零改动**。
+
+代码：`models/distill/cache_v3.py`、`models/distill/privileged_critic.py`、
+`models/tools/generate_teacher_cache_v3.py`；脚本与完整说明见 `train_scripts/CATA-CD/Run3/README.md`。
+新增 25 个单测（cache_v3 11 + privileged_critic 14），全项目 **60/60** 通过。
+
+**筛选阶段 8 臂 40K**（并发严格每卡 2 进程；两卡空闲后按 PI 决定把两个 zero CTRL 一起从头重训）：
+
+| 数据集 | 臂 | 模式 | 教师 | F1 | IoU | 相对 ZERO |
+|---|---|---|---|---|---|---:|
+| LEVIR | `C3L-Z` | zero（CTRL） | — | 90.8685 | 83.2651 | — |
+| LEVIR | `C3L-R-D3S` | real | dinov3_sat | **91.1707** | **83.7740** | **+0.302pp** |
+| LEVIR | `C3L-S-D3S` | shuffle | dinov3_sat | 91.0358 | 83.5465 | +0.167pp |
+| LEVIR | `C3L-R-D2` | real | dinov2 | 90.8700 | 83.2677 | +0.002pp |
+| LEVIR | `C3L-R-RADIO` | real | radio | 90.9163 | 83.3454 | +0.048pp |
+| CDD | `C3C-Z` | zero（CTRL） | — | 97.5553 | 95.2274 | — |
+| CDD | `C3C-R-D3S` | real | dinov3_sat | 97.5467 | 95.2109 | −0.009pp |
+| CDD | `C3C-R-D2` | real | dinov2 | 97.5486 | 95.2145 | −0.007pp |
+
+八臂全部 40000 步、完整 TEST block、**Infer Params 恒 3.2803M**、swap/deploy error 0。
+
+**判定：预注册门槛未通过**（要求 LEVIR `REAL−ZERO ≥ +1.0pp`；实测 +0.302pp）。
+**最关键的一条是绝对对比**：
+
+| 口径 | LEVIR 最好 F1 |
+|---|---:|
+| 旧通道（v2：固定随机投影 → 128ch 单尺度 cosine KD） | **91.1732** |
+| 新通道（v3：多通道 E/M + 特权评论器 + 反事实控制） | **91.1707** |
+| **绝对差** | **−0.0025pp** |
+
+⇒ **彻底替换整个知识通道后，最好成绩没有变化**；相对增益从 +0.14 变 +0.30 是因为新 CTRL
+比旧 C1 低 0.17pp，**不是绝对提升**。
+
+另两条硬结论：(a) `REAL−SHUFFLE` 仅 +0.135pp，把教师证据换成**同 batch 内别的样本**仍拿到约 45% 的增益
+⇒ 该增益主要**不是**来自正确配对；(b) 三教师跨度 LEVIR **0.30pp（0.55τ）**、CDD **0.002pp（0.01τ）**
+⇒ **教师经本通道仍不可区辨，选师 Agent 依旧没有可选信号**。
+
+完整数据与"允许/不允许宣称"清单见 `docs/temporary/CATA-CD_Run3_CTP_筛选结果.md`。
 
 ### 四数据集当前最好单次结果 vs 硬目标（**Gate R3 未达**）
 
@@ -411,19 +458,25 @@ train_scripts/CATA-CD/
   teacher_adaptation/                  数据集适配性验证（C0/C1 + Wave-A 能力矩阵）
   Run1/                                Agent 选教师后从头重跑 M1
   Run2/                                复核后的下一轮：J0 可重复性 + J1 机制判决 + S-PCG
-    README.md                          预注册 Gate R0–R3（先读这个）
-    common.sh                          Run2 共享环境与 run_one（J1-*/S0/S1/S2 臂表）
-    run_j0.sh / run_j0_switches.sh     J0 取证与开关隔离
-    run_calibration.sh                 J1 的 train-only 冻结校准
-    run_j1_sysu.sh / smoke_j1.sh       J1 四臂
-    run_spcg.sh                        S-PCG S0/S1/S2 阶梯
-    monitor.sh                         各臂进度 / F1 / GPU / tmux
-tests/                                 无依赖单元测试（safe_selector / task_reliable_kd / dca_gate）
+  Run3/                                第三轮：CTP-Critic 知识通道（Cache v3 + 特权评论器）
+    README.md                          机制、反事实模式、实验 ID、P0 清单、并发条件记录
+    common.sh                          Run3 共享环境与 run_one（C3L-*/C3C-* 臂表）
+    build_cache.sh / chain_cache.sh    增量生成 v3 cache（E/M 对称对证据）/ 链式排队
+    run_screen.sh / run_confirm.sh     低 σ 筛选 / 高 σ 确认
+    run_queue.sh                       通用队列（ARM:DS，支持混合数据集）
+    launch_2x.sh                       每卡 2 进程的统一排期启动器（fresh 可清除重来）
+    smoke_ctp.sh                       CTP 三模式端到端冒烟（只查正确性）
+    watch_and_launch.sh                显存守候器（与其它用户共享 GPU 时自动等待）
+    monitor.sh                         各臂进度 / CTP 诊断量 / cache 树 / GPU / tmux
+tests/                                 无依赖单元测试（60 个：safe_selector / task_reliable_kd / dca_gate / cache_v3 / privileged_critic）
 analyse/                               extract_metrics.py / models_to_txt.py
 others/                                <name>-main/ 精简参考代码 + 一次性复核脚本
-docs/temporary/CATA-CD_v2_...md       完整方案（20261005）
-docs/temporary/CATA-CD_v2_负结果严格复盘_..._20261008.md   负结果复盘与下一轮方案
-docs/temporary/CATA-CD_Run2_J1_结果.md J1 判决结果与"允许/不允许宣称"清单
+docs/temporary/CATA-CD v2 第三轮研究分析报告.md  第三轮方案（CTP-Critic，当前轮）
+docs/temporary/CATA-CD_Run3_CTP_筛选结果.md    Run3 筛选结果（含新通道 vs 旧通道的绝对对比）
+docs/temporary/models_and_metrics_CATA-CD_Run1-3.txt   代码 + 全部指标的机器可读快照
+docs/temporary/过去的思路/                     历轮方案与结果归档（含 20261005 完整方案、
+                                             20261008 复核方案、J1/S-PCG 结果、各轮 GPT prompt）
+docs/experiment_metrics.xlsx           全部实验的统一指标表（含 CATA-CD 84 行 = Run1 60 + Run2 16 + Run3 8）
 ```
 
 ## 部署约束
@@ -449,7 +502,7 @@ tmux new -s cata_gpu1 -d 'bash train_scripts/CATA-CD/teacher_adaptation/run_gpu1
 
 # 结果统计（实验完成后）
 python -B analyse/extract_metrics.py          # 写入 docs/experiment_metrics.xlsx
-python analyse/models_to_txt.py --cata        # 快照 → docs/temporary/models_and_metrics_CATA-CD_Run1.txt
+python analyse/models_to_txt.py --cata        # 快照 → docs/temporary/models_and_metrics_CATA-CD_Run1-3.txt（含 Run1/2/3 全部 84 条 CATA 结果 + 模型代码）
 
 # Run2（复核后的下一轮；先读 train_scripts/CATA-CD/Run2/README.md 的 Gate R0–R3）
 python tests/test_safe_selector.py            # 无依赖单测

@@ -13,6 +13,7 @@ Subcommands:
 from __future__ import annotations
 
 import json
+import stat
 import sys
 from pathlib import Path
 
@@ -162,11 +163,49 @@ def pull_main(c):
     sftp.close()
 
 
+def pulltree_main(c):
+    """Recursively download matching files: pulltree <remote_dir> <local_dir> [suffix].
+
+    Only files whose name ends with <suffix> (default: train_log.txt) are fetched,
+    and the remote directory structure is recreated locally. Used to bring Run*
+    result logs into the working tree so analyse/extract_metrics.py can pick them
+    up without copying weights or caches.
+    """
+    remote_dir = sys.argv[2].rstrip("/")
+    local_dir = Path(sys.argv[3])
+    suffix = sys.argv[4] if len(sys.argv) > 4 else "train_log.txt"
+
+    import posixpath
+    sftp = c.open_sftp()
+    n = 0
+    stack = [remote_dir]
+    while stack:
+        d = stack.pop()
+        try:
+            entries = sftp.listdir_attr(d)
+        except IOError:
+            print(f"  [warn] cannot list {d}")
+            continue
+        for e in entries:
+            rp = posixpath.join(d, e.filename)
+            if stat.S_ISDIR(e.st_mode):
+                stack.append(rp)
+            elif e.filename.endswith(suffix):
+                rel = rp[len(remote_dir):].lstrip("/")
+                lp = local_dir / rel
+                lp.parent.mkdir(parents=True, exist_ok=True)
+                sftp.get(rp, str(lp))
+                n += 1
+    sftp.close()
+    print(f"  pulled {n} file(s) matching '*{suffix}' -> {local_dir}")
+
+
 if __name__ == "__main__":
     sub = sys.argv[1] if len(sys.argv) > 1 else "status"
     c, cfg = conn()
     try:
         {"status": status, "sync": sync, "bashn": bashn, "launch": launch,
-         "monitor": monitor, "sh": sh_main, "py": py_main, "pull": pull_main}[sub](c)
+         "monitor": monitor, "sh": sh_main, "py": py_main, "pull": pull_main,
+         "pulltree": pulltree_main}[sub](c)
     finally:
         c.close()
