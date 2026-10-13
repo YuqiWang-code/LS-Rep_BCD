@@ -48,6 +48,15 @@ from models.distill.cache_v3 import (  # noqa: E402
 from models.distill.kd import ChangeEvidenceHead, dense_change_kd, gradient_budget_lambda  # noqa: E402
 from models.distill.privileged_critic import MODES as CTP_MODES  # noqa: E402
 from models.distill.privileged_critic import PrivilegedCritic  # noqa: E402
+from models.distill.privileged_spatial_bridge import (  # noqa: E402
+    MODES as PSFB_MODES,
+)
+from models.distill.privileged_spatial_bridge import (  # noqa: E402
+    PrivilegedSpatialBridge,
+    bridge_init_fingerprint,
+    feature_transfer_loss,
+    shadow_decoder_forward,
+)
 from models.distill.task_reliable_kd import (  # noqa: E402
     AUX_TASKS,
     TaskReliableAuxHead,
@@ -64,10 +73,10 @@ PARAM_CAP = 5_000_000
 SWAP_ATOL = 1e-6
 DEPLOY_ATOL = 1e-6
 
-# v9 introduces the CTP-Critic auxiliary structure (report §7.4). Bumping the format
-# deliberately invalidates resuming a Run2 checkpoint into a third-round arm, which
-# the report forbids.
-CHECKPOINT_FORMAT_VERSION = 9
+# v9 introduces the CTP-Critic auxiliary structure; v10 adds the PSFB training-time
+# spatial bridge (report Run4 §7.4). Bumping deliberately invalidates resuming an
+# older-format checkpoint into a newer arm, which the protocol forbids.
+CHECKPOINT_FORMAT_VERSION = 10
 IMPLEMENTATION_VERSION = "cata_cd_v2"
 
 TEACHER_CHOICES = ["none"] + list(TEACHER_REGISTRY.keys())
@@ -115,10 +124,10 @@ def parse_args() -> argparse.Namespace:
                    help="frozen train-only calibration JSON for --aux_task gate/taskkd")
 
     # ---- third round: CTP-Critic knowledge channel (report §5) ----
-    p.add_argument("--channel_mode", default="none", choices=("none", "ctp"),
-                   help="none = legacy behaviour; ctp = train-only privileged critic "
-                        "fed by the v3 E/M cache. The deployable student is untouched.")
-    p.add_argument("--teacher_input_mode", default="real", choices=CTP_MODES,
+    p.add_argument("--channel_mode", default="none", choices=("none", "ctp", "psfb"),
+                   help="none = legacy behaviour; ctp = privileged critic (Run3); "
+                        "psfb = privileged spatial bridge with a shadow decoder (Run4)")
+    p.add_argument("--teacher_input_mode", default="real", choices=sorted(set(CTP_MODES) | set(PSFB_MODES)),
                    help="counterfactual arm: real (paired U) / zero (U=0 at point of use) / "
                         "shuffle (U from another sample in the batch)")
     p.add_argument("--v3_teacher", default=None,
@@ -128,6 +137,16 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--ctp_tau", type=float, default=1.0)
     p.add_argument("--ctp_d", type=int, default=32, help="teacher adapter width d")
     p.add_argument("--ctp_z_dim", type=int, default=64)
+
+    # ---- fourth round: PSFB (report §5) ----
+    p.add_argument("--psfb_d", type=int, default=32, help="teacher adapter width d in PSFB")
+    p.add_argument("--psfb_alpha", type=float, default=1.0, help="fixed residual scale; never tuned")
+    p.add_argument("--psfb_lambda_s", type=float, default=1.0, help="weight of the shadow task loss")
+    p.add_argument("--psfb_lambda_f", type=float, default=1.0, help="weight of the feature transfer loss")
+    p.add_argument("--psfb_feat_kind", default="cosine", choices=("cosine", "smoothl1"),
+                   help="frozen per experiment; the report forbids trying both and picking the winner")
+    p.add_argument("--psfb_no_feature", action="store_true",
+                   help="NOFEAT control: identical REAL arm with lambda_f forced to 0")
 
     p.add_argument("--save_dir", required=True)
     p.add_argument("--log_file", default="train_log.txt")
@@ -142,20 +161,24 @@ def parse_args() -> argparse.Namespace:
     # also sets --teacher_package (it needs the cache), so it must be excluded here
     # or the legacy KD branch would run against tensors the v3 loader never provides.
     args.use_ctp = args.channel_mode == "ctp"
+    args.use_psfb = args.channel_mode == "psfb"
     args.use_taskkd = args.aux_task != "none"
-    args.use_dense_kd = (args.aux_task == "none") and args.use_teacher and not args.use_ctp
+    args.use_dense_kd = (args.aux_task == "none") and args.use_teacher and not (
+        args.use_ctp or args.use_psfb)
     # J1 requires the cache for gate/taskkd (the teacher signal) and, for gt, so that
     # GT/GATE/TASKKD share ONE data stream -- otherwise the "same pixels" control
     # would be confounded by a different augmentation RNG stream.
-    args.load_cache = args.use_dense_kd or args.use_taskkd or args.use_ctp
+    args.load_cache = args.use_dense_kd or args.use_taskkd or args.use_ctp or args.use_psfb
     args.implementation_version = IMPLEMENTATION_VERSION
-    if args.use_ctp:
+    if args.use_psfb and args.psfb_no_feature:
+        args.psfb_lambda_f = 0.0
+    if args.use_ctp or args.use_psfb:
         if args.aux_task != "none":
-            raise ValueError("--channel_mode ctp is exclusive with --aux_task")
+            raise ValueError(f"--channel_mode {args.channel_mode} is exclusive with --aux_task")
         if not args.v3_teacher:
-            raise ValueError("--channel_mode ctp requires --v3_teacher")
+            raise ValueError(f"--channel_mode {args.channel_mode} requires --v3_teacher")
         if not args.teacher_cache_root:
-            raise ValueError("--channel_mode ctp requires --teacher_cache_root (the v3 root)")
+            raise ValueError(f"--channel_mode {args.channel_mode} requires --teacher_cache_root (v3 root)")
     if args.load_cache and not args.teacher_cache_root:
         raise ValueError("--teacher_cache_root required when a teacher package or --aux_task is used")
     if args.use_taskkd and args.teacher_package == "none":
@@ -234,10 +257,11 @@ def save_ckpt_atomic(ckpt, path):
     os.replace(tmp, path)
 
 
-def build_ckpt(model, aux, optimizer, epoch, gs, best, args, critic=None):
+def build_ckpt(model, aux, optimizer, epoch, gs, best, args, critic=None, bridge=None):
     return {"format_version": CHECKPOINT_FORMAT_VERSION, "model": model.state_dict(),
             "aux": aux.state_dict() if aux is not None else None,
             "critic": critic.state_dict() if critic is not None else None,
+            "bridge": bridge.state_dict() if bridge is not None else None,
             "optimizer": optimizer.state_dict(),
             "epoch": epoch, "global_step": gs, "best_val_f1": best,
             "args": dict(vars(args)), "rng": capture_rng()}
@@ -308,7 +332,7 @@ def multiscale_loss(preds, target, crit, ws):
 
 
 def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, device,
-                taskcfg: TaskReliableConfig | None = None, critic=None):
+                taskcfg: TaskReliableConfig | None = None, critic=None, bridge=None):
     model.train()
     if hasattr(loader.dataset, "set_epoch"):
         loader.dataset.set_epoch(epoch)
@@ -325,17 +349,26 @@ def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, devic
     region_n = 0
     ctp_acc: dict[str, float] = {"task": 0.0, "pri": 0.0, "transfer": 0.0, "u_norm": 0.0}
     ctp_n = 0
+    psfb_acc: dict[str, float] = {"shadow": 0.0, "feat": 0.0, "u_norm": 0.0,
+                                  "delta_t_norm": 0.0, "delta_0_norm": 0.0,
+                                  "ht_h0_gap": 0.0, "ht_c3_gap": 0.0,
+                                  "u_vs_zero_gap": 0.0}
+    psfb_n = 0
     if aux is not None:
         aux.train()
     if critic is not None:
         critic.train()
+    if bridge is not None:
+        bridge.train()
 
     for batch in loader:
         if gs >= args.max_steps:
             break
         if load_cache:
             image, target = batch[0], batch[1]
-            if args.use_ctp:
+            if args.use_ctp or args.use_psfb:
+                # both v3 consumers need the symmetric E/M pair, not v2's
+                # local_change/confidence fields
                 evidence = batch[2].to(device, non_blocking=True)
                 context = batch[3].to(device, non_blocking=True)
                 local_change = confidence = None
@@ -393,6 +426,34 @@ def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, devic
             ctp_acc["transfer"] += float(out.loss_transfer.detach())
             ctp_acc["u_norm"] += out.u_norm
             ctp_n += 1
+        elif args.use_psfb:
+            # PSFB: teacher-conditioned shadow view of the REAL decoder's c3 input,
+            # supervised by the task loss, plus a 64ch transfer term pushing the
+            # teacher-free view toward it. L_main is computed on the untouched main
+            # path; the shadow pass shares decoder WEIGHTS but uses temporary BN
+            # buffers, so the deployed model's buffers are never written.
+            pout = bridge(change[1], evidence, context)          # c3 is change[1]
+            shadow_out = shadow_decoder_forward(
+                model.decoder, change[0], pout.h_t, change[2], change[3])
+            # Decoder returns (feat2, feat3, feat4, feat5, logit2, logit3, logit4, logit5);
+            # only the trailing logits take part in the loss, exactly as in a2net.forward.
+            shadow_raw = shadow_out[4:]
+            _out_size = target.shape[-2:]
+            shadow_preds = tuple(
+                torch.sigmoid(F.interpolate(lg, size=_out_size, mode="bilinear",
+                                            align_corners=False))
+                for lg in shadow_raw)
+            shadow_loss = multiscale_loss(shadow_preds, target, criterion, args.main_loss_weights)
+            feat_loss = feature_transfer_loss(pout.h_0, pout.h_t, args.psfb_feat_kind)
+            kd_loss = shadow_loss
+            total = (main_loss
+                     + args.psfb_lambda_s * shadow_loss
+                     + args.psfb_lambda_f * feat_loss)
+            psfb_acc["shadow"] += float(shadow_loss.detach())
+            psfb_acc["feat"] += float(feat_loss.detach())
+            for k, v in pout.stats.items():
+                psfb_acc[k] += float(v)
+            psfb_n += 1
         else:
             total = main_loss
         if not bool(torch.isfinite(total)):
@@ -422,6 +483,10 @@ def train_epoch(args, loader, model, aux, criterion, optimizer, epoch, gs, devic
         for k, v in ctp_acc.items():
             aux_info[f"ctp_{k}"] = v / max(ctp_n, 1)
         aux_info["ctp_batches"] = ctp_n
+    if psfb_n:
+        for k, v in psfb_acc.items():
+            aux_info[f"psfb_{k}"] = v / max(psfb_n, 1)
+        aux_info["psfb_batches"] = psfb_n
     return {k: v / batches for k, v in totals.items()}, meter.get_scores(), last_lr, gs, aux_info
 
 
@@ -492,9 +557,16 @@ def append_test(logger, args, scores, param_stats, infer_params, flops, swap_err
     logger.log_message(f"Teacher Package: {args.teacher_package}")
     logger.log_message(f"Aux Task: {args.aux_task}")
     logger.log_message(f"Channel Mode: {args.channel_mode}")
-    if args.use_ctp:
+    if args.use_ctp or args.use_psfb:
         logger.log_message(f"V3 Teacher: {args.v3_teacher}")
         logger.log_message(f"Teacher Input Mode: {args.teacher_input_mode}")
+    if args.use_psfb:
+        logger.log_message(f"PSFB D: {args.psfb_d}")
+        logger.log_message(f"PSFB Alpha: {args.psfb_alpha}")
+        logger.log_message(f"PSFB Lambda S: {args.psfb_lambda_s}")
+        logger.log_message(f"PSFB Lambda F: {args.psfb_lambda_f}")
+        logger.log_message(f"PSFB Feat Kind: {args.psfb_feat_kind}")
+        logger.log_message(f"PSFB No Feature: {bool(args.psfb_no_feature)}")
     logger.log_message(f"Seed: {args.seed}")
     logger.log_message(f"Max Steps: {args.max_steps}")
     logger.log_message(f"Batch Size: {args.batch_size}")
@@ -546,16 +618,29 @@ def main():
     # constructed OUTSIDE the student so it can never enter the deploy graph.
     critic = None
     critic_params = 0
-    if args.use_ctp:
+    bridge = None
+    bridge_params = 0
+    if args.use_ctp or args.use_psfb:
         v3reader = TeacherCacheV3Reader(args.teacher_cache_root, args.dataset_name, args.v3_teacher)
         meta3 = v3reader.load_meta()
-        critic = PrivilegedCritic(64, meta3.channels, d=args.ctp_d, z_dim=args.ctp_z_dim,
-                                  tau=args.ctp_tau, mode=args.teacher_input_mode).to(device)
-        critic_params = sum(p.numel() for p in critic.parameters())
-        print(f"[ctp] mode={args.teacher_input_mode} teacher={args.v3_teacher} "
-              f"C={meta3.channels} native={meta3.native_h}x{meta3.native_w} "
-              f"n_cache={meta3.n_samples} critic_params={critic_params:,}")
-    aux_params = (sum(p.numel() for p in aux.parameters()) if aux is not None else 0) + critic_params
+        print(f"[{args.channel_mode}] teacher={args.v3_teacher} C={meta3.channels} "
+              f"native={meta3.native_h}x{meta3.native_w} n_cache={meta3.n_samples}")
+        if args.use_ctp:
+            critic = PrivilegedCritic(64, meta3.channels, d=args.ctp_d, z_dim=args.ctp_z_dim,
+                                      tau=args.ctp_tau, mode=args.teacher_input_mode).to(device)
+            critic_params = sum(p.numel() for p in critic.parameters())
+            print(f"[ctp] mode={args.teacher_input_mode} critic_params={critic_params:,}")
+        else:
+            bridge = PrivilegedSpatialBridge(64, meta3.channels, d=args.psfb_d,
+                                             alpha=args.psfb_alpha,
+                                             mode=args.teacher_input_mode).to(device)
+            bridge_params = sum(p.numel() for p in bridge.parameters())
+            print(f"[psfb] mode={args.teacher_input_mode} d={args.psfb_d} alpha={args.psfb_alpha} "
+                  f"bridge_params={bridge_params:,} lambda_s={args.psfb_lambda_s} "
+                  f"lambda_f={args.psfb_lambda_f} feat={args.psfb_feat_kind} "
+                  f"R_fingerprint={bridge_init_fingerprint(bridge)[:16]}")
+    aux_params = ((sum(p.numel() for p in aux.parameters()) if aux is not None else 0)
+                  + critic_params + bridge_params)
     taskcfg = None
     if args.aux_task in ("gate", "taskkd"):
         taskcfg = TaskReliableConfig.from_json(args.taskkd_calibration)
@@ -571,11 +656,16 @@ def main():
     params = list(model.parameters()) + (list(aux.parameters()) if aux is not None else [])
     if critic is not None:
         params += list(critic.parameters())
+    if bridge is not None:
+        params += list(bridge.parameters())
     optimizer = build_optimizer(args, params)
     criterion = build_loss(args.dice_reduction)
 
     if args.load_cache:
-        if args.use_ctp:
+        if args.use_ctp or args.use_psfb:
+            # Both third- and fourth-round channels read the v3 E/M cache; using the
+            # v2 reader here would silently build a teacher-less path and fail with
+            # a confusing "cache missing" error.
             reader = TeacherCacheV3Reader(args.teacher_cache_root, args.dataset_name, args.v3_teacher)
             base = get_loader(args.data_root, os.path.join(args.data_root, "list", "train.txt"),
                               batchsize=1, trainsize=args.inWidth, num_workers=args.num_workers,
@@ -614,6 +704,8 @@ def main():
             aux.load_state_dict(ck["aux"])
         if critic is not None and ck.get("critic"):
             critic.load_state_dict(ck["critic"])
+        if bridge is not None and ck.get("bridge"):
+            bridge.load_state_dict(ck["bridge"])
         start_epoch = int(ck["epoch"]) + 1
         gs = int(ck["global_step"])
         best_val_f1 = float(ck["best_val_f1"])
@@ -638,12 +730,12 @@ def main():
             break
         train_losses, _, lr, gs, aux_info = train_epoch(args, train_loader, model, aux,
                                                         criterion, optimizer, epoch, gs,
-                                                        device, taskcfg, critic)
+                                                        device, taskcfg, critic, bridge)
         val_loss, val = evaluate(val_loader, model, criterion, args.main_loss_weights, device)
         is_best = val["F1"] > best_val_f1
         if is_best:
             best_val_f1 = float(val["F1"])
-        ck = build_ckpt(model, aux, optimizer, epoch, gs, best_val_f1, args, critic)
+        ck = build_ckpt(model, aux, optimizer, epoch, gs, best_val_f1, args, critic, bridge)
         save_ckpt_atomic(ck, last_path)
         if is_best:
             nb = save_dir / f"best_model_F1={best_val_f1:.6f}.pth"
@@ -669,6 +761,17 @@ def main():
                     aux_info.get("ctp_task", float("nan")), aux_info.get("ctp_pri", float("nan")),
                     aux_info.get("ctp_transfer", float("nan")), aux_info.get("ctp_u_norm", float("nan")),
                     aux_info.get("ctp_batches", 0)))
+        if args.use_psfb:
+            logger.log_message(
+                "PSFB: mode={} teacher={} L_shadow={:.5f} L_feat={:.5f} |U|={:.5f} "
+                "|dT|={:.5f} |d0|={:.5f} ||HT-H0||={:.6f} ||HT-C3||={:.5f} batches={}".format(
+                    args.teacher_input_mode, args.v3_teacher,
+                    aux_info.get("psfb_shadow", float("nan")), aux_info.get("psfb_feat", float("nan")),
+                    aux_info.get("psfb_u_norm", float("nan")), aux_info.get("psfb_delta_t_norm", float("nan")),
+                    aux_info.get("psfb_delta_0_norm", float("nan")),
+                    aux_info.get("psfb_ht_h0_gap", float("nan")),
+                    aux_info.get("psfb_ht_c3_gap", float("nan")),
+                    aux_info.get("psfb_batches", 0)))
         if gs >= args.max_steps:
             break
 

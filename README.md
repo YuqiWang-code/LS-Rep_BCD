@@ -360,7 +360,7 @@ SYSU **0.478 / τ=1.353**（n=6）、WHU 0.561 / 1.587（n=5）、LEVIR 0.193 / 
 
 ## Run3（2026-10-12/13：CTP-Critic 知识通道）
 
-对应 `docs/temporary/CATA-CD v2 第三轮研究分析报告.md`。方案：保持九教师 + 适配性选师 Agent 不变，
+对应 `docs/temporary/过去的思路/CATA-CD v2 第三轮研究分析报告.md`。方案：保持九教师 + 适配性选师 Agent 不变，
 **只改训练期知识通道**——Cache v3 存多通道对称 `E=|LN(F_A)−LN(F_B)|` 与 `M=½(LN(F_A)+LN(F_B))`，
 训练期在 `c2` 上挂**特权评论器**，用 `zero`/`shuffle`/`real` 做反事实对照；`models/a2net.py` **零改动**。
 
@@ -395,11 +395,11 @@ SYSU **0.478 / τ=1.353**（n=6）、WHU 0.561 / 1.587（n=5）、LEVIR 0.193 / 
 ⇒ **彻底替换整个知识通道后，最好成绩没有变化**；相对增益从 +0.14 变 +0.30 是因为新 CTRL
 比旧 C1 低 0.17pp，**不是绝对提升**。
 
-另两条硬结论：(a) `REAL−SHUFFLE` 仅 +0.135pp，把教师证据换成**同 batch 内别的样本**仍拿到约 45% 的增益
+另两条硬结论：(a) `REAL−SHUFFLE` 仅 +0.135pp，把教师证据换成**同 batch 内别的样本**仍拿到 **55.4%** 的表观增益（配对特有部分只占 44.6%）
 ⇒ 该增益主要**不是**来自正确配对；(b) 三教师跨度 LEVIR **0.30pp（0.55τ）**、CDD **0.002pp（0.01τ）**
 ⇒ **教师经本通道仍不可区辨，选师 Agent 依旧没有可选信号**。
 
-完整数据与"允许/不允许宣称"清单见 `docs/temporary/CATA-CD_Run3_CTP_筛选结果.md`。
+完整数据与"允许/不允许宣称"清单见 `docs/temporary/过去的思路/CATA-CD_Run3_CTP_筛选结果.md`。
 
 ### 四数据集当前最好单次结果 vs 硬目标（**Gate R3 未达**）
 
@@ -471,8 +471,8 @@ train_scripts/CATA-CD/
 tests/                                 无依赖单元测试（60 个：safe_selector / task_reliable_kd / dca_gate / cache_v3 / privileged_critic）
 analyse/                               extract_metrics.py / models_to_txt.py
 others/                                <name>-main/ 精简参考代码 + 一次性复核脚本
-docs/temporary/CATA-CD v2 第三轮研究分析报告.md  第三轮方案（CTP-Critic，当前轮）
-docs/temporary/CATA-CD_Run3_CTP_筛选结果.md    Run3 筛选结果（含新通道 vs 旧通道的绝对对比）
+docs/temporary/过去的思路/CATA-CD v2 第三轮研究分析报告.md  第三轮方案（CTP-Critic，当前轮）
+docs/temporary/过去的思路/CATA-CD_Run3_CTP_筛选结果.md    Run3 筛选结果（含新通道 vs 旧通道的绝对对比）
 docs/temporary/models_and_metrics_CATA-CD_Run1-3.txt   代码 + 全部指标的机器可读快照
 docs/temporary/过去的思路/                     历轮方案与结果归档（含 20261005 完整方案、
                                              20261008 复核方案、J1/S-PCG 结果、各轮 GPT prompt）
