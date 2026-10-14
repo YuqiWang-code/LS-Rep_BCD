@@ -1,19 +1,20 @@
 # README.md — LS-Rep_BCD_RSML_3
 
-> Last updated: 2026-10-13
+> Last updated: 2026-10-14
 > 当前主线：**CATA-CD v2 —— Capability-Validated Adaptive Teacher Agent for Lightweight Change Detection**。
 > 完整方案见 `docs/temporary/过去的思路/CATA-CD_v2_扩展教师池_验证驱动Agent_完整方案_20261005.md`；
 > 负结果复盘与下一轮可证伪方案见 `docs/temporary/过去的思路/CATA-CD_v2_负结果严格复盘_下一轮可证伪迭代方案_GitHub最新_20261008.md`。
 > 项目长期处于「方法有效性探寻阶段」，主线结论随时可能被新实验推翻；不得把本文档中的任何结果当作已定稿的论文结论。
 >
-> **2026-10-12/13 更新**：Capability Registry / J1 机制判决 / S-PCG 四域阶梯 / **Run3 CTP-Critic 筛选** 均已执行完毕。
-> 三条线的**当前证据**都是**未观察到超过噪声的独立增益**：
-> J1（教师软目标，`TASKKD−GATE = −0.181pp`）、S-PCG（对称共性上下文，四域 0/4 超阈值）、
-> **CTP-Critic（新知识通道，LEVIR `REAL−ZERO = +0.302pp` 未达 +1.0pp，且绝对水平与旧通道持平）**。
-> 按下面的**研究纪律**，这些都是**待归因的负结果**，**不构成放弃相应机制线的理由**；
-> 主线仍是「**多教师 + 按教师—数据集适配性选择的 Agent**」，并以 CTRL/EXP 同期消融继续迭代。
-> **未解决的核心矛盾**：本通道下**教师仍不可区辨**（LEVIR 跨度 0.30pp / CDD 0.002pp），
-> 选师 Agent 因此没有可选的信号——这是下一轮必须正面处理的问题。
+> **2026-10-13/14 更新**：Capability Registry / J1 / S-PCG / Run3 CTP / **Run4 PSFB** 均已执行完毕。
+> **Run4 是本项目第一次检出超过 LEVIR 噪声尺度的配对特异性效应**：
+> `D3S REAL−SHUFFLE = +0.6214pp F1 / +1.0440pp IoU`（预注册门槛 0.546pp），
+> 且去掉 64 通道特征直传损失 `+0.4695pp` ⇒ **正确配对的教师信息确实被使用了**。
+> **但净增益仍未过门槛**：`REAL−ZERO = +0.2972pp`（目标 +1.00pp），
+> 因为 `SHUFFLE−ZERO = −0.3242pp`——**错配教师比不装更差**，`REAL−SHUFFLE` 的优势里约 0.32pp
+> 只是挽回自己造成的损失。**教师仍不可区辨**（三教师专属 CTRL 下跨度仅 **0.1043pp**，需 >0.546）。
+> 按「研究纪律」，这些都是**待归因的结果**，**不构成放弃机制线的理由**；
+> 主线仍是「**多教师 + 按教师—数据集适配性选择的 Agent**」。
 
 ## 研究纪律（固定，优先级高于任何单轮结论）
 
@@ -352,7 +353,8 @@ SYSU **0.478 / τ=1.353**（n=6）、WHU 0.561 / 1.587（n=5）、LEVIR 0.193 / 
 |---|---|---|---|
 | 教师选择 / 蒸馏（Stage 3/4 + J1） | 本轮**未观察到**超过噪声的独立增益 | `J1-TASKKD − J1-GATE = −0.181pp`；`J1-TASKKD ≈ J1-GT`（−0.010pp） | **改知识通道**：固定随机投影 + 单尺度 cosine + max-channel 响应；教师特征未进入学生输入 |
 | 结构 S-PCG（S0/S1/S2） | 本轮**0/4 域超过噪声阈值** | `S2−S1` 四域均值 +0.338pp，CDD 下降 | 对称共性上下文只在 GAP 统计层；可考虑进入 decoder 交互或训练期特权信息 |
-| **知识通道 CTP-Critic（Run3）** | **未通过预注册门槛，且绝对水平无提升** | LEVIR `REAL−ZERO = +0.302pp`（0.55τ）＜ 门槛 +1.0pp；`REAL−SHUFFLE` 仅 +0.135pp；**新通道最好 91.1707 vs 旧通道 91.1732（−0.003pp）** | critic 只通过 KL/BCE **间接**影响学生，传导效率极低；教师证据未进入学生前向 |
+| **知识通道 CTP-Critic（Run3）** | 未通过门槛，且绝对水平无提升 | LEVIR `REAL−ZERO = +0.302pp`（0.55τ）＜ +1.0pp；`REAL−SHUFFLE` 仅 +0.135pp；新通道最好 91.1707 vs 旧通道 91.1732 | critic 只通过 KL/BCE **间接**影响学生，传导效率低 |
+| **知识通道 PSFB（Run4）** | **配对特异性首次过门槛，但净增益仍不足** | `REAL−SHUFFLE = +0.6214pp`（> 0.546 门槛）✓；`REAL−NOFEAT = +0.4695pp` ✓；但 `REAL−ZERO = +0.2972pp` ＜ +1.0pp，且 `SHUFFLE−ZERO = −0.3242pp` | **桥接自我熄灭**：残差 `\|Δ\|` 衰减 8–170 倍，训练主动关闭教师通路 |
 
 **共同瓶颈**：同配置 40K 的 σ 达 **0.19–0.56pp**，而上面所有机制的效应都在 **0.002–0.97pp**，
 即**效应与噪声同量级**。因此下一轮的设计必须让 `EXP − CTRL` 的**预期效应 > 1pp**，
@@ -400,6 +402,72 @@ SYSU **0.478 / τ=1.353**（n=6）、WHU 0.561 / 1.587（n=5）、LEVIR 0.193 / 
 ⇒ **教师经本通道仍不可区辨，选师 Agent 依旧没有可选信号**。
 
 完整数据与"允许/不允许宣称"清单见 `docs/temporary/过去的思路/CATA-CD_Run3_CTP_筛选结果.md`。
+
+## Run4（2026-10-13/14：PSFB 训练期特权空间特征桥）
+
+对应 `docs/temporary/CATA-CD v2 第四轮完整中文研究报告.md`。方案：**创新点不变**，
+把教师证据接到**真实 Decoder 的训练期影子前向**上（共享 Decoder 权重 + 临时 BN buffers），
+而不是 Run3 那种只作用于辅助 1 通道 critic 的间接监督。`models/a2net.py` / `a2net_decoder.py` **零改动**。
+
+代码：`models/distill/privileged_spatial_bridge.py`；脚本与完整说明见 `train_scripts/CATA-CD/Run4/README.md`。
+新增 15 个单测，全项目 **75/75** 通过。
+
+**低 σ 筛选 11 臂 40K**（所有臂 Infer Params 3.2803M / 3.2432G / swap·deploy error 0）：
+
+| 数据集 | 臂 | 模式 | 教师 | F1 | IoU |
+|---|---|---|---:|---:|---:|
+| LEVIR | `D4-L-D3S-Z` | zero | dinov3_sat | 90.9053 | 83.3270 |
+| LEVIR | `D4-L-D3S-R` | **real** | dinov3_sat | **91.2025** | **83.8278** |
+| LEVIR | `D4-L-D3S-S` | shuffle | dinov3_sat | 90.5811 | 82.7838 |
+| LEVIR | `D4-L-D3S-NF` | real, λ_f=0 | dinov3_sat | 90.7330 | 83.0379 |
+| LEVIR | `D4-L-D2-Z` | zero | dinov2 | 90.7609 | 83.0847 |
+| LEVIR | `D4-L-D2-R` | real | dinov2 | 91.0428 | 83.5583 |
+| LEVIR | `D4-L-RAD-Z` | zero | radio | 90.7809 | 83.1181 |
+| LEVIR | `D4-L-RAD-R` | real | radio | 90.9738 | 83.4422 |
+| CDD | `D4-C-D3S-Z` | zero | dinov3_sat | 97.7875 | 95.6708 |
+| CDD | `D4-C-D3S-R` | real | dinov3_sat | 97.7383 | 95.5766 |
+| CDD | `D4-C-D3S-S` | shuffle | dinov3_sat | 97.7890 | 95.6737 |
+
+**差值（pp；LEVIR 单差尺度 √2σ=0.273、预注册门槛 0.546）**
+
+| 对照 | ΔF1 | ΔIoU | 判读 |
+|---|---:|---:|---|
+| D3S `REAL−ZERO` | +0.2972 | +0.5008 | 未过 +1.00pp 目标 |
+| D2 `REAL−ZERO` | +0.2819 | +0.4736 | 同上 |
+| RAD `REAL−ZERO` | +0.1929 | +0.3241 | 同上 |
+| **D3S `REAL−SHUFFLE`** | **+0.6214** | **+1.0440** | **PASS（> 0.546，本项目首次）** |
+| **D3S `REAL−NOFEAT`** | **+0.4695** | +0.7899 | 64 通道特征直传确有贡献 |
+| D3S `SHUFFLE−ZERO` | **−0.3242** | −0.5432 | **错配教师比不装更差** |
+| CDD `REAL−ZERO` | −0.0492 | −0.0942 | 低于 0.20 地板 |
+
+**判定：部分通过。** 这是**三轮以来第一个超过 LEVIR 噪声尺度的配对特异性效应**——
+正确配对的教师证据比同 batch 错配好 +0.62pp，去掉特征直传损失 +0.47pp ⇒ **教师信息确实被使用了**。
+**但净增益未过门槛**（+0.2972 vs +1.00），且因为 `SHUFFLE−ZERO = −0.3242pp`，
+`REAL−SHUFFLE` 的优势里约 0.32pp 只是**挽回自己造成的损失**；
+准确表述是「**该机制在装上的前提下必须喂正确配对，否则比不装更差**」，是**条件性价值**而非净收益。
+
+**教师仍不可区辨**（本轮首次做到每教师各有专属 CTRL，且 `R` 初始化在教师间逐位一致，
+`R_fingerprint` 相同 ⇒ **无初始化混杂**）：三个教师 `REAL−ZERO` 跨度仅 **0.1043pp**（需 >0.546）。
+⇒ 与前两轮一致且更干净：**Agent 仍无可选信号**。
+
+**机制诊断：桥接自我熄灭。** `H = C3 + α·Δ`，影子 Decoder 与主 Decoder 共享权重 ⇒
+把 `Δ` 压到 0 是同时降低 `L_shadow` 与 `L_feat` 的最省力解。终值 `|Δ_T|`：
+REAL 0.103–0.113、NOFEAT 0.034、SHUFFLE 0.007、**ZERO 0.004–0.005**（初始约 0.84）。
+`‖HT−H0‖` 在 REAL 臂逐 epoch 衰减 10 倍（0.278→0.026）。
+⇒ **所有模式下通路都衰减；只有 REAL 保留约 0.10——配对教师输入是唯一让该通路存活的因素。**
+
+**绝对水平：三个完全不同的通道落在同一个数上。**
+
+| 通道 | LEVIR/D3S 最好 F1 |
+|---|---:|
+| v2：固定随机投影 + 128ch 单尺度 cosine KD | 91.1732 |
+| Run3：CTP-Critic（1ch critic @ c2 + KL） | 91.1707 |
+| Run4：PSFB（64ch 影子 Decoder @ c3 + 任务损失 + 特征直传） | 91.2025 |
+
+**极差 0.0318pp**（σ_LEVIR=0.193）⇒ 换遍表征形式、注入位置、监督目标、是否经过真实 Decoder，
+**绝对水平没有变化**。"装了辅助结构但教师置零"的臂（90.87–90.91）还比历史干净 C1（91.04）低约 0.15pp。
+
+完整数据与"允许/不允许宣称"清单见 `docs/temporary/CATA-CD_Run4_PSFB_筛选结果.md`。
 
 ### 四数据集当前最好单次结果 vs 硬目标（**Gate R3 未达**）
 
@@ -459,6 +527,12 @@ train_scripts/CATA-CD/
   Run1/                                Agent 选教师后从头重跑 M1
   Run2/                                复核后的下一轮：J0 可重复性 + J1 机制判决 + S-PCG
   Run3/                                第三轮：CTP-Critic 知识通道（Cache v3 + 特权评论器）
+  Run4/                                第四轮：PSFB 训练期特权空间特征桥
+    README.md                          机制、反模式、判据、P0 清单、两处有意偏离
+    common.sh / run_queue.sh           ID 解析（D4-<DS>-<TEACHER>-<MODE>）与队列
+    smoke_psfb.sh                      四模式端到端冒烟（只查正确性）
+    launch_2x.sh / monitor.sh          每卡 2 进程排期 / 进度与塌缩指标监控
+    selftest_ids.sh                    ID 解析 + cache 就绪自测（无需 GPU）
     README.md                          机制、反事实模式、实验 ID、P0 清单、并发条件记录
     common.sh                          Run3 共享环境与 run_one（C3L-*/C3C-* 臂表）
     build_cache.sh / chain_cache.sh    增量生成 v3 cache（E/M 对称对证据）/ 链式排队
@@ -473,10 +547,10 @@ analyse/                               extract_metrics.py / models_to_txt.py
 others/                                <name>-main/ 精简参考代码 + 一次性复核脚本
 docs/temporary/过去的思路/CATA-CD v2 第三轮研究分析报告.md  第三轮方案（CTP-Critic，当前轮）
 docs/temporary/过去的思路/CATA-CD_Run3_CTP_筛选结果.md    Run3 筛选结果（含新通道 vs 旧通道的绝对对比）
-docs/temporary/models_and_metrics_CATA-CD_Run1-3.txt   代码 + 全部指标的机器可读快照
+docs/temporary/models_and_metrics_CATA-CD_Run1-4.txt   代码 + 全部指标的机器可读快照
 docs/temporary/过去的思路/                     历轮方案与结果归档（含 20261005 完整方案、
                                              20261008 复核方案、J1/S-PCG 结果、各轮 GPT prompt）
-docs/experiment_metrics.xlsx           全部实验的统一指标表（含 CATA-CD 84 行 = Run1 60 + Run2 16 + Run3 8）
+docs/experiment_metrics.xlsx           全部实验的统一指标表（含 CATA-CD 95 行 = Run1 60 + Run2 16 + Run3 8 + Run4 11）
 ```
 
 ## 部署约束
@@ -502,7 +576,7 @@ tmux new -s cata_gpu1 -d 'bash train_scripts/CATA-CD/teacher_adaptation/run_gpu1
 
 # 结果统计（实验完成后）
 python -B analyse/extract_metrics.py          # 写入 docs/experiment_metrics.xlsx
-python analyse/models_to_txt.py --cata        # 快照 → docs/temporary/models_and_metrics_CATA-CD_Run1-3.txt（含 Run1/2/3 全部 84 条 CATA 结果 + 模型代码）
+python analyse/models_to_txt.py --cata        # 快照 → docs/temporary/models_and_metrics_CATA-CD_Run1-4.txt（含 Run1/2/3 全部 84 条 CATA 结果 + 模型代码）
 
 # Run2（复核后的下一轮；先读 train_scripts/CATA-CD/Run2/README.md 的 Gate R0–R3）
 python tests/test_safe_selector.py            # 无依赖单测

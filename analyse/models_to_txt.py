@@ -32,7 +32,7 @@ SCTC1_OUTPUT = ARCHIVE_DIR / 'models_and_metrics_SCTC_Run1.txt'
 FASCRD1_OUTPUT = ARCHIVE_DIR / 'models_and_metrics_FA-SCRD_Run1.txt'
 SAGE1_OUTPUT = ARCHIVE_DIR / 'models_and_metrics_SAGE-CD_Run1.txt'
 SAGE2_OUTPUT = ARCHIVE_DIR / 'models_and_metrics_SAGE-CD_Run2.txt'
-CATA_OUTPUT = ARCHIVE_DIR / 'models_and_metrics_CATA-CD_Run1-3.txt'
+CATA_OUTPUT = ARCHIVE_DIR / 'models_and_metrics_CATA-CD_Run1-4.txt'
 
 
 def read_file(path: Path) -> str:
@@ -301,7 +301,13 @@ def build_cata_version():
         '(dca_mode moe128 / moe128_stats / moe128_sympcg; S2-S1 fails 0/4 domains). '
         'Run3 = CTP-Critic counterfactual screening (channel_mode ctp, teacher_input_mode real/zero/shuffle) '
         'on LEVIR (C3L-*) and CDD (C3C-*); the new channel shows no absolute gain over the old one '
-        '(best LEVIR 91.1707 vs 91.1732) and the teacher spread stays 0.30pp.\n')
+        '(best LEVIR 91.1707 vs 91.1732) and the teacher spread stays 0.30pp. '
+        'Run4 = PSFB privileged spatial bridge (channel_mode psfb) with a shared-decoder shadow forward; '
+        '11 arms on LEVIR (D4-L-*) and CDD (D4-C-*). LEVIR D3S REAL-ZERO = +0.2972pp (below the +1.00pp '
+        'target) but REAL-SHUFFLE = +0.6214pp, the first pairing-specific effect in this project to clear '
+        'the 0.546pp LEVIR scale; SHUFFLE-ZERO = -0.3242pp, so the bridge is worse than none when fed '
+        'mismatched input. Teacher spread stays 0.1043pp (three teacher-specific CTRLs), so teachers remain '
+        'indistinguishable. All three channels tested so far land within 0.03pp on LEVIR/D3S.\n')
     parts.append(separator('MODELS CODE'))
     code_count = append_models_code(parts)
     result_count = append_excel_metrics(parts)
